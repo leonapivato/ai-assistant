@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     ToolOutcome,
     UnderstandingOmission,
     WholeTextReply,
@@ -162,6 +163,7 @@ async def _hold(
     )
     await subject.memory.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=episode,
             content="",
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=at),

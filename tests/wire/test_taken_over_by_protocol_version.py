@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     UnderstandingOmission,
     WholeTextReply,
 )
@@ -91,6 +92,7 @@ def _episode(taker: str | None) -> EpisodicMemory:
         taken_over_by=taker,
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:act-absorbed",
         content="book Riverside for Friday",
         occurred_at=_AT,

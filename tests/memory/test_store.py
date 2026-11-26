@@ -19,6 +19,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    RecordHome,
 )
 from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.memory._walk import mint_position
@@ -50,7 +51,11 @@ def _semantic(record_id: str, content: str, *, expires_at: datetime | None = Non
 
 def _episode(record_id: str, content: str) -> MemoryRecord:
     return EpisodicMemory(
-        id=record_id, content=content, provenance=_provenance(), occurred_at=_WHEN
+        home=RecordHome.owners(),
+        id=record_id,
+        content=content,
+        provenance=_provenance(),
+        occurred_at=_WHEN,
     )
 
 

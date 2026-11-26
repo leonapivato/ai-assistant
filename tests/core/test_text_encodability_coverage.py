@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     MemorySource,
     Message,
     Provenance,
+    RecordHome,
     Role,
     SemanticMemory,
     Sha256Hex,
@@ -357,6 +358,7 @@ def test_a_memory_participant_with_no_utf8_encoding_is_refused() -> None:
     """Inside a collection, not only at the top level."""
     with pytest.raises(ValidationError, match="UTF-8"):
         EpisodicMemory(
+            home=RecordHome.owners(),
             id="m-1",
             content="fine",
             occurred_at=AT,

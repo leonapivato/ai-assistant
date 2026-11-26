@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StoryMember,
     StoryMemberKind,
     UnderstandingOmission,
@@ -78,6 +79,7 @@ def episode(  # noqa: PLR0913 — one knob per field a case varies
     if placement is None:
         placement = Placement() if frozen else OWNER_ONLY
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id=address(activation_id),
         content="",
         occurred_at=at,

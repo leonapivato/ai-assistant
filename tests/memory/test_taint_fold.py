@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
     QuestionPart,
+    RecordHome,
     UserConfirmation,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
@@ -140,6 +141,7 @@ async def _fold(
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=_EPISODE,
             content="the exchange the memories rest on",
             occurred_at=_WHEN,

@@ -206,6 +206,7 @@ from ai_assistant.core.types import (
     OpenQuestionKind,
     Provenance,
     QuestionPart,
+    RecordHome,
     SupportDirection,
     SupportPart,
     TrackRecordEntry,
@@ -440,6 +441,7 @@ def _episodic(record_id: str, content: str) -> MemoryRecord:
     mints) purely to prove a ``SUPERSEDE`` does not clobber it.
     """
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=content,
         occurred_at=_WHEN,

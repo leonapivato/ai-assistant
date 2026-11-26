@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     ProposedCall,
     Provenance,
+    RecordHome,
     RoundResponse,
     StoryActor,
     StoryChange,
@@ -122,6 +123,7 @@ def _now() -> datetime:
 
 def _episode(episode_id: str) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content="",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_AT),

@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    RecordHome,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.memory._reconciler import ReconcilerOutcome, ReconcilerReport
@@ -166,6 +167,7 @@ async def _store(*episodes: str) -> InMemoryMemoryStore:
     for episode in episodes:
         await store.add(
             EpisodicMemory(
+                home=RecordHome.owners(),
                 id=episode,
                 content=f"the exchange {episode} records",
                 occurred_at=_WHEN,

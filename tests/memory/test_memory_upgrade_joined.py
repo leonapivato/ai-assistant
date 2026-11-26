@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 from memory_continuing_carry import carried, continues_recorded
+from memory_home_carry import homed_row
 from memory_parties_carry import origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError
@@ -170,7 +171,7 @@ async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) ->
         if row[0] == "memory" or rewritten:
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         else:
-            assert after[record_id] == row
+            assert after[record_id] == homed_row(row)
         if row[0] != "memory" and rewritten:
             _holds(json.loads(after[record_id][1]), parties_carried(carried(json.loads(row[1]))))
 

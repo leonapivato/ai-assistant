@@ -32,6 +32,7 @@ from typing import Any, Final
 
 import pytest
 from memory_facts_carry import without_facts
+from memory_home_carry import homed_row, without_home
 from memory_parties_carry import calls_carried
 
 from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
@@ -227,7 +228,7 @@ async def test_every_other_record_reads_back_byte_for_byte(legacy: Path) -> None
         if record_id in _REWRITTEN or calls_carried(row[1]):
             assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         else:
-            assert after[record_id] == row, record_id
+            assert after[record_id] == homed_row(row), record_id
 
 
 async def test_a_rewritten_episode_changes_nothing_but_its_versions(legacy: Path) -> None:
@@ -244,7 +245,7 @@ async def test_a_rewritten_episode_changes_nothing_but_its_versions(legacy: Path
         # ADR-0368 §2's upgrade, last in the chain, adds the three facts, held by its own
         # test: what is held here is everything else.
         new_processing = without_facts(new.pop("processing_record"))
-        assert new == old, record_id
+        assert without_home(new) == old, record_id
         old_versions = old_processing.pop("understanding")
         new_versions = new_processing.pop("understanding")
         # ADR-0356 §13:5, at the chain's end: the record is carried to version 12 with

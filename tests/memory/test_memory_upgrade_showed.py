@@ -28,6 +28,7 @@ from typing import Any, Final
 
 import pytest
 from memory_facts_carry import episode_without_facts
+from memory_home_carry import homed_row
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -176,7 +177,7 @@ async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) ->
     for record_id, row in before.items():
         stored = json.loads(row[1])
         if stored.get("processing_record") is None:
-            assert after[record_id] == row, record_id
+            assert after[record_id] == homed_row(row), record_id
             continue
         assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
         _holds(episode_without_facts(json.loads(after[record_id][1])), stored)

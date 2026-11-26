@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWriterName,
     Provenance,
+    RecordHome,
     SituationLabel,
     Validity,
 )
@@ -400,6 +401,7 @@ async def test_the_instant_column_survives_a_re_embed(tmp_path: Path) -> None:
     store = tmp_path / "memory.db"
     when = _WHEN + timedelta(days=60)
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="captured",
         content="espresso renovation",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),

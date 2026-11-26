@@ -412,6 +412,9 @@ def _checked(proposed: _FramedMemory, context: _Context) -> Framed:
     try:
         memory = Memory(
             id=f"observed:{context.mint()}",
+            # ADR-0383 §4:2: the home of the episode it is written from, never one made
+            # again from that episode's facts.
+            home=view.leaving.home,
             content=content,
             supports=tuple(ordered),
             operations=(
@@ -663,6 +666,7 @@ def _approved(read: ReadPart, context: _Context) -> Framed:
 
     memory = Memory(
         id=f"observed:{context.mint()}",
+        home=context.view.leaving.home,  # ADR-0383 §4:2: the leaving episode's home
         content=read.text,
         supports=(support,),
         operations=(

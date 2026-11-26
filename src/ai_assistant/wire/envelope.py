@@ -2873,7 +2873,16 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     them. A peer at 135 refuses each new field it is sent as extra (ADR-0124 §9:2).
 #:     ``UserMessage`` does not change: a client cannot say what device a message came
 #:     through. The method set does not move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 136
+#: 137: ADR-0124 §9:2 advances the version for ADR-0383 §2's home, the one advance
+#:     ADR-0383 §13 schedules for its milestone, in the change that adds the home to
+#:     types the wire carries: ``EpisodicMemory`` and ``Memory`` gain ``home``, a
+#:     required ``RecordHome`` carrying the closed ``RecordHomeKind`` (§2:2, §5:4), on
+#:     every ``MemoryRecord`` a frame carries, the wire-carried episode included. A
+#:     peer at 136 refuses a ``Memory`` carrying it as extra and sends records without
+#:     it, which this version refuses (ADR-0124 §9:2). The homes the milestone's later
+#:     lanes put on other carried types ride this same advance. The method set does not
+#:     move: no ``Protocol`` gains a member.
+PROTOCOL_VERSION: Final[int] = 137
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -2361,6 +2361,11 @@ class RecordEnvelope(BaseModel):
     ``topics`` at all, and both stay on :class:`MemoryBase`, the envelope an episode and
     a minted record share, with their ratified meanings (ADR-0100, ADR-0213).
 
+    **A record's home is not on this envelope** (ADR-0383 §3, as its 2026-11-26 note
+    reads it). It is a required field of :class:`EpisodicMemory` and :class:`Memory`, the
+    two kinds the store holds (:data:`MemoryRecord`), because a :class:`SemanticMemory`
+    sits on this envelope too and no store holds one: a minted record carries no home.
+
     **``revision`` is the store's concurrency token** (ADR-0219 §1), and it is the
     one field on this envelope no producer authors. A store issues it for the write
     that stored the row; a submitted value is discarded and never persisted, so a
@@ -3366,6 +3371,104 @@ class WorkFor(BaseModel):
     def no_one(cls) -> WorkFor:
         """For no one."""
         return cls(kind=WorkForKind.NO_ONE)
+
+
+class RecordHomeKind(StrEnum):
+    """Which domain a record's home is (ADR-0383 §2:1). Closed, **added to and never renamed**."""
+
+    PERSON = "person"
+    """One person's domain, by their identity's id."""
+    GROUP = "group"
+    """One group's domain, by its id. No group exists yet: expressible, and no write may
+    carry one in this milestone (§2:3)."""
+    SHARED = "shared"
+    """The hub's shared things (ADR-0369 §2:1, §2:8)."""
+
+
+class RecordHome(BaseModel):
+    """A record's home: the domain it landed in (ADR-0383 §2:1, ADR-0369 §2:1).
+
+    A record stores it as both the kind and the identifier (§2:2), so naming another
+    person or a group later changes no stored shape. It is not :class:`WorkFor`: a work
+    for no one lands in the shared things, and a record whose work was for no one may
+    still be the owner's (§5:1). Which homes a write may carry is
+    :func:`home_may_be_written`'s alone (§2:3).
+
+    Set by code and never by a model (§4:6): a work's write takes the home whom the work
+    is for gives (:meth:`of_work`), a producer's the episode's own, and a write that
+    changes a record leaves the home it had.
+
+    Attributes:
+        kind: Whether it is a person's domain, a group's, or the shared things.
+        id: The person's or the group's identity id; ``None`` for the shared things.
+
+    Raises:
+        ValueError: If ``id`` is set for the shared things, or missing for a person or a
+            group.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: RecordHomeKind
+    id: NonBlankEncodableText | None = None
+
+    @model_validator(mode="after")
+    def _an_id_names_whose(self) -> Self:
+        if (self.id is None) != (self.kind is RecordHomeKind.SHARED):
+            msg = "a person's or a group's home names its id, and the shared things name none"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def person(cls, person_id: str) -> RecordHome:
+        """One person's domain, by their identity's id."""
+        return cls(kind=RecordHomeKind.PERSON, id=person_id)
+
+    @classmethod
+    def group(cls, group_id: str) -> RecordHome:
+        """One group's domain, by its id."""
+        return cls(kind=RecordHomeKind.GROUP, id=group_id)
+
+    @classmethod
+    def shared(cls) -> RecordHome:
+        """The hub's shared things."""
+        return cls(kind=RecordHomeKind.SHARED)
+
+    @classmethod
+    def owners(cls) -> RecordHome:
+        """The owner's domain: :data:`OWNER_PERSON_ID`'s (ADR-0383 §5:1)."""
+        return cls.person(OWNER_PERSON_ID)
+
+    @classmethod
+    def of_work(cls, for_whom: WorkFor) -> RecordHome:
+        """The home a work's write takes from whom the work is for (ADR-0383 §4:1).
+
+        A person's domain for a work for a person, a group's for a work for a group, and
+        the shared things for a work for no one (ADR-0369 §2:1). Whether a write may then
+        carry it is :func:`home_may_be_written`'s.
+        """
+        if for_whom.kind is WorkForKind.NO_ONE:
+            return cls.shared()
+        if for_whom.kind is WorkForKind.GROUP:
+            return cls(kind=RecordHomeKind.GROUP, id=for_whom.id)
+        return cls(kind=RecordHomeKind.PERSON, id=for_whom.id)
+
+
+def home_may_be_written(home: RecordHome) -> bool:
+    """Whether a write may carry ``home`` (ADR-0383 §2:3): the one place that decides it.
+
+    In this milestone only the owner's domain and the hub's shared things are homes
+    (§1:2), so every writer refuses any other, a group's included, with nothing written
+    (§4:7).
+
+    Args:
+        home: The home a write would carry.
+
+    Returns:
+        Whether the write may carry it.
+    """
+    if home.kind is RecordHomeKind.SHARED:
+        return True
+    return home.kind is RecordHomeKind.PERSON and home.id == OWNER_PERSON_ID
 
 
 class AuthorityKind(StrEnum):
@@ -6079,6 +6182,14 @@ class EpisodicMemory(MemoryBase):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     kind: Literal["episodic"] = "episodic"
+    home: RecordHome = Field(
+        description=(
+            "The domain the episode landed in (ADR-0383 §2:2, §3), set by code from whom "
+            "its work is for (§4:1) and never changed by a later write (§4:6). Required, "
+            "so no write can leave it out (§5:4). Not whom its work was for: that is "
+            "its processing record's facts."
+        ),
+    )
     occurred_at: UtcInstant
     participants: tuple[EncodableText, ...] = Field(default=())
     outcome: EncodableText | None = Field(
@@ -7690,6 +7801,14 @@ class Memory(RecordEnvelope):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["memory"] = "memory"
+    home: RecordHome = Field(
+        description=(
+            "The domain the memory landed in (ADR-0383 §2:2, §3), set by code: a "
+            "producer's write takes the home of the episode it writes from (§4:2), and "
+            "no later write changes it (§4:6). Required, so no write can leave it out "
+            "(§5:4). Not whom it is about: that is ``subjects`` and ``involved``."
+        ),
+    )
     supports: tuple[MemorySupport, ...] = Field(min_length=1)
     operations: tuple[MemoryOperation, ...] = Field(min_length=1)
     track_record: tuple[TrackRecordEntry, ...] = ()
@@ -8102,7 +8221,7 @@ class SemanticMemory(MemoryBase):
 
     What a search, a forecast, a fetch or a reader mints: ``EXTERNAL``-sourced, with an
     :class:`Attestation`. It keeps exactly the fields it carried before ADR-0328, and no
-    store holds one.
+    store holds one, so it carries no home (ADR-0383 §3).
     """
 
     kind: Literal["semantic"] = "semantic"
@@ -8120,7 +8239,9 @@ SuppliedRecord = EpisodicMemory | Memory | SemanticMemory
 """A record an activation may hold: one the store holds, or one minted as its supply.
 
 ADR-0328 §2:4 keeps the two apart, and ADR-0204 §2's placement is read over both: a
-minted record by its ``EXTERNAL`` provenance, a memory by its band (§12).
+minted record by its ``EXTERNAL`` provenance, a memory by its band (§12). A minted record
+carries no home (ADR-0383 §3), so code taking one of these cannot assume a home; code
+taking a :data:`MemoryRecord` can.
 """
 
 

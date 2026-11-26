@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -98,6 +99,7 @@ def _episode(activation_id: str, *, open_: bool = False) -> EpisodicMemory:
         )
         assert processing.is_open
         return EpisodicMemory(
+            home=RecordHome.owners(),
             id=f"activation:{activation_id}",
             content="",
             occurred_at=_AT,
@@ -108,6 +110,7 @@ def _episode(activation_id: str, *, open_: bool = False) -> EpisodicMemory:
             processing_record=processing,
         )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation_id}",
         content="what happened",
         occurred_at=_AT,
@@ -128,6 +131,7 @@ def _episode(activation_id: str, *, open_: bool = False) -> EpisodicMemory:
 def _bare_episode(record_id: str) -> EpisodicMemory:
     """An episode with no processing record, so no activation a story could hold."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content="captured",
         occurred_at=_AT,

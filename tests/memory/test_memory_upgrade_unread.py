@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from memory_home_carry import homed_row
 
 from ai_assistant.core.errors import IncompatibleStateError
 from ai_assistant.core.types import (
@@ -207,7 +208,7 @@ async def test_the_upgrade_moves_the_label_alone(legacy: Path) -> None:
 
     await _exported(legacy)
 
-    assert _raw_rows(legacy) == before
+    assert _raw_rows(legacy) == {key: homed_row(row) for key, row in before.items()}
     assert _label(legacy) == MEMORY_RECORD_FORMAT
 
 

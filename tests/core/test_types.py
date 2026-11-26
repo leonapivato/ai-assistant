@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     Provenance,
     QuestionPart,
+    RecordHome,
     Role,
     SemanticMemory,
     UserConfirmation,
@@ -636,6 +637,7 @@ def test_naive_occurred_at_is_refused() -> None:
     prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
     with pytest.raises(ValidationError, match="occurred_at must be timezone-aware"):
         EpisodicMemory(
+            home=RecordHome.owners(),
             id="1",
             content="c",
             provenance=prov,
@@ -660,6 +662,7 @@ def test_previously_unvalidated_fields_convert_an_aware_value_to_utc() -> None:
     """The three fields that had no rule now get the whole rule, not half of it."""
     berlin = datetime(2026, 1, 2, 10, tzinfo=ZoneInfo("Europe/Berlin"))  # 09:00 UTC
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id="1",
         content="c",
         provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=berlin),
@@ -700,6 +703,7 @@ def test_discriminated_union_resolves_by_kind(
     adapter: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
     fields: dict[str, object] = {
         "id": "1",
+        "home": {"kind": "shared", "id": None},
         "content": "c",
         "provenance": {"source": "inferred", "confidence": 0.4, "last_updated": _WHEN},
         **payload,
@@ -1103,7 +1107,12 @@ def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
         source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN, evidence=("e1", "e2")
     )
     episodic = EpisodicMemory(
-        id="1", content="c", provenance=prov, occurred_at=_WHEN, participants=("a", "b")
+        home=RecordHome.owners(),
+        id="1",
+        content="c",
+        provenance=prov,
+        occurred_at=_WHEN,
+        participants=("a", "b"),
     )
     proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x", "y"))
 

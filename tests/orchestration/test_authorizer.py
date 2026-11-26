@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     Reversibility,
     RiskLevel,
     StoryActor,
@@ -190,6 +191,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
         digests=tuple(digests),
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content="",
         provenance=Provenance(

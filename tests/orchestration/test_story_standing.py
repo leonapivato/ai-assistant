@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StoryActor,
     StoryEffectState,
     StoryMember,
@@ -118,6 +119,7 @@ def _episode(  # noqa: PLR0913 — one keyword per part of the record a case var
         else Placement()
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=f"activation:{activation_id}",
         content="" if open_ else f"the search text of {activation_id}",
         occurred_at=at,

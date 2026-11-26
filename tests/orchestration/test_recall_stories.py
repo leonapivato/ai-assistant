@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     StoryActor,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
@@ -135,6 +136,7 @@ async def test_only_an_episode_at_its_activations_address_is_looked_up() -> None
     at_address = episode("a-1", text=TEXT)
     elsewhere = episode("a-2", text=TEXT).model_copy(update={"id": "imported-a-2"})
     unrecorded = EpisodicMemory(
+        home=RecordHome.owners(),
         id=address("a-3"),
         content=TEXT,
         occurred_at=AT,

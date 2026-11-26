@@ -2016,6 +2016,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     peer at 135 refuses each as extra (ADR-0124 §9:2). ``UserMessage`` does not change.
     **The method set does not move and stays at 78.**
 
+    **137 is ADR-0383 §2, on wire-carried core types alone.** ``EpisodicMemory`` and
+    ``Memory`` gain ``home``, a required ``RecordHome`` (§2:2, §5:4), on every
+    ``MemoryRecord`` a frame carries. A peer at 136 refuses a memory carrying it as extra
+    and sends records without it, which 137 refuses (ADR-0124 §9:2). **The method set
+    does not move and stays at 78.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -2024,7 +2030,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 136), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 137), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

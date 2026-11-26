@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     Provenance,
     ProvisioningState,
+    RecordHome,
     ReportedExtent,
     Reversibility,
     RiskLevel,
@@ -1411,6 +1412,7 @@ def _episode_record(
 ) -> EpisodicMemory:
     """One captured episode, optionally with a retention deadline already passed."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content=content,
         occurred_at=AT,
@@ -1711,6 +1713,7 @@ async def test_the_batch_shows_gone_where_the_singles_would() -> None:
     )
     await harness.memory.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id="ep-future",
             content="not yet",
             occurred_at=AT,

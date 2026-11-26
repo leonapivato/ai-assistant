@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -351,6 +352,7 @@ def _episode(
         rounds=tuple(rounds),
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content="",
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_AT),

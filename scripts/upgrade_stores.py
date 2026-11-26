@@ -146,6 +146,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     RememberCallPart,
     RequestedCall,
     Reversibility,
@@ -483,6 +484,7 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
     channel = _CHANNEL
     ended = moment.ago(minutes=20)
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="mem-episode-activation",
         content="The user asked when the dentist appointment is.",
         provenance=_provenance(moment),
@@ -544,6 +546,7 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
         )
 
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="mem-episode-joined",
         content="The user booked Riverside for Saturday, for four.",
         provenance=_provenance(moment),
@@ -618,6 +621,7 @@ def _taken_over_episode(moment: Moment) -> EpisodicMemory:
     """
     started, ended = moment.ago(minutes=9, seconds=30), moment.ago(minutes=8, seconds=50)
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="mem-episode-taken-over",
         content="The user asked for Saturday, which the booking took in.",
         provenance=_provenance(moment),
@@ -671,6 +675,7 @@ def _memory_record(
     """A memory resting on ``support``, created citing it (ADR-0328 §3, §5)."""
     return Memory.model_validate(
         {
+            "home": RecordHome.owners(),
             **envelope,
             "id": record_id,
             "content": content,
@@ -764,6 +769,7 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
         )
         await store.add(
             EpisodicMemory(
+                home=RecordHome.owners(),
                 id="mem-episode",
                 content="The user moved to Lisbon.",
                 provenance=_provenance(moment),

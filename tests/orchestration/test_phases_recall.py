@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Provenance,
     RecallOutcome,
+    RecordHome,
     StageOutcome,
     TextChannelPayload,
 )
@@ -278,6 +279,7 @@ async def test_recalls_own_budget_running_out_is_tolerated_and_understanding_run
 async def test_an_event_recalls_under_a_bounded_audience() -> None:
     text = "The thermostat entered eco mode at 18:00."
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode-eco",
         content=text,
         occurred_at=AT,
@@ -402,6 +404,7 @@ async def test_an_episode_the_window_holds_is_not_recalled() -> None:
     keeps the belief below it; the episode renders in the window alone."""
     text = "The thermostat entered eco mode at 18:00."
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="episode-eco",
         content=text,
         occurred_at=AT,

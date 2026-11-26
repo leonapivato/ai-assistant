@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    RecordHome,
     SpeechChannelPayload,
     StageEntry,
     StageOutcome,
@@ -262,6 +263,7 @@ class FakeActivation:
         status, reason = self.status(failure)
         modality = self.trigger.payload.modality
         record = EpisodicMemory(
+            home=RecordHome.owners(),
             id=address,
             content="",
             outcome=self.response,

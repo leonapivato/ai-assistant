@@ -47,6 +47,7 @@ from ai_assistant.orchestration.work_facts import (
     record_joined,
     record_started,
     unrecorded,
+    work_home,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
         RecordedCall,
         RecordedInputMessage,
         RecordedMessageDevices,
+        RecordHome,
         ReplyCapability,
         ScheduledTask,
         StageEntry,
@@ -590,6 +592,16 @@ class ActivationState:
             if one.facts is not None:
                 return one.facts
         return self.started_facts
+
+    @property
+    def home(self) -> RecordHome:
+        """The home every record this work writes takes (ADR-0383 §4:1, §4:4).
+
+        Whom the work is for, as its facts stand (:func:`work_home`): the same for every
+        write it makes, since a join never changes whom a work is for, so the write that
+        freezes its episode leaves the home the open episode was written with (§4:6).
+        """
+        return work_home(self.work_facts)
 
     def _stage_record(
         self, ended_at: datetime, failure: BaseException | None

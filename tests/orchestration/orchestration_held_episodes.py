@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.types import EpisodicMemory, MemorySource, Provenance
+from ai_assistant.core.types import EpisodicMemory, MemorySource, Provenance, RecordHome
 from ai_assistant.testing.memories import AT, HELD_EPISODE
 
 if TYPE_CHECKING:
@@ -36,6 +36,7 @@ def held_episode(
         The episode.
     """
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content=content,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=at),

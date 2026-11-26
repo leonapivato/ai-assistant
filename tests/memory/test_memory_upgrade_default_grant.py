@@ -103,5 +103,7 @@ async def test_the_episode_reads_back_as_the_previous_release_wrote_it(legacy: P
     assert [one.tool.default_grant for one in round_.asked] == [None, None]
     for asked, current in zip(round_.asked, (EMAIL, PIN), strict=True):
         assert asked.tool == current.model_copy(update={"default_grant": None})
-    assert episode.model_dump_json(exclude={"revision"}) == _stored(legacy)[_EPISODE]
+    assert json.loads(episode.model_dump_json(exclude={"revision"})) == json.loads(
+        _stored(legacy)[_EPISODE]
+    )
     assert _label(legacy) == MEMORY_RECORD_FORMAT

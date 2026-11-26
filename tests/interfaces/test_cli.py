@@ -64,6 +64,7 @@ from ai_assistant.core.types import (
     Provenance,
     QuietWindow,
     ReadingCertainty,
+    RecordHome,
     StatementCitation,
     SupportDirection,
     SupportHolder,
@@ -1177,6 +1178,7 @@ def test_an_inference_says_when_its_latest_piece_is_from(output: StringIO) -> No
 def test_an_attested_episode_names_its_source_and_its_clock(output: StringIO) -> None:
     """ADR-0189 §4 on an episode's projection: what reported it, and when, on its clock."""
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:a",
         content="a source's report",
         occurred_at=LEARNED,
@@ -1377,6 +1379,7 @@ async def _holding(content: str) -> FakeMemoryStore:
     """
     store = FakeMemoryStore(now=lambda: AT)
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:held",
         content="The user asked: where is the office?",
         occurred_at=LEARNED,

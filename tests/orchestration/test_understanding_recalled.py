@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     UnderstandingReferent,
     band_of,
     record_band,
@@ -81,6 +82,7 @@ def _fact(
 
 def _episode(episode_id: str, at: datetime = EARLIER) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content="The user asked to book the dentist.",
         occurred_at=at,

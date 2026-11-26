@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     UnderstandingOmission,
     WholeTextReply,
 )
@@ -71,6 +72,7 @@ def conversation_episode(
     """
     channel = conversation_channel(conversation_id)
     record = EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content=content if content is not None else f"the user said something in {episode_id}",
         occurred_at=occurred_at,

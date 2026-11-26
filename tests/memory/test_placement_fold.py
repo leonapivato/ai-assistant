@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     Provenance,
+    RecordHome,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
@@ -178,6 +179,7 @@ async def _seeded(target: Memory) -> InMemoryMemoryStore:
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=_EPISODE,
             content="the exchange the proposal stands on",
             occurred_at=_WHEN,

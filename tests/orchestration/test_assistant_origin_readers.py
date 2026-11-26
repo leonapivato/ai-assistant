@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StageEntry,
     StageOutcome,
     UnderstandingProducer,
@@ -47,6 +48,7 @@ _USERS = "the user just sent"
 def _scheduled_episode() -> EpisodicMemory:
     """A frozen episode of an activation the Task Scheduler started."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id="activation:step",
         content="",
         occurred_at=_AT,

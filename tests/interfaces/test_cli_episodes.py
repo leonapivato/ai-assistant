@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     StageEntry,
     StageOutcome,
     StoryMember,
@@ -78,6 +79,7 @@ def _record(
     elided: int = 0,
 ) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=_CONTENT * 100,
         outcome="Recorded response" if response == "sent" else None,
@@ -885,6 +887,7 @@ def _open_record(record_id: str, **fields: object) -> EpisodicMemory:
     )
     assert processing.is_open
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content="",
         occurred_at=_AT,

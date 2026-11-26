@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedDelivery,
     RecordedInputMessage,
+    RecordHome,
     RememberCallPart,
     RoundMessagePart,
 )
@@ -322,6 +323,7 @@ def test_a_message_call_reads_as_the_words_it_sent_and_as_nothing_where_it_sent_
 def test_an_episode_recorded_without_a_processing_record_holds_only_its_input() -> None:
     """Its content is the exchange as it was recorded; it keeps no rounds or messages apart."""
     bare = EpisodicMemory(
+        home=RecordHome.owners(),
         id="ep-bare",
         content="The user asked: is it in Boston?",
         occurred_at=AT,

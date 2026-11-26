@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
     ReadCoverage,
+    RecordHome,
     ReportedExtent,
     SemanticMemory,
     SourceProposal,
@@ -516,6 +517,7 @@ def test_an_episodic_proposal_is_unconstructable() -> None:
     ``SemanticMemory``: an episode cannot be put into one, so no script can carry it.
     """
     episode = EpisodicMemory(
+        home=RecordHome.owners(),
         id="e-1",
         content="the standup happened",
         occurred_at=_WHEN,

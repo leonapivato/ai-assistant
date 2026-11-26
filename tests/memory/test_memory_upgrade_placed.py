@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 import sqlite_vec
 from memory_continuing_carry import carried, continues_recorded
+from memory_home_carry import homed_row
 from memory_parties_carry import holds, origin_recorded, parties_carried
 
 from ai_assistant.core.errors import IncompatibleStateError
@@ -220,7 +221,7 @@ async def test_every_record_reads_back_with_nothing_dropped(legacy: Path) -> Non
             )
             continue
         if kind != "memory":
-            assert after[record_id] == (kind, data, revision, band)
+            assert after[record_id] == homed_row((kind, data, revision, band))
             continue
         stored: dict[str, Any] = json.loads(data)
         upgraded = exported[record_id]

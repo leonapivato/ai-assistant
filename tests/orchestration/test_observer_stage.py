@@ -64,6 +64,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanningLabel,
     Provenance,
+    RecordHome,
     ReplyFailure,
     Role,
     SupportHolder,
@@ -244,6 +245,7 @@ async def test_an_episode_with_no_processing_record_is_skipped() -> None:
     """Its origin cannot be set from a record it does not carry (ADR-0328 §4:2)."""
     harness = Harness()
     bare = EpisodicMemory(
+        home=RecordHome.owners(),
         id="harness:bare",
         content="the user said they like tea",
         occurred_at=AT - timedelta(minutes=9),
@@ -1051,6 +1053,7 @@ async def test_an_episode_with_nothing_to_read_is_skipped_after_a_failed_read() 
     """§16:4, §16:7: a read outage first, then the skip rule, never a crash."""
     harness = Harness()
     bare = EpisodicMemory(
+        home=RecordHome.owners(),
         id="harness:bare",
         content="the user said they like tea",
         occurred_at=AT - timedelta(minutes=9),

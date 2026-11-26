@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     Provenance,
+    RecordHome,
     SupportDirection,
     SupportHolder,
     SupportOrigin,
@@ -124,9 +125,10 @@ def memory_from_legacy(
         ``expires_at`` unchanged (§16:2), its wording (§16:3), one legacy support
         carrying the record whole (§16:4, §16:5), a create by ``migration`` at the
         record's ``last_updated``, and an end at its validity end where that is at or
-        before ``now`` (§16:6). It is written in ADR-0345's shape at once (§13): its
-        ``about_person`` becomes ``subjects``, its topics become labels added by
-        ``migration`` (§10:2), and the legacy support's holder is unknown.
+        before ``now`` (§16:6), in the owner's domain (ADR-0383 §5:1). It is written in
+        ADR-0345's shape at once (§13): its ``about_person`` becomes ``subjects``, its
+        topics become labels added by ``migration`` (§10:2), and the legacy support's
+        holder is unknown.
 
     Raises:
         ValueError: If the record is not one §16 upgrades, or does not decode.
@@ -167,6 +169,8 @@ def memory_from_legacy(
             "subjects": None if about is None else (about,),
             "labels": topic_labels(record.get("topics"), now=now),
             "id": record["id"],
+            # ADR-0383 §5:1: every record from before the upgrade is the owner's.
+            "home": RecordHome.owners(),
             "content": legacy_wording(record),
             "placement": _placement(record),
             "supports": (support,),

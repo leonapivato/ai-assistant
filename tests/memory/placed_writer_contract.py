@@ -75,6 +75,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     SituationLabel,
     StatementPart,
     SupportDirection,
@@ -146,6 +147,7 @@ def _address(name: str) -> str:
 def _episode(name: str, text: str = "") -> EpisodicMemory:
     """An episode the store holds, so a support pointing into it resolves (ADR-0328 §4:7)."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=_address(name),
         content=text or f"what was said in {name}",
         occurred_at=_SAID_AT,
@@ -167,6 +169,7 @@ def _forwarded(name: str, account: int) -> EpisodicMemory:
         )
     )
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=_address(name),
         content="forwarded",
         occurred_at=_SAID_AT,
@@ -201,6 +204,7 @@ def _scheduled(name: str) -> EpisodicMemory:
     schedule = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
     parties, _ = declared_input(schedule, carries_outside_mark=True)
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=_address(name),
         content="checked the listing",
         occurred_at=_SAID_AT,
@@ -246,6 +250,7 @@ def _on_line(name: str, *texts: str, by: SupportHolder | None = None) -> Episodi
         parties = (by,)
         messages = tuple(one.model_copy(update={"party": by}) for one in messages)
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=_address(name),
         content=" ".join(said),
         occurred_at=_SAID_AT,

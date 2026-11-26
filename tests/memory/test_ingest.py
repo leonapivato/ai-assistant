@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    RecordHome,
     Validity,
     band_of,
     part_episode,
@@ -99,6 +100,7 @@ async def _plant_episodes(store: MemoryStore, *episode_ids: str) -> None:
     for episode_id in dict.fromkeys((_EPISODE, *episode_ids)):
         await store.add(
             EpisodicMemory(
+                home=RecordHome.owners(),
                 id=episode_id,
                 content=f"the exchange {episode_id} records",
                 occurred_at=_WHEN,

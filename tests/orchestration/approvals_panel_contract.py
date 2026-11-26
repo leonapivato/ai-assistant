@@ -61,6 +61,7 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -239,6 +240,7 @@ async def hold_asking_episode(
     )
     await memory.add(
         EpisodicMemory(
+            home=RecordHome.owners(),
             id=f"activation:{activation}",
             content="",
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=at),

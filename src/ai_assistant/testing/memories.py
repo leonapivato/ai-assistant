@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     PinPart,
     QuestionPart,
     ReadingCertainty,
+    RecordHome,
     RememberCallPart,
     RoundMessagePart,
     SupportDirection,
@@ -489,8 +490,9 @@ def memory(
         content: Its wording.
         *supports: What it rests on; one :func:`said_support` where none is given.
         **envelope: Any other field of the memory (``validity``, ``placement``,
-            ``topics``, ``about_person``, ``expires_at``, ``operations``...). An
-            ``operations`` given here replaces the single create.
+            ``topics``, ``about_person``, ``expires_at``, ``operations``, ``home``...).
+            An ``operations`` given here replaces the single create; the home is the
+            owner's domain unless one is given.
 
     Returns:
         The memory.
@@ -505,6 +507,7 @@ def memory(
     )
     fields: dict[str, object] = {
         "id": record_id,
+        "home": RecordHome.owners(),
         "content": content,
         "supports": held,
         "operations": (create,),

@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
     QuestionPart,
+    RecordHome,
     UserConfirmation,
     band_of,
 )
@@ -110,6 +111,7 @@ def _episodic(
 ) -> MemoryRecord:
     """An episode: a record that something happened, whose warrant is that it did."""
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=record_id,
         content=record_id if content is None else content,
         occurred_at=_WHEN,

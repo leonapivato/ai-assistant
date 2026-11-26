@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    RecordHome,
     SpokenAudioFormat,
     SpokenReply,
     UnderstandingOmission,
@@ -164,6 +165,7 @@ def _episode(
     placement: Placement | None = None,
 ) -> EpisodicMemory:
     return EpisodicMemory(
+        home=RecordHome.owners(),
         id=episode_id,
         content=content,
         occurred_at=AT,
