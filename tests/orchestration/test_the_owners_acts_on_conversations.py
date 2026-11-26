@@ -424,6 +424,38 @@ async def test_an_act_naming_a_conversation_of_another_home_answers_as_for_one_n
     assert _counted(logs) == []
 
 
+@_MODES
+async def test_the_change_stream_sends_no_later_state_of_a_conversation_the_sight_does_not_see(
+    mode: SightMode, worlds: list[_World]
+) -> None:
+    """§4:1, §4:2: past its opening, a state is sent only of a conversation the owner's
+    sight sees, read through the store bound for that read. Forgetting another person's
+    conversation forgets nothing and moves its count, which names it to the stream; no
+    state of it is sent, while the owner's, forgotten beside it, is."""
+    world = await _opened(mode)
+    await _seed_the_others(world, ((_SAM, _SAMS),))
+    worlds.append(world)
+    engine = world.engine
+
+    later: list[str] = []
+    with capture_logs() as logs:
+        async with closing_stream(engine.follow_chat(after=0)) as chunks, asyncio.timeout(5):
+            forgotten = False
+            async for chunk in chunks:
+                assert isinstance(chunk, ChatStreamChunk)
+                if chunk.change is not None and not forgotten:
+                    forgotten = True
+                    assert await engine.forget_conversation(_SAM) is False
+                    assert await engine.forget_conversation(_OWN) is True
+                if forgotten and chunk.state is not None:
+                    later.append(chunk.state.conversation_id)
+                    if chunk.state.conversation_id == _OWN:
+                        break
+
+    assert later == [_OWN]
+    assert _counted(logs) == []
+
+
 # --- writing writes what it writes today (§3:1, §5) ------------------------------------
 
 
