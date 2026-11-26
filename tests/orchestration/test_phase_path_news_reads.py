@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from story_support import owners_work
 from test_activation_state import _admitted
 from test_planning import _episode
 
@@ -30,7 +31,7 @@ from ai_assistant.testing.parties import OWNER_SENDER, OWNERS_FACTS
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from ai_assistant.core.types import EpisodicMemory, Memory
+    from ai_assistant.core.types import EpisodicMemory, Memory, Sight
 
 pytestmark = pytest.mark.anyio
 
@@ -179,15 +180,19 @@ async def test_a_pin_past_the_slots_budget_is_not_shown_and_still_reached() -> N
 
 @dataclass
 class _StoryReads:
-    """The story reads: which stories were read whole, each held with no summary."""
+    """The story reads: which stories were read whole, each held with no summary, and by
+    which sight."""
 
     read: list[str] = field(default_factory=list)
+    sights: list[Sight] = field(default_factory=list)
 
-    async def states(self, story_ids: Sequence[str]) -> dict[str, None]:
+    async def states(self, story_ids: Sequence[str], *, sight: Sight) -> dict[str, None]:
         self.read.extend(story_ids)
+        self.sights.append(sight)
         return dict.fromkeys(story_ids)
 
-    async def members(self, story_ids: Sequence[str]) -> dict[str, int]:
+    async def members(self, story_ids: Sequence[str], *, sight: Sight) -> dict[str, int]:
+        self.sights.append(sight)
         return dict.fromkeys(story_ids, 1)
 
 
@@ -201,15 +206,18 @@ async def test_a_matter_a_short_view_shows_is_read_whole_beside_the_briefing() -
         stories=(SimpleNamespace(story_id="story:own", inherited=()),), cited=(view,)
     )
 
-    reread = await path._shown_now(
-        cast("Any", SimpleNamespace(work=None, supplied=_Supplied())),
-        cast("Any", object()),
-        cast("Any", SimpleNamespace(supply=_SUPPLY)),
-        cast("Any", stories),
-    )
+    with owners_work() as work:
+        reread = await path._shown_now(
+            cast("Any", SimpleNamespace(work=None, supplied=_Supplied())),
+            cast("Any", object()),
+            cast("Any", SimpleNamespace(supply=_SUPPLY)),
+            cast("Any", stories),
+        )
 
     assert reads.read == ["story:cited"]
     assert reread.matters == {"story:cited": None}
+    # Read by the sight the work carries (ADR-0383 §7:7).
+    assert reads.sights == [work.sight, work.sight]
 
 
 async def test_an_ended_work_whose_episode_is_not_frozen_is_read_again() -> None:

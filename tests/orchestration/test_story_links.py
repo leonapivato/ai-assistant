@@ -24,6 +24,7 @@ from story_support import (
     memory_of,
     story,
 )
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
@@ -59,7 +60,7 @@ def _stories() -> FakeStoryStore:
 
 def _stage(stories: StoryStore, memory: FakeMemoryStore | None = None) -> StoryLinksStage:
     """The stage over ``stories``, and a memory store holding no episode unless given."""
-    return StoryLinksStage(stories=stories, memory=memory or FakeMemoryStore(now=lambda: AT))
+    return StoryLinksStage(stores=bound_stores(memory or FakeMemoryStore(now=lambda: AT), stories))
 
 
 async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
@@ -78,8 +79,7 @@ def _candidates(  # noqa: PLR0913 — the two stores and §6's four numbers
     episodes: int = 2,
 ) -> StoryCandidates:
     return StoryCandidates(
-        stories=stories,
-        memory=memory,
+        stores=bound_stores(memory, stories),
         limit=limit,
         lines=lines,
         notes=notes,
@@ -98,7 +98,9 @@ async def test_the_window_s_stories_are_candidates_in_the_window_s_order_each_on
     window = (episode("a-1"), episode("a-2"))
     memory = await memory_of(*window)
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     # a-1's stories come first, newest first as the store returns them, then a-2's
     # that are not already candidates.
@@ -113,7 +115,9 @@ async def test_the_candidates_stop_at_the_limit() -> None:
     window = tuple(episode(f"a-{index}") for index in range(4))
     memory = await memory_of(*window)
 
-    candidates = await _candidates(stories, memory, limit=2).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory, limit=2).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert len(candidates.views) == 2
 
@@ -126,7 +130,7 @@ async def test_recall_s_stories_join_after_the_window_s_and_are_not_repeated() -
     memory = await memory_of(*window)
 
     candidates = await _candidates(stories, memory).assemble(
-        window, audience=BOUNDED, recalled=(windowed, recalled)
+        window, sight=OWNERS_SIGHT, audience=BOUNDED, recalled=(windowed, recalled)
     )
 
     assert [view.story_id for view in candidates.views] == [windowed, recalled]
@@ -143,7 +147,11 @@ async def test_the_place_window_s_stories_come_first_then_the_window_s_then_reca
     memory = await memory_of(*window)
 
     candidates = await _candidates(stories, memory).assemble(
-        window, audience=BOUNDED, recalled=(recalled, older), place=("p-2", "p-1")
+        window,
+        sight=OWNERS_SIGHT,
+        audience=BOUNDED,
+        recalled=(recalled, older),
+        place=("p-2", "p-1"),
     )
 
     assert [view.story_id for view in candidates.views] == [newer, older, windowed, recalled]
@@ -158,7 +166,7 @@ async def test_the_place_window_s_stories_stop_at_the_limit_too() -> None:
     memory = await memory_of(*window)
 
     candidates = await _candidates(stories, memory, limit=2).assemble(
-        window, audience=BOUNDED, place=("p-1", "p-2")
+        window, sight=OWNERS_SIGHT, audience=BOUNDED, place=("p-1", "p-2")
     )
 
     assert [view.story_id for view in candidates.views] == [first, second]
@@ -170,7 +178,9 @@ async def test_a_running_activation_s_stories_are_candidates() -> None:
     running = await _story(stories, activation("p-1"))
     memory = await memory_of(episode("p-1", open_=True))
 
-    candidates = await _candidates(stories, memory).assemble((), audience=BOUNDED, place=("p-1",))
+    candidates = await _candidates(stories, memory).assemble(
+        (), sight=OWNERS_SIGHT, audience=BOUNDED, place=("p-1",)
+    )
 
     assert [view.story_id for view in candidates.views] == [running]
 
@@ -181,7 +191,9 @@ async def test_an_episode_recording_no_activation_belongs_to_no_story() -> None:
     legacy = episode("a-1").model_copy(update={"processing_record": None})
     memory = await memory_of(legacy)
 
-    candidates = await _candidates(stories, memory).assemble((legacy,), audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(
+        (legacy,), sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert candidates.views == ()
 
@@ -221,7 +233,9 @@ async def test_a_short_view_is_the_first_lines_the_newest_notes_and_the_latest_e
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2"), episode("a-3"))
 
-    candidates = await _candidates(stories, memory, lines=2).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory, lines=2).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (view,) = candidates.views
     assert [line.text for line in view.lines] == [
@@ -246,6 +260,7 @@ async def test_short_views_reads_the_named_stories_in_order_once_each() -> None:
 
     views = await _candidates(stories, memory).short_views(
         [car, "story:gone", trip, car],
+        sight=OWNERS_SIGHT,
         audience=BOUNDED,
         visibility=SummaryVisibility(owner_records=True),
     )
@@ -268,7 +283,10 @@ async def test_short_views_follow_the_visibility_they_are_given() -> None:
     memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
 
     (view,) = await _candidates(stories, memory).short_views(
-        [trip], audience=UNBOUNDED, visibility=SummaryVisibility(owner_records=False)
+        [trip],
+        sight=OWNERS_SIGHT,
+        audience=UNBOUNDED,
+        visibility=SummaryVisibility(owner_records=False),
     )
 
     assert (view.lines, view.notes, view.withheld, view.notes_withheld) == ((), (), True, True)
@@ -291,7 +309,9 @@ async def test_the_latest_episodes_are_the_latest_by_occurrence_not_by_link_orde
     )
     window = (episode("r-2", at=AT - timedelta(hours=1)),)
 
-    (view,) = (await _candidates(stories, memory).assemble(window, audience=BOUNDED)).views
+    (view,) = (
+        await _candidates(stories, memory).assemble(window, sight=OWNERS_SIGHT, audience=BOUNDED)
+    ).views
 
     assert [record.id for record in view.episodes] == [address("r-2"), address("r-1")]
 
@@ -319,7 +339,9 @@ async def test_a_member_relinked_while_the_members_are_read_is_shown_once() -> N
     window = (records[0],)
     memory = await memory_of(*records)
 
-    (view,) = (await _candidates(stories, memory).assemble(window, audience=BOUNDED)).views
+    (view,) = (
+        await _candidates(stories, memory).assemble(window, sight=OWNERS_SIGHT, audience=BOUNDED)
+    ).views
 
     assert [record.id for record in view.episodes] == [address("a-000"), address("a-001")]
 
@@ -331,7 +353,9 @@ async def test_a_story_with_no_summary_shows_its_pending_notes_and_episodes() ->
     window = (episode("a-1"),)
     memory = await memory_of(*window)
 
-    (view,) = (await _candidates(stories, memory).assemble(window, audience=BOUNDED)).views
+    (view,) = (
+        await _candidates(stories, memory).assemble(window, sight=OWNERS_SIGHT, audience=BOUNDED)
+    ).views
 
     assert view.lines == ()
     assert [note.text for note in view.notes] == ["check the dog policy"]
@@ -353,7 +377,9 @@ async def test_an_open_episode_is_not_shown_and_a_note_fetches_nothing() -> None
         episode("a-1"), episode("a-2", open_=True), episode("a-3", at=AT - timedelta(days=1))
     )
 
-    candidates = await _candidates(stories, memory, episodes=1).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory, episodes=1).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (view,) = candidates.views
     assert [note.text for note in view.notes] == ["during an older one", "during the open one"]
@@ -374,8 +400,12 @@ async def test_an_unbounded_audience_is_shown_no_note_and_no_summary_and_is_told
     window = (episode("a-1"),)
     memory = await memory_of(episode("a-1"), episode("a-2", placement=OWNER_ONLY))
 
-    unbounded = await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)
-    bounded = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    unbounded = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=UNBOUNDED
+    )
+    bounded = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (seen,) = unbounded.views
     assert (seen.lines, seen.outside, seen.notes, seen.withheld) == ((), False, (), True)
@@ -405,7 +435,9 @@ async def test_a_story_with_no_note_is_withheld_its_notes_alike(
     window = (episode("a-1"),)
     memory = await memory_of(*window)
 
-    (seen,) = (await _candidates(stories, memory).assemble(window, audience=audience)).views
+    (seen,) = (
+        await _candidates(stories, memory).assemble(window, sight=OWNERS_SIGHT, audience=audience)
+    ).views
 
     assert seen.notes == ()
     assert seen.notes_withheld is withheld
@@ -442,7 +474,9 @@ async def test_an_unbounded_audience_is_told_a_summary_was_withheld_whatever_is_
     window = (episode("a-1"),)
     memory = await memory_of(*window)
 
-    (seen,) = (await _candidates(stories, memory).assemble(window, audience=UNBOUNDED)).views
+    (seen,) = (
+        await _candidates(stories, memory).assemble(window, sight=OWNERS_SIGHT, audience=UNBOUNDED)
+    ).views
 
     assert (seen.lines, seen.outside, seen.withheld) == ((), False, True)
 
@@ -465,7 +499,9 @@ async def test_a_summary_is_shown_whatever_a_version_took_in(held: str) -> None:
     }[held]
     memory = await memory_of(episode("a-1"), *behind_it)
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (seen,) = candidates.views
     assert [line.text for line in seen.lines] == ["A camping trip to Riverside."]
@@ -492,7 +528,9 @@ async def test_a_summary_whose_episode_is_forgotten_between_the_reads_is_still_s
 
     memory.get_many = forgetting  # type: ignore[method-assign]  # an interleaving point
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (seen,) = candidates.views
     assert (seen.withheld, seen.episodes) == (False, ())
@@ -514,7 +552,9 @@ async def test_a_summary_recorded_as_having_read_another_s_is_shown_and_reads_no
     memory = await memory_of(episode("a-1"))
     unreadable = failing(stories, "summary_versions")
 
-    candidates = await _candidates(unreadable, memory, limit=1).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(unreadable, memory, limit=1).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     (seen,) = candidates.views
     assert seen.story_id == trip
@@ -535,7 +575,9 @@ async def test_a_story_store_error_leaves_no_candidates_and_says_so(read: str) -
     memory = await memory_of(*window)
     stories = failing(stories, read)
 
-    candidates = await _candidates(stories, memory).assemble(window, audience=BOUNDED)
+    candidates = await _candidates(stories, memory).assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert (candidates.views, candidates.unreadable) == ((), True)
 
@@ -546,8 +588,7 @@ async def test_a_story_store_error_leaves_no_candidates_and_says_so(read: str) -
 def test_the_short_view_s_numbers_are_bounded(limit: int, notes: int, episodes: int) -> None:
     with pytest.raises(ValueError, match="ADR-0300"):
         StoryCandidates(
-            stories=_stories(),
-            memory=FakeMemoryStore(now=lambda: AT),
+            stores=bound_stores(FakeMemoryStore(now=lambda: AT), _stories()),
             limit=limit,
             lines=3,
             notes=notes,
@@ -575,7 +616,7 @@ async def test_a_story_link_links_the_activation_with_the_understanding_actor() 
     trip = await _story(stories, activation("a-1"))
 
     decision = await _stage(stories).record(
-        [story(trip)], home=RecordHome.owners(), activation_id="now"
+        [story(trip)], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert (decision.outcome, decision.linked, decision.started) == (
@@ -603,7 +644,7 @@ async def test_a_link_to_a_merged_story_follows_it_to_where_it_went() -> None:
     await stories.merge(middle, last, actor=StoryActor.OWNER)
 
     decision = await _stage(stories).record(
-        [story(absorbed)], home=RecordHome.owners(), activation_id="now"
+        [story(absorbed)], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.linked == (last,)
@@ -617,7 +658,7 @@ async def test_every_merge_is_followed_however_long_the_chain() -> None:
         await stories.merge(absorbed, into, actor=StoryActor.OWNER)
 
     decision = await _stage(stories).record(
-        [story(chain[0])], home=RecordHome.owners(), activation_id="now"
+        [story(chain[0])], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert (decision.linked, decision.refused) == ((chain[-1],), ())
@@ -640,8 +681,12 @@ async def test_two_activations_linking_one_unstoried_episode_start_one_story() -
     stage = _stage(stories)
 
     first, second = await asyncio.gather(
-        stage.record([activation("e-1")], home=RecordHome.owners(), activation_id="a"),
-        stage.record([activation("e-1")], home=RecordHome.owners(), activation_id="b"),
+        stage.record(
+            [activation("e-1")], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="a"
+        ),
+        stage.record(
+            [activation("e-1")], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="b"
+        ),
     )
 
     assert first.started is not None
@@ -659,7 +704,10 @@ async def test_an_earlier_episode_s_stories_take_the_activation() -> None:
     second = await _story(stories, activation("a-1"), activation("a-2"))
 
     decision = await _stage(stories).record(
-        [activation("a-1"), story(first)], home=RecordHome.owners(), activation_id="now"
+        [activation("a-1"), story(first)],
+        sight=OWNERS_SIGHT,
+        home=RecordHome.owners(),
+        activation_id="now",
     )
 
     assert decision.linked == (second, first)
@@ -672,6 +720,7 @@ async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation(
 
     decision = await _stage(stories).record(
         [activation("a-1"), story(trip), activation("a-2")],
+        sight=OWNERS_SIGHT,
         home=RecordHome.owners(),
         activation_id="now",
     )
@@ -695,7 +744,9 @@ async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHo
     """ADR-0383 §4:1, ADR-0386 §2:2: the home whom the activation's work is for gives."""
     stories = _stories()
 
-    decision = await _stage(stories).record([activation("a-1")], home=home, activation_id="now")
+    decision = await _stage(stories).record(
+        [activation("a-1")], sight=OWNERS_SIGHT, home=home, activation_id="now"
+    )
 
     assert decision.started is not None
     header = await stories.header(decision.started)
@@ -706,7 +757,9 @@ async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHo
 async def test_no_links_write_nothing() -> None:
     stories = _stories()
 
-    decision = await _stage(stories).record((), home=RecordHome.owners(), activation_id="now")
+    decision = await _stage(stories).record(
+        (), sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
+    )
 
     assert (decision.outcome, decision.linked, decision.started) == (StageOutcome.DONE, (), None)
     assert (await stories.stories()).stories == ()
@@ -717,7 +770,10 @@ async def test_a_refused_link_is_recorded_and_the_rest_goes_on() -> None:
     trip = await _story(stories, activation("a-1"))
 
     decision = await _stage(stories).record(
-        [story("story:missing"), story(trip)], home=RecordHome.owners(), activation_id="now"
+        [story("story:missing"), story(trip)],
+        sight=OWNERS_SIGHT,
+        home=RecordHome.owners(),
+        activation_id="now",
     )
 
     assert decision.outcome is StageOutcome.DONE
@@ -734,7 +790,7 @@ async def test_a_story_store_error_is_a_failed_decision_carrying_it() -> None:
     stories = failing(stories, "link")
 
     decision = await _stage(stories).record(
-        [story(created.story_id)], home=RecordHome.owners(), activation_id="now"
+        [story(created.story_id)], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.outcome is StageOutcome.FAILED
@@ -753,6 +809,7 @@ async def test_a_link_into_a_story_of_another_home_is_refused_and_the_rest_goes_
 
     decision = await _stage(stories).record(
         [story(owners), activation("a-1"), story(shared.story_id)],
+        sight=OWNERS_SIGHT,
         home=RecordHome.shared(),
         activation_id="now",
     )
@@ -774,7 +831,7 @@ async def test_a_link_to_a_merged_story_is_judged_where_it_went() -> None:
     await stories.merge(absorbed, into, actor=StoryActor.OWNER)
 
     decision = await _stage(stories).record(
-        [story(absorbed)], home=RecordHome.shared(), activation_id="now"
+        [story(absorbed)], sight=OWNERS_SIGHT, home=RecordHome.shared(), activation_id="now"
     )
 
     assert [(one.reason, one.story_id) for one in decision.refused] == [
@@ -795,6 +852,7 @@ async def test_a_start_holding_an_earlier_episode_of_another_home_starts_nothing
 
     decision = await _stage(stories, memory).record(
         [activation("a-1"), activation("s-1"), story(trip)],
+        sight=OWNERS_SIGHT,
         home=RecordHome.owners(),
         activation_id="now",
     )
@@ -813,7 +871,10 @@ async def test_a_start_of_earlier_episodes_of_its_own_home_starts_as_before() ->
     memory = await memory_of(episode("a-1"))
 
     decision = await _stage(stories, memory).record(
-        [activation("a-1"), activation("a-gone")], home=RecordHome.owners(), activation_id="now"
+        [activation("a-1"), activation("a-gone")],
+        sight=OWNERS_SIGHT,
+        home=RecordHome.owners(),
+        activation_id="now",
     )
 
     assert decision.started is not None
@@ -828,7 +889,7 @@ async def test_a_memory_store_error_is_a_failed_decision_carrying_it() -> None:
     stories = _stories()
 
     decision = await _stage(stories, FakeMemoryStore(now=lambda: AT, failure="down")).record(
-        [activation("a-1")], home=RecordHome.owners(), activation_id="now"
+        [activation("a-1")], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.outcome is StageOutcome.FAILED

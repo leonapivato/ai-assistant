@@ -14,8 +14,16 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from story_support import activation, address, episode, failing, memory_of, story
+from story_support import (
+    activation,
+    address,
+    episode,
+    failing,
+    memory_of,
+    story,
+)
 from test_engine import AT
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.errors import PlanningError, StoryStoreError
 from ai_assistant.core.types import (
@@ -39,14 +47,13 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, Unbound
 from ai_assistant.orchestration.lookups import OLDER_NOTES_PAGE
 from ai_assistant.orchestration.phase_path import StoryReads
 from ai_assistant.orchestration.story_links import StoryCandidates
-from ai_assistant.testing import FakePlanStore, FakeStoryStore
+from ai_assistant.testing import FakeMemoryStore, FakePlanStore, FakeStoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import EpisodicMemory
     from ai_assistant.orchestration.planning import PlanningStories, PlanningStory
-    from ai_assistant.testing import FakeMemoryStore
 
 _BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 _UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -67,13 +74,10 @@ class _World:
         self.stories = FakeStoryStore(now=lambda: AT, new_id=lambda: f"{next(ids)}")
         self.memory = memory
         self.plans = FakePlanStore(now=lambda: AT)
+        stores = bound_stores(memory, self.stories, plans=self.plans)
         self.reads = StoryReads(
-            stories=self.stories,
-            memory=memory,
-            plans=self.plans,
-            short_views=StoryCandidates(
-                stories=self.stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
-            ),
+            stores=stores,
+            short_views=StoryCandidates(stores=stores, limit=5, lines=3, notes=2, episodes=2),
             episodes=episodes,
         )
 
@@ -117,6 +121,7 @@ class _World:
     ) -> PlanningStories:
         return await self.reads.read(
             _NOW,
+            sight=OWNERS_SIGHT,
             understanding=understanding,
             audience=_BOUNDED if owner_records else _UNBOUNDED,
             owner_records=owner_records,
@@ -352,7 +357,7 @@ async def test_a_full_view_shows_the_newest_page_of_older_notes() -> None:
     world = await _world(episode("a"))
     trip = await _with_older(world, OLDER_NOTES_PAGE + 2, pending=1)
 
-    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
+    view = await world.reads.view(trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True)
 
     assert view is not None
     assert [note.text for note in view.notes] == ["newer 1"]
@@ -367,8 +372,12 @@ async def test_a_full_view_pages_past_the_first_page_of_older_notes() -> None:
     world = await _world(episode("a"))
     trip = await _with_older(world, OLDER_NOTES_PAGE + 2)
 
-    second = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=2)
-    beyond = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=3)
+    second = await world.reads.view(
+        trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True, older_page=2
+    )
+    beyond = await world.reads.view(
+        trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True, older_page=3
+    )
 
     assert second is not None
     assert second.older is not None
@@ -384,7 +393,9 @@ async def test_a_full_view_reads_every_page_the_store_holds() -> None:
     trip = await _with_older(world, MAX_STORY_PAGE + 1)
 
     last = (MAX_STORY_PAGE + OLDER_NOTES_PAGE) // OLDER_NOTES_PAGE
-    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True, older_page=last)
+    view = await world.reads.view(
+        trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True, older_page=last
+    )
 
     assert view is not None
     assert view.older is not None
@@ -416,7 +427,7 @@ async def test_a_note_written_while_a_full_view_reads_is_never_taken_for_an_olde
     trip = await world.story("a")
     _written_while_read(world, trip, times=1)
 
-    view = await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
+    view = await world.reads.view(trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True)
 
     assert view is not None
     assert [note.text for note in view.notes] == ["written meanwhile"]
@@ -429,7 +440,7 @@ async def test_a_story_written_every_time_its_notes_are_read_cannot_be_read() ->
     _written_while_read(world, trip, times=5)
 
     with pytest.raises(StoryStoreError, match="every time they were read"):
-        await world.reads.view(trip, audience=_BOUNDED, owner_records=True)
+        await world.reads.view(trip, sight=OWNERS_SIGHT, audience=_BOUNDED, owner_records=True)
 
 
 async def test_where_no_note_may_be_shown_a_full_view_reads_no_older_note() -> None:
@@ -437,7 +448,9 @@ async def test_where_no_note_may_be_shown_a_full_view_reads_no_older_note() -> N
     world = await _world(episode("a"))
     trip = await _with_older(world, 2, pending=1)
 
-    view = await world.reads.view(trip, audience=_UNBOUNDED, owner_records=False)
+    view = await world.reads.view(
+        trip, sight=OWNERS_SIGHT, audience=_UNBOUNDED, owner_records=False
+    )
 
     assert view is not None
     assert view.notes_withheld
@@ -460,9 +473,7 @@ def test_a_story_view_shows_at_least_one_episode() -> None:
     stories = FakeStoryStore()
     with pytest.raises(ValueError, match="at least one episode"):
         StoryReads(
-            stories=stories,
-            memory=None,  # type: ignore[arg-type]  # never reached
-            plans=FakePlanStore(),
+            stores=bound_stores(FakeMemoryStore(), stories, plans=FakePlanStore()),
             short_views=None,  # type: ignore[arg-type]  # never reached
             episodes=0,
         )

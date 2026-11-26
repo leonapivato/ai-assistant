@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
+import pytest
 from phases_support import chat_turn, phase_path, phases_harness
+from story_support import owners_work
 from test_authorizer import _ACTIVATION, _episode
 from test_planning import _episode as _past_episode
 from test_planning import _recorded_trigger
@@ -61,6 +63,8 @@ from ai_assistant.testing import (
 from ai_assistant.testing.parties import UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from test_engine import Harness
 
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
@@ -186,6 +190,14 @@ def _grounds(sink: FakeDiagnosticSink) -> list[list[dict[str, Any]]]:
     ]
 
 
+@pytest.fixture
+def _owners_work() -> Iterator[None]:
+    """A work of the owner's is running, as every pass the phases run is one's: its story
+    reads are read by that work's sight (ADR-0383 §7:7)."""
+    with owners_work():
+        yield
+
+
 async def test_a_record_fetched_twice_is_named_once_by_its_id() -> None:
     """#2895: what understanding fetched and what recall found, both one episode.
 
@@ -222,6 +234,7 @@ async def test_a_record_fetched_twice_is_named_once_by_its_id() -> None:
     ]
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_round() -> None:
     """#2895: a story view's marked summary, marked note and outside episode, named.
 
@@ -296,6 +309,7 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
     ]
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
     """#2922: a story's full view, read by a story read, names what it rests on.
 

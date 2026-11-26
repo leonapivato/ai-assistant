@@ -30,7 +30,7 @@ from channel_receiver_contract import event_input
 from exchange_support import labels as shown_labels
 from exchange_support import reported, says, section, shown_text, tag, tags, text_call
 from sight_support import sight_of
-from story_support import episode
+from story_support import episode, owners_work
 from structlog.testing import capture_logs
 from structured_support import structured
 from test_activation_state import _admitted
@@ -138,7 +138,10 @@ from ai_assistant.core.types import (
     parties_are_outside,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
-from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.activation_state import (
+    CURRENT_ACTIVATION,
+    ActivationScope,
+)
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
@@ -213,7 +216,7 @@ from ai_assistant.testing.parties import OWNERS_WORDS, UNIDENTIFIED_WORDS
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from ai_assistant.core.protocols import (
         ActionPolicy,
@@ -404,8 +407,13 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     """
 
     def build(harness: Harness) -> PhasePath:
+        # ADR-0383 §9:1: the one holder, as the composition root builds it.
+        holder = bound_stores(
+            harness.memory, stories, conversations=harness.conversation_store, plans=harness.plans
+        )
         calls = (
             StoryCalls(
+                stores=holder,
                 stories=stories,
                 memory=harness.memory,
                 tidy_up=None if tidy_up is None else tidy_up(harness),
@@ -417,18 +425,10 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             None
             if stories is None
             else StoryReads(
-                stories=stories,
-                memory=harness.memory,
-                plans=harness.plans,
-                short_views=StoryCandidates(
-                    stories=stories, memory=harness.memory, limit=5, lines=3, notes=2, episodes=2
-                ),
+                stores=holder,
+                short_views=StoryCandidates(stores=holder, limit=5, lines=3, notes=2, episodes=2),
                 episodes=3,
             )
-        )
-        # ADR-0383 §9:1: the one holder, as the composition root builds it.
-        holder = bound_stores(
-            harness.memory, stories, conversations=harness.conversation_store, plans=harness.plans
         )
         episode_reads = (
             EpisodeLookUpReads(
@@ -1812,6 +1812,14 @@ class _Given:
     story_candidates: Candidates | None = None
 
 
+@pytest.fixture
+def _owners_work() -> Iterator[None]:
+    """A work of the owner's is running, as every pass the phases run is one's: its story
+    reads are read by that work's sight (ADR-0383 §7:7)."""
+    with owners_work():
+        yield
+
+
 def _begun(path: PhasePath) -> PhaseWorking:
     return path.begin(
         activation_id=_ACTIVATION,
@@ -2541,9 +2549,9 @@ async def _story_harness(
         memory=memory,
         stories=stories,
         story_candidates=StoryCandidates(
-            stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
+            stores=bound_stores(memory, stories), limit=5, lines=3, notes=2, episodes=2
         ),
-        story_links=StoryLinksStage(stories=stories, memory=memory),
+        story_links=StoryLinksStage(stores=bound_stores(memory, stories)),
         phases=_phases(completer, stories=stories),
     )
     effect = ActivationEffect(
@@ -2604,6 +2612,7 @@ async def test_an_activation_in_a_story_is_shown_its_story_and_labels_what_it_sa
     assert not record.rounds[0].notes_marked
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     """ADR-0303 §3:6, ADR-0306 §4:5-§4:6: a marked summary is outside content read.
 
@@ -2648,6 +2657,7 @@ async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     assert decided.read_outside_content
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read() -> None:
     """ADR-0303 §3:1-§3:2: an episode whose input came from outside, shown in a story view.
 
@@ -2693,6 +2703,7 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
     assert working.latest.planned.round.notes_marked
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_later_round_is_handed_the_story_views_its_work_was_first_shown() -> None:
     """ADR-0356 §5:2, §5:6: a later round is handed the first round's briefing, byte for byte.
 
@@ -2813,6 +2824,7 @@ def _look_and_remember() -> FakeToolCallingCompleter:
     )
 
 
+@pytest.mark.usefixtures("_owners_work")
 @pytest.mark.parametrize(
     ("note", "verdict"),
     [
@@ -3077,6 +3089,7 @@ async def test_a_tidy_up_brings_no_round_and_nothing_waits_for_it() -> None:
     assert {one.capability for one in effects if one.capability} == {"start_matter"}
 
 
+@pytest.mark.usefixtures("_owners_work")
 @pytest.mark.parametrize(
     ("name", "brings"),
     [
@@ -3113,6 +3126,7 @@ async def test_a_refused_tidy_up_still_brings_no_round(name: str, *, brings: boo
     assert working.latest_calls_beyond_tidy_ups is brings
 
 
+@pytest.mark.usefixtures("_owners_work")
 @pytest.mark.parametrize(
     "parties",
     [pytest.param(OWNERS_WORDS, id="owners"), pytest.param(UNIDENTIFIED_WORDS, id="outside")],
@@ -3294,6 +3308,7 @@ async def _stages_over(
     return working, {one.name: one for one in path.stages()}
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_the_hub_refuses_a_move_naming_a_note_not_held_before_authorizing() -> None:
     """ADR-0307 §5:3-§5:4: refused whole with the reason, as the stories stand then."""
     completer = FakeToolCallingCompleter.scripted(
@@ -3331,6 +3346,7 @@ async def test_the_hub_refuses_a_move_naming_a_note_not_held_before_authorizing(
     assert len(holders) == 1
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_on_an_owner_only_pass_a_move_naming_notes_is_refused_and_members_move() -> None:
     """ADR-0307 §6:5: a move or a split carries members only there; refused, not stripped."""
     completer = FakeToolCallingCompleter.scripted(
@@ -3679,6 +3695,7 @@ async def _page_read(
     return working, given, stages, completer, trip
 
 
+@pytest.mark.usefixtures("_owners_work")
 @pytest.mark.parametrize("outside", [True, False], ids=["marked", "unmarked"])
 async def test_a_storys_full_view_is_read_and_its_marks_counted(outside: bool) -> None:
     """ADR-0300 §10:6, ADR-0307 §6:6: a story read's view, its marked line read.
@@ -3710,6 +3727,7 @@ async def test_a_storys_full_view_is_read_and_its_marks_counted(outside: bool) -
     assert decided.read_outside_content is outside
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_storys_full_view_follows_the_owner_only_placement() -> None:
     """ADR-0307 §6:4: on a pass that may not show the owner's records, no note is shown."""
     working, given, stages, completer, _ = await _page_read(

@@ -13,7 +13,7 @@ from itertools import count
 
 import pytest
 from test_engine import AT, Harness
-from understanding_support import understanding_stage
+from understanding_support import bound_stores, understanding_stage
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
@@ -32,7 +32,7 @@ def test_the_two_story_pieces_are_wired_together_and_beside_understanding() -> N
     memory = FakeMemoryStore(now=lambda: AT)
     stories = _stories()
     candidates = StoryCandidates(
-        stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
+        stores=bound_stores(memory, stories), limit=5, lines=3, notes=2, episodes=2
     )
     with pytest.raises(ConfigurationError, match="together"):
         Harness(
@@ -46,7 +46,7 @@ def test_the_two_story_pieces_are_wired_together_and_beside_understanding() -> N
             memory=memory,
             stories=stories,
             story_candidates=candidates,
-            story_links=StoryLinksStage(stories=stories, memory=memory),
+            story_links=StoryLinksStage(stores=bound_stores(memory, stories)),
         )
 
 

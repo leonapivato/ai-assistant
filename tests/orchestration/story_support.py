@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NoReturn
 
@@ -11,11 +12,13 @@ from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     ChannelContext,
     ChannelIdentity,
+    ChannelInput,
     EpisodeProcessingRecord,
     EpisodicMemory,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    NewConversation,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -27,15 +30,24 @@ from ai_assistant.core.types import (
     RecordHome,
     StoryMember,
     StoryMemberKind,
+    TextChannelPayload,
     UnderstandingOmission,
     WholeTextReply,
+)
+from ai_assistant.orchestration.activation_state import (
+    CURRENT_ACTIVATION,
+    ActivationScope,
+    admit_channel,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.parties import OWNER_SENDER
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
+    from collections.abc import Iterator
+
+    from ai_assistant.core.types import ActivationUnderstanding, InputSender, MemoryRecord
+    from ai_assistant.orchestration.activation_state import ActivationState
 
 AT: Final = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 CONVERSATION: Final = ChannelIdentity(channel_type="conversation", instance_id="c-1")
@@ -43,6 +55,38 @@ EVENTS: Final = ChannelIdentity(channel_type="informational_event", instance_id=
 
 #: The reach that keeps a record for the owner alone (ADR-0217 §1).
 OWNER_ONLY: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
+
+
+#: The activation of the work :func:`work_of` and :func:`owners_work` run.
+WORK_ACTIVATION: Final = "60f3c223-6a54-4b06-aab8-4fc397c3d43b"
+
+
+@contextlib.contextmanager
+def work_of(*senders: InputSender) -> Iterator[ActivationState]:
+    """A work runs here: a hub chat message from ``senders``, admitted as the chat's reader
+    admits one, so it carries the sight its facts and senders give (ADR-0383 §6:4).
+
+    Every pass the phases run, and every call acting runs for one, runs inside its work,
+    and a story read reads by that work's sight (ADR-0383 §7:7); a suite driving a stage
+    on its own enters one so.
+    """
+    state = admit_channel(
+        ChannelInput(target=NewConversation(), payload=TextChannelPayload(text="hello")),
+        WholeTextReply(),
+        clock=lambda: AT,
+        id_factory=lambda: WORK_ACTIVATION,
+        senders=senders,
+    )
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        yield state
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+
+def owners_work() -> contextlib.AbstractContextManager[ActivationState]:
+    """A work of the owner's runs here: their hub chat message, from their device."""
+    return work_of(OWNER_SENDER)
 
 
 def activation(activation_id: str) -> StoryMember:

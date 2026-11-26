@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     Reversibility,
+    Sight,
     ToolCall,
     ToolDefinition,
     ToolFailureKind,
@@ -93,10 +94,18 @@ class _Views:
         self.raises = raises
         self.reads: list[tuple[str, TurnSupply, bool]] = []
         self.pages: list[int] = []
+        self.sights: list[Sight] = []
 
     async def view(
-        self, story_id: str, *, audience: TurnSupply, owner_records: bool, older_page: int = 1
+        self,
+        story_id: str,
+        *,
+        sight: Sight,
+        audience: TurnSupply,
+        owner_records: bool,
+        older_page: int = 1,
     ) -> PlanningStory | None:
+        self.sights.append(sight)
         self.reads.append((story_id, audience, owner_records))
         self.pages.append(older_page)
         if self.raises is not None:
@@ -341,6 +350,8 @@ async def test_a_story_read_reads_the_view_under_the_scope_and_holds_it_for_the_
     assert answer.output == {"story": "story-1"}
     assert views.reads == [("story-1", UNBOUNDED, False)]
     assert views.pages == [1]
+    # Read by the sight the scope carries, the work's (ADR-0383 §7:7).
+    assert views.sights == [owners_sight()]
     assert scope.views == {"d7": view}
 
 
