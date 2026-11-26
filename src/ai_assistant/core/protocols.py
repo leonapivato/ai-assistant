@@ -241,6 +241,7 @@ if TYPE_CHECKING:
         SearchOutcome,
         SecretName,
         SecretValue,
+        Sight,
         SourceGrant,
         SourceListing,
         SourceListingEntry,
@@ -2102,6 +2103,68 @@ class MemoryStore(Protocol):
         Returns:
             The number of expired records removed. Read methods already hide
             expired records, so this changes reclaimed space, not visibility.
+        """
+        ...
+
+    def bound(self, sight: Sight) -> MemoryStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **Withholding** (§7:2 to §7:5, §8). Save a write's own checks, a bound store
+        answers every member as this store would answer it if it held only the records
+        ``sight`` sees, decided by :meth:`~ai_assistant.core.types.Sight.withheld` and by
+        nothing else (§7:3): the same records in the same order, the same totals, counts
+        and pages and whether more follow, and, for a named record it does not hold, what
+        a record never written gets — :meth:`get`'s ``None``, an id left out of
+        :meth:`get_many` and :meth:`get_history`, :meth:`episode_chunk`'s ``None``. The
+        sight binds **before** the store ranks, orders, limits, pages or counts: a page
+        of ``limit`` is ``limit`` records it holds, :meth:`channel_episodes`' ``total``
+        counts only episodes it holds, :meth:`search`'s candidates and ``capped`` are of
+        those alone, and a walk examines only records it holds and waits at the oldest
+        open episode it holds. It also holds the episode of the sight's activation,
+        ``activation:<activation_id>`` (§7:4), and no record with no home (§5:3).
+
+        Its writes carry their own homes (§4), and a write that would change a record it
+        does not hold is refused as a write to one it does not hold (§7:5), writing
+        nothing: an ``IF_UNCHANGED`` element with ``MemoryStoreStaleError``, an
+        ``UPSERT`` element or :meth:`add` with ``MemoryStoreConflictError`` (the id is
+        taken; mint another), and :meth:`delete` answers ``False``. :meth:`clear` and
+        :meth:`purge_expired` remove, and count, only records it holds. A write's own
+        checks are decided over every record the store holds, as the unbound store
+        decides them (§7:11): an ``INSERT_IF_ABSENT`` collides with any stored id, the
+        cross-kind, episode and home guards judge the stored row, and an ``IF_UNCHANGED``
+        compares a revision only of a record it holds.
+
+        **What counts writes answers alike bound or not** (§8:5): an episode's number,
+        a record's revision and a walk's position are issued by the one store-wide
+        counter each, and a bound store issues and reads the same values, gaps where
+        records it does not hold sit included. Walk positions are the store's, and
+        :meth:`clear` through a bound store discards them as unbound.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and every read member writes one
+        event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes: how many
+        records the read gave back, how many ``sight`` would have withheld by reason,
+        and the reader's kind and bounds. It carries no record's text and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
         """
         ...
 

@@ -3572,6 +3572,484 @@ class WorkFacts(BaseModel):
         return self
 
 
+# --- the sight a read is bounded by (ADR-0383 §6, §7:3, §11) ---------------------------
+#
+# A **sight** says what a read through a bound store may give back: a non-empty set of
+# bounds, every one of which has to see a record's home, and, for a work's, that work's
+# activation, whose own records it also holds (§6:1, §7:4). Code makes it from recorded
+# facts alone, through the constructors on :class:`Sight` (§6:10), and no model makes,
+# chooses or changes one. No level, bar or sureness enters it (§6:9), and no value of it
+# sees every record (§6:3). Each store decides what a sight sees by
+# :meth:`Sight.withheld` and by nothing else (§7:3).
+
+
+class SightBoundKind(StrEnum):
+    """What one bound of a sight is (ADR-0383 §6:2). Closed, **added to and never renamed**."""
+
+    PERSON = "person"
+    """A person, by their identity's id: their own domain, and for the owner the hub's
+    shared things too (ADR-0369 §6:1)."""
+    NO_ONE = "no_one"
+    """No one: the hub's shared things (ADR-0369 §10:1)."""
+    ANYONE = "anyone"
+    """Anyone: what anyone may see (ADR-0369 §10:4), which is nothing while no line can
+    open a record."""
+    GROUP = "group"
+    """A group, by its id: nothing in this milestone (ADR-0369 §1:5)."""
+    DOMAIN = "domain"
+    """One domain: that domain alone."""
+
+
+class SightBound(BaseModel):
+    """One bound of a sight (ADR-0383 §6:2).
+
+    A bound sees a set of homes, and in this milestone that set is finite and named:
+    :attr:`homes_seen`. A sight sees a home only where every one of its bounds does.
+
+    Attributes:
+        kind: Which kind of bound it is.
+        id: The person's or the group's identity id, for a person or a group bound;
+            ``None`` otherwise.
+        domain: The one domain a domain bound sees; ``None`` otherwise.
+
+    Raises:
+        ValueError: If ``id`` or ``domain`` is set for a kind that names none, or missing
+            for the kind that names it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: SightBoundKind
+    id: NonBlankEncodableText | None = None
+    domain: RecordHome | None = None
+
+    @model_validator(mode="after")
+    def _the_fields_fit_the_kind(self) -> Self:
+        names_whom = self.kind in {SightBoundKind.PERSON, SightBoundKind.GROUP}
+        names_domain = self.kind is SightBoundKind.DOMAIN
+        if (self.id is not None) != names_whom or (self.domain is not None) != names_domain:
+            msg = "a person or group bound names its id, a domain bound its domain, and no other"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def person(cls, person_id: str) -> SightBound:
+        """A person bound, by their identity's id."""
+        return cls(kind=SightBoundKind.PERSON, id=person_id)
+
+    @classmethod
+    def no_one(cls) -> SightBound:
+        """The bound of a work for no one."""
+        return cls(kind=SightBoundKind.NO_ONE)
+
+    @classmethod
+    def anyone(cls) -> SightBound:
+        """The bound of an unidentified sender, or of an episode with no facts."""
+        return cls(kind=SightBoundKind.ANYONE)
+
+    @classmethod
+    def group(cls, group_id: str) -> SightBound:
+        """A group bound, by the group's id."""
+        return cls(kind=SightBoundKind.GROUP, id=group_id)
+
+    @classmethod
+    def one_domain(cls, domain: RecordHome) -> SightBound:
+        """A bound that sees ``domain`` alone."""
+        return cls(kind=SightBoundKind.DOMAIN, domain=domain)
+
+    @property
+    def homes_seen(self) -> frozenset[RecordHome]:
+        """The homes this bound sees, in this milestone (ADR-0383 §6:2).
+
+        A person their own domain, and the owner also the hub's shared things; no one
+        the shared things; anyone and a group nothing; one domain that domain.
+        """
+        match self.kind:
+            case SightBoundKind.PERSON:
+                own = RecordHome.person(str(self.id))
+                if self.id == OWNER_PERSON_ID:
+                    return frozenset({own, RecordHome.shared()})
+                return frozenset({own})
+            case SightBoundKind.NO_ONE:
+                return frozenset({RecordHome.shared()})
+            case SightBoundKind.ANYONE | SightBoundKind.GROUP:
+                return frozenset()
+            case SightBoundKind.DOMAIN:
+                return frozenset() if self.domain is None else frozenset({self.domain})
+            case _:  # pragma: no cover — the enumeration is closed
+                assert_never(self.kind)
+
+    @property
+    def sees_nothing(self) -> bool:
+        """Whether this bound sees no home at all, as anyone and a group do (§11:2)."""
+        return not self.homes_seen
+
+    @property
+    def code(self) -> str:
+        """The bound's code for ADR-0383 §11:2's event, carrying no identifier.
+
+        Its kind, and for a person whether they are the owner.
+        """
+        if self.kind is SightBoundKind.PERSON:
+            return "person_owner" if self.id == OWNER_PERSON_ID else "person_other"
+        return self.kind.value
+
+    def order_key(self) -> tuple[str, str, str, str]:
+        """The key a sight's bounds are held in order by."""
+        domain = self.domain
+        return (
+            self.kind.value,
+            self.id or "",
+            "" if domain is None else domain.kind.value,
+            "" if domain is None else domain.id or "",
+        )
+
+
+class SightReader(StrEnum):
+    """Who reads by a sight (ADR-0383 §11:2's reader kind). Closed, **added to, never renamed**.
+
+    Set by the constructor that made the sight, and read by nothing that decides what a
+    sight sees: it is the code §11:1's event carries.
+    """
+
+    WORK = "work"
+    """A work's stages, the tidy-up a work asks for included (§6:4 to §6:6, §6:8)."""
+    PRODUCER = "producer"
+    """A producer reading for a work that has ended (§6:7)."""
+    RUN = "run"
+    """An ADR-0384 run tending one domain (§6:8)."""
+
+
+class WithheldReason(StrEnum):
+    """Why a sight does not see a record (ADR-0383 §11:2). Closed, **added to, never renamed**."""
+
+    OTHER_HOME = "other_home"
+    """Its home is one a bound of the sight does not see."""
+    NO_HOME = "no_home"
+    """It has no home, or one the store cannot read: the home of no one (§5:3)."""
+    SEES_NOTHING = "sees_nothing"
+    """Every bound that does not see its home is one that sees nothing, as anyone and a
+    group do."""
+
+
+class SightMode(StrEnum):
+    """Whether a bound store withholds or only counts (ADR-0383 §7:10, §11:1).
+
+    A value a store's construction fixes, set by the composition root, and read from no
+    ``Settings`` field and no running act. Closed, **added to and never renamed**.
+    """
+
+    COUNT = "count"
+    """Every read answers as the unbound store does, and writes one count event (§11:1)."""
+    WITHHOLD = "withhold"
+    """Every member answers as the store would if it held only what the sight sees (§7:2)."""
+
+
+class SightCount(BaseModel):
+    """One read's count, in numbers and codes alone (ADR-0383 §11:1 to §11:3).
+
+    What a read through a bound store in the counting mode gave back, and how many of
+    those records the sight would have withheld, by reason; and who read, by codes. It
+    carries no record's text, no person's words and no identifier, and goes to the hub's
+    log alone.
+
+    Attributes:
+        store: The store's code, such as ``memory``.
+        member: The read member, by its name.
+        given: How many records the read gave back.
+        other_home: How many of them the sight would have withheld for another home.
+        no_home: How many for no home (§5:3).
+        sees_nothing: How many for a bound that sees nothing.
+        reader: The reader's kind.
+        bounds: The sight's bounds, by :attr:`SightBound.code`, in the sight's order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    store: NonBlankEncodableText
+    member: NonBlankEncodableText
+    given: int = Field(strict=True, ge=0)
+    other_home: int = Field(strict=True, ge=0)
+    no_home: int = Field(strict=True, ge=0)
+    sees_nothing: int = Field(strict=True, ge=0)
+    reader: SightReader
+    bounds: tuple[NonBlankEncodableText, ...]
+
+
+class Sight(BaseModel):
+    """What a read through a bound store may give back (ADR-0383 §6).
+
+    **A non-empty set of bounds** (§6:1, §6:3), held once each and in one order, and,
+    for a work's sight, **that work's activation**: a record is seen where every bound
+    sees its home (:attr:`homes_seen`), or, for a work's, where the store records it as
+    made by that activation (§7:4). A record with no home, or one the store cannot read,
+    is seen by no sight (§5:3). Nothing in it is a level, a bar or a sureness (§6:9), and
+    no value of it sees every record.
+
+    Made by the constructors below, from recorded facts alone (§6:10): :meth:`of_work`,
+    :meth:`of_producer`, :meth:`of_run` and :meth:`of_tidy_up`. ``reader`` records which
+    of them made it, for §11:1's event, and decides nothing a sight sees.
+
+    Attributes:
+        reader: Who reads by it.
+        bounds: Its bounds, distinct and in :meth:`SightBound.order_key`'s order.
+        activation: The work's activation, for a work's sight; ``None`` for any other.
+
+    Raises:
+        ValueError: If it has no bound, or a work's sight names no activation, or any
+            other's names one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reader: SightReader
+    bounds: tuple[SightBound, ...] = Field(min_length=1)
+    activation: Identifier | None = None
+
+    @field_validator("bounds", mode="after")
+    @classmethod
+    def _held_once_in_order(cls, bounds: tuple[SightBound, ...]) -> tuple[SightBound, ...]:
+        return tuple(sorted(set(bounds), key=SightBound.order_key))
+
+    @model_validator(mode="after")
+    def _a_work_names_its_activation(self) -> Self:
+        if (self.activation is None) == (self.reader is SightReader.WORK):
+            msg = "a work's sight names its activation, and no other sight names one"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def homes_seen(self) -> frozenset[RecordHome]:
+        """The homes every bound sees: the homes this sight sees (§6:1).
+
+        Finite in this milestone, so a store may express the sight in its own query as
+        "the home is one of these, or the record is the activation's own", which answers
+        as :meth:`withheld` does on every record (§7:3).
+        """
+        seen: frozenset[RecordHome] | None = None
+        for bound in self.bounds:
+            seen = bound.homes_seen if seen is None else seen & bound.homes_seen
+        return seen or frozenset()
+
+    def withheld(
+        self, home: RecordHome | None, *, made_by: str | None = None
+    ) -> WithheldReason | None:
+        """Why this sight does not see a record, or ``None`` where it sees it (§7:3).
+
+        **The one predicate** a store decides by. A record is seen where the store
+        records it as made by this sight's activation (§7:4), or where its home is one
+        every bound sees (§6:1). Otherwise it is withheld: for no home where ``home`` is
+        ``None`` (§5:3), for a bound that sees nothing where every bound not seeing the
+        home is one (anyone, a group), and for another home where any other bound does
+        not see it (§11:2).
+
+        Args:
+            home: The record's home, or ``None`` where it has none or the store cannot
+                read the one it has.
+            made_by: The activation the store records as having made the record, such
+                as an episode's own; ``None`` where it records none.
+
+        Returns:
+            ``None`` where the sight sees the record, and otherwise why it does not.
+        """
+        if made_by is not None and made_by == self.activation:
+            return None
+        if home is None:
+            return WithheldReason.NO_HOME
+        failing = [bound for bound in self.bounds if home not in bound.homes_seen]
+        if not failing:
+            return None
+        if all(bound.sees_nothing for bound in failing):
+            return WithheldReason.SEES_NOTHING
+        return WithheldReason.OTHER_HOME
+
+    def sees(self, home: RecordHome | None, *, made_by: str | None = None) -> bool:
+        """Whether this sight sees a record: :meth:`withheld` gives no reason."""
+        return self.withheld(home, made_by=made_by) is None
+
+    def meet(self, other: Sight) -> Sight:
+        """The sight that sees what both see: every bound of both (§6:6).
+
+        It never sees more than either, so a work's sight remade as the meet of the one
+        it had and the one its facts now give never widens.
+
+        Raises:
+            ValueError: If the two are not of one reader and one activation.
+        """
+        if other.reader is not self.reader or other.activation != self.activation:
+            msg = "only two sights of one reader and one activation meet"
+            raise ValueError(msg)
+        return Sight(
+            reader=self.reader,
+            bounds=(*self.bounds, *other.bounds),
+            activation=self.activation,
+        )
+
+    @property
+    def codes(self) -> tuple[str, ...]:
+        """Its bounds' codes, in its order (§11:2)."""
+        return tuple(bound.code for bound in self.bounds)
+
+    def count(
+        self,
+        *,
+        store: str,
+        member: str,
+        given: Iterable[tuple[RecordHome | None, str | None]],
+    ) -> SightCount:
+        """Count what a read gave back and what this sight would have withheld (§11:1).
+
+        Args:
+            store: The store's code.
+            member: The read member's name.
+            given: Each record the read gave back, as its home (``None`` where it has
+                none or the store cannot read it) and the activation the store records
+                as having made it.
+
+        Returns:
+            The count, in numbers and codes alone.
+        """
+        reasons = [self.withheld(home, made_by=made_by) for home, made_by in given]
+        return SightCount(
+            store=store,
+            member=member,
+            given=len(reasons),
+            other_home=reasons.count(WithheldReason.OTHER_HOME),
+            no_home=reasons.count(WithheldReason.NO_HOME),
+            sees_nothing=reasons.count(WithheldReason.SEES_NOTHING),
+            reader=self.reader,
+            bounds=self.codes,
+        )
+
+    @staticmethod
+    def _of_facts(facts: WorkFacts, senders: Iterable[InputSender]) -> tuple[SightBound, ...]:
+        """The bounds §6:4 and §6:5 give a work's facts and its inputs' senders."""
+        for_whom = facts.for_whom
+        if for_whom.kind is WorkForKind.NO_ONE:
+            bounds = [SightBound.no_one()]
+        elif for_whom.kind is WorkForKind.GROUP:
+            bounds = [SightBound.group(str(for_whom.id))]
+        else:
+            bounds = [SightBound.person(str(for_whom.id))]
+        for sender in senders:
+            # An identified sender's person bound; an anyone bound for any sender who is
+            # not, a link lowered to none included (§6:4, ADR-0369 §10:2).
+            if sender.identified and sender.person is not None:
+                bounds.append(SightBound.person(sender.person))
+            else:
+                bounds.append(SightBound.anyone())
+        authority = facts.authority
+        if authority.kind is AuthorityKind.IN_ADVANCE:
+            bounds.extend(SightBound.person(person) for person in authority.persons)
+        return tuple(bounds)
+
+    @classmethod
+    def of_work(
+        cls,
+        facts: WorkFacts,
+        senders: Iterable[InputSender],
+        *,
+        activation: str,
+        had: Sight | None = None,
+    ) -> Sight:
+        """A work's sight, from its recorded facts and its inputs' senders (§6:4 to §6:6).
+
+        A bound for whom it is for (a person, a group or no one); a person bound for each
+        identified sender and an anyone bound where any sender is unidentified; and a
+        person bound for the person whose authority it carries in advance. A work with no
+        sender has the first and the last alone (§6:5). Made again each time its facts
+        are recorded again, as the meet of the sight it ``had`` and the one these give,
+        so it never widens within a work (§6:6).
+
+        Args:
+            facts: The work's three facts as they now stand (ADR-0368 §2:4).
+            senders: Every sender of every input it holds, as its inputs record them
+                (:attr:`RecordedChannelTrigger.senders`, :attr:`JoinedInput.senders`), and
+                never only those whose authority it carries.
+            activation: The work's activation.
+            had: The sight it had, where its facts were recorded before.
+
+        Returns:
+            The work's sight.
+
+        Raises:
+            ValueError: If ``had`` is not this work's: another reader or activation.
+        """
+        made = cls(
+            reader=SightReader.WORK, bounds=cls._of_facts(facts, senders), activation=activation
+        )
+        return made if had is None else had.meet(made)
+
+    @classmethod
+    def of_producer(cls, facts: WorkFacts | None, senders: Iterable[InputSender]) -> Sight:
+        """A producer's sight, reading for a work that has ended (§6:7).
+
+        The sight :meth:`of_work` makes from the facts and senders the work's episode
+        records, with no activation, so nothing is its own. Where the episode records no
+        facts, an anyone bound alone, which sees nothing.
+
+        Args:
+            facts: The facts the episode records as they stand, or ``None`` where it
+                records none.
+            senders: The senders its inputs record.
+
+        Returns:
+            The producer's sight.
+        """
+        if facts is None:
+            return cls(reader=SightReader.PRODUCER, bounds=(SightBound.anyone(),))
+        return cls(reader=SightReader.PRODUCER, bounds=cls._of_facts(facts, senders))
+
+    @classmethod
+    def of_run(cls, domain: RecordHome) -> Sight:
+        """An ADR-0384 run's sight: the domain it tends, and that domain's person (§6:8).
+
+        A one-domain bound for the domain, and a person bound for its person: the owner
+        for the hub's shared things (ADR-0384 §3:1, §3:2).
+
+        Args:
+            domain: The domain the run tends.
+
+        Returns:
+            The run's sight.
+
+        Raises:
+            ValueError: If ``domain`` is a group's: a run tends a person's domain or the
+                shared things, and a group's has no person whose sight bounds it.
+        """
+        if domain.kind is RecordHomeKind.GROUP:
+            msg = "a run tends a person's domain or the hub's shared things"
+            raise ValueError(msg)
+        person = OWNER_PERSON_ID if domain.kind is RecordHomeKind.SHARED else str(domain.id)
+        return cls(
+            reader=SightReader.RUN,
+            bounds=(SightBound.one_domain(domain), SightBound.person(person)),
+        )
+
+    @classmethod
+    def of_tidy_up(cls, work: Sight, story: RecordHome) -> Sight:
+        """The sight of a tidy-up a work asks for (§6:8, ADR-0384 §6:1).
+
+        That work's sight with a one-domain bound for the story's domain: it reads as
+        every read of the work does, and of that only records of the story's domain.
+
+        Args:
+            work: The work's sight.
+            story: The home of the story it tidies.
+
+        Returns:
+            The tidy-up's sight, the work's activation kept.
+
+        Raises:
+            ValueError: If ``work`` is not a work's sight.
+        """
+        if work.reader is not SightReader.WORK:
+            msg = "a tidy-up is asked for by a work, and reads by that work's sight"
+            raise ValueError(msg)
+        return cls(
+            reader=SightReader.WORK,
+            bounds=(*work.bounds, SightBound.one_domain(story)),
+            activation=work.activation,
+        )
+
+
 #: The bound a medium's own identifier is read below, where a recorded input carries
 #: one: the 64-bit signed ceiling, which bounds it without guessing at any medium's own.
 _MEDIUM_ID_CEILING: Final = 2**63

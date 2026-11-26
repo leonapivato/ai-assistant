@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Provenance,
     RecordHome,
+    SightMode,
 )
 from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.memory._walk import mint_position
@@ -319,7 +320,7 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
         """Park a number above this store's own issued-key counter."""
         assert isinstance(store, InMemoryMemoryStore)
-        store._walks[walk] = mint_position(walk, store._sequence + _BEYOND_MARGIN).token
+        store._walks[walk] = mint_position(walk, store._issued.keys + _BEYOND_MARGIN).token
 
     @pytest.fixture
     def store(self) -> MemoryStore:
@@ -328,3 +329,7 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: InMemoryMemoryStore(now=now)
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], MemoryStore]:
+        return lambda mode: InMemoryMemoryStore(now=_fixed_now, sight_mode=mode)

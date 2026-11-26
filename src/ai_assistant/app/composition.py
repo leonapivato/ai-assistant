@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     DestinationProtocol,
     LabelBounds,
     SecretScope,
+    SightMode,
     ThingKey,
     ThingKind,
 )
@@ -1380,8 +1381,17 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # and not this comment's — it documents each key against the decision that
         # set it, several of them structurally zero since ADR-0128 §1 and kept
         # rather than dropped by §3. This is the wiring point that arms the emitter.
+        #
+        # **A store bound to a sight only counts, in this build** (ADR-0383 §7:10,
+        # §11:1): every read through a binding answers as the unbound store does and
+        # logs what the sight would have withheld. The mode is fixed here, read from no
+        # setting, and the build that switches the filter on changes this one value.
+        # Nothing binds the store yet: the stages read it unbound as they always have.
         memory = SqliteMemoryStore(
-            path=directory / "memory.db", embedder=embedder, traces_sink=traces
+            path=directory / "memory.db",
+            embedder=embedder,
+            traces_sink=traces,
+            sight_mode=SightMode.COUNT,
         )
         opened.append(memory.close)
         # **ADR-0289 §1's story store, on its own file.** It reads no other store and

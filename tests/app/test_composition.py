@@ -70,6 +70,7 @@ from ai_assistant.core.types import (
     RecordHome,
     Reversibility,
     RiskLevel,
+    SightMode,
     StoryMember,
     StoryMemberKind,
     StoryRefusalReason,
@@ -293,6 +294,24 @@ async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: P
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
         assert isinstance(memory._embedder, BoundedEmbedder)
         assert isinstance(memory._embedder._inner, HashingEmbedder)
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_builds_a_memory_store_whose_bindings_only_count(
+    tmp_path: Path,
+) -> None:
+    """ADR-0383 §7:10, §11:1: the composition root fixes the mode, to counting, here.
+
+    A store bound to a sight answers every read as the unbound store does in this
+    build; nothing in the root binds it yet, so the engine holds it unbound.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        memory = engine._memory
+        assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
+        assert memory._sight_mode is SightMode.COUNT
+        assert memory._sight is None
     finally:
         await engine.aclose()
 

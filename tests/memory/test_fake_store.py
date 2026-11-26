@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     MemoryRecord,
     MemoryWrite,
     MemoryWriteMode,
+    SightMode,
 )
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
@@ -115,11 +116,15 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
         """Park a number above this fake's own issued-key counter."""
         assert isinstance(store, FakeMemoryStore)
-        store._walks[walk] = _mint_position(walk, store._sequence + _BEYOND_MARGIN).token
+        store._walks[walk] = _mint_position(walk, store._issued.keys + _BEYOND_MARGIN).token
 
     @pytest.fixture
     def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: FakeMemoryStore(now=now)
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], MemoryStore]:
+        return lambda mode: FakeMemoryStore(now=_fixed_now, sight_mode=mode)
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(

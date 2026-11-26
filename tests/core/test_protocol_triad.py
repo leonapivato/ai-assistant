@@ -766,7 +766,7 @@ class _ARealMemoryStore:
         lambda *a, **k: None
     )
     channel_episodes = channel_episode_ids = staticmethod(lambda *a, **k: None)
-    open_episodes = staticmethod(lambda *a, **k: None)
+    open_episodes = bound = staticmethod(lambda *a, **k: None)
 
 
 class _DecoyFixture:

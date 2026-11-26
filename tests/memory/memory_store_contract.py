@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pytest
+import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -44,9 +45,10 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from sight_equivalence import OWN_ACTIVATION, SIGHTS, ReadCall, assert_answers_alike
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.testing.cancellation import SuspendedCall, SuspendedMidWrite
@@ -109,6 +111,7 @@ from ai_assistant.core.types import (
     ShownRecord,
     ShownRecordKind,
     ShownText,
+    SightMode,
     SituationLabel,
     StageEntry,
     StageOutcome,
@@ -1283,6 +1286,221 @@ class MemoryStoreContract:
         cannot express.
         """
         raise NotImplementedError
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], MemoryStore]:
+        """Override in a subclass to build a fresh, empty store under test in a mode.
+
+        Each call is a new store of its own, on the fixed clock the ``store`` fixture
+        uses, whose bindings withhold or count as the mode says (ADR-0383 §7:10). The
+        cases of ADR-0383 §7, §8, §9:3 and §11 build the two stores they compare with
+        it.
+        """
+        raise NotImplementedError
+
+    # --- a store bound to a sight (ADR-0383 §7, §8, §9:3, §11) ---------------------
+
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_store_answers_as_the_same_store_holding_only_what_its_sight_sees(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore], sight_name: str
+    ) -> None:
+        """§9:3's shared obligation, for every read member (§7:2, §8:1, §8:2).
+
+        Two stores take one history; from the second every record the sight does not see
+        is deleted, which leaves every number, revision and key the rest carry as they
+        are (§8:5). The first, bound to the sight and withholding, answers every call in
+        the battery as the second does: the same records in the same order, totals,
+        pages and whether more follow, walks, and "not found" for a record it does not
+        hold. The sight's own activation's open episode is held (§7:4).
+        """
+        sight = SIGHTS[sight_name]
+        bound_store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        history = _sight_history()
+        for store in (bound_store, holding_only):
+            for record in history:
+                await store.add(record)
+        for record in history:
+            if not sight.sees(record.home, made_by=_made_by(record)):
+                assert await holding_only.delete(record.id) is True
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+
+    async def test_the_sights_withhold_what_they_do_not_see(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """The obligation above has something to bite on: each sight's held set.
+
+        The owner's work holds every record; one for no one, the shared things alone;
+        an unidentified sender's, its own episode alone; a producer with no facts,
+        nothing (§6, §7:4, §5:3). Exported, so the expired records drop out as they do
+        unbound.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        for record in _sight_history():
+            await store.add(record)
+        held = {
+            name: {r.id for r in await store.bound(sight).export()}
+            for name, sight in SIGHTS.items()
+        }
+        everything = {r.id for r in await store.export()}
+        shared = {r.id for r in await store.export() if r.home == RecordHome.shared()}
+        assert held["owners-work"] == everything
+        assert held["run-over-the-owners-domain"] == everything - shared
+        assert held["run-over-the-shared-things"] == shared
+        assert held["work-for-no-one"] == shared | {_OWN_EPISODE}
+        assert held["unidentified-senders-work"] == {_OWN_EPISODE}
+        assert held["producer-with-no-facts"] == set()
+
+    async def test_a_bound_store_refuses_a_write_to_a_record_it_does_not_hold(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§7:5 and §7:11: a write changing a record the sight does not see is refused.
+
+        An upsert by either door is refused as an id already taken, and a conditional
+        write as one to a record never written; an ``INSERT_IF_ABSENT`` collides with it
+        as with any stored id, a write's own check; a delete answers ``False``. Nothing
+        is written, and the record stands unbound. A write of a record it holds, and of
+        a new one, lands.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        for record in _sight_history():
+            await store.add(record)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        unheld = await store.get("m-owner-1")
+        assert unheld is not None
+        with pytest.raises(MemoryStoreConflictError):
+            await bound.add(unheld)
+        with pytest.raises(MemoryStoreConflictError):
+            await bound.write_atomic([MemoryWrite(record=unheld, mode=MemoryWriteMode.UPSERT)])
+        with pytest.raises(MemoryStoreConflictError):
+            await bound.write_atomic(
+                [MemoryWrite(record=unheld, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+            )
+        with pytest.raises(MemoryStoreStaleError):
+            await bound.write_atomic(
+                [
+                    MemoryWrite(
+                        record=unheld,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=unheld.revision,
+                    )
+                ]
+            )
+        assert await bound.delete("m-owner-1") is False
+        assert await store.get("m-owner-1") == unheld
+        held = await store.get("m-shared-1")
+        assert held is not None
+        await bound.write_atomic(
+            [
+                MemoryWrite(
+                    record=held, mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=held.revision
+                )
+            ]
+        )
+        await bound.add(_semantic("m-new-shared", "coffee new").model_copy(update=_SHARED))
+        assert await bound.get("m-new-shared") is not None
+        assert await bound.delete("m-shared-1") is True
+
+    async def test_a_bound_stores_clear_and_purge_reach_only_what_it_holds(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§7:2: ``purge_expired`` and ``clear`` act and count as on the held records alone."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        history = _sight_history()
+        for record in history:
+            await store.add(record)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        assert await bound.purge_expired() == 1
+        assert {r.id for r in await store.export()} == {
+            r.id for r in history if r.expires_at is None
+        }
+        shared_left = [
+            r.id for r in history if r.home == RecordHome.shared() and r.expires_at is None
+        ]
+        assert await bound.clear() == len(shared_left)
+        assert await store.get_many(shared_left) == {}
+        assert await store.get("m-owner-1") is not None
+        assert await store.purge_expired() == 1
+
+    async def test_a_store_bound_in_the_counting_mode_answers_as_unbound_and_counts(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§7:10, §11:1 to §11:3: counting changes no answer and writes one event a read.
+
+        Every call in the battery answers through a counting binding exactly as the
+        unbound store does. Each read member writes one ``sight_counted`` event carrying
+        the store, the member, how many records it gave back, how many the sight would
+        have withheld by reason, and the reader and bounds as codes, and nothing else:
+        no id and no text.
+        """
+        store, twin = sight_store_factory(SightMode.COUNT), sight_store_factory(SightMode.COUNT)
+        for one in (store, twin):
+            for record in _sight_history():
+                await one.add(record)
+        sight = SIGHTS["unidentified-senders-work"]
+        # Against a twin of one history, since a walk advances the store it walks.
+        await assert_answers_alike(store.bound(sight), twin, _sight_battery())
+        with structlog.testing.capture_logs() as events:
+            found = await store.bound(sight).get_many(["m-owner-1", "m-shared-1", _OWN_EPISODE])
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert set(found) == {"m-owner-1", "m-shared-1", _OWN_EPISODE}
+        assert counted == [
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "memory",
+                "member": "get_many",
+                "given": 3,
+                "other_home": 0,
+                "no_home": 0,
+                "sees_nothing": 2,
+                "reader": "work",
+                "bounds": ["anyone", "person_owner"],
+            }
+        ]
+
+    async def test_every_read_member_writes_one_count_event_when_counting(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§11:1: one event for each read, named by its member; the writes write none."""
+        store = sight_store_factory(SightMode.COUNT)
+        for record in _sight_history():
+            await store.add(record)
+        bound = store.bound(SIGHTS["owners-work"])
+        for call in _one_call_per_member():
+            with structlog.testing.capture_logs() as events:
+                await call.call(bound)
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            assert [event["member"] for event in counted] == [call.name], call.name
+            assert counted[0]["other_home"] == counted[0]["no_home"] == 0
+        with structlog.testing.capture_logs() as events:
+            await bound.add(_semantic("m-later", "coffee later"))
+            await bound.delete("m-later")
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§6:6, §7:1: binding again never widens; two sights that do not meet are refused."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        for record in _sight_history():
+            await store.add(record)
+        owners = SIGHTS["owners-work"]
+        twice = store.bound(owners).bound(SIGHTS["unidentified-senders-work"])
+        assert {r.id for r in await twice.export()} == {_OWN_EPISODE}
+        with pytest.raises(ValueError, match="meet"):
+            store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+    async def test_a_bound_store_reads_what_the_unbound_store_writes_after_binding(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§7:1: a binding is over the store's own records, not a copy of them."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        bound = store.bound(SIGHTS["owners-work"])
+        await store.add(_semantic("later", "coffee later"))
+        assert await bound.get("later") is not None
+        assert await bound.delete("later") is True
+        assert await store.get("later") is None
 
     async def test_episode_inspection_orders_exact_ids_and_binds_cursors(
         self, store: MemoryStore
@@ -6625,3 +6843,184 @@ class MemoryStoreContract:
         rederived = placed.model_copy(update={"content": f"{_ANY} rederived"})
         await _replace(store, rederived, door)
         assert _unstamped_or_none(await store.get("episode")) == rederived
+
+
+# --- the history and battery of ADR-0383 §9:3's cases ------------------------------
+
+#: The episode of the sight's own activation in :data:`~sight_equivalence.SIGHTS`.
+_OWN_EPISODE: Final = f"activation:{OWN_ACTIVATION}"
+
+
+def _made_by(record: MemoryRecord) -> str | None:
+    """The activation the store records as having made ``record`` (§7:4): an episode's."""
+    if isinstance(record, EpisodicMemory) and record.id.startswith("activation:"):
+        return record.id.removeprefix("activation:")
+    return None
+
+
+def _sight_history() -> list[MemoryRecord]:
+    """Records of both homes, memories and episodes, live, expired and open.
+
+    Interleaved, so a number, a key and a page boundary each fall between homes, and
+    the sight's own activation's open episode stands late, so a walk examines records
+    of both homes before it waits there.
+    """
+    return [
+        _semantic("m-owner-1", "coffee alpha", subjects=("Leo",)),
+        _semantic("m-shared-1", "coffee beta", subjects=("Leo",)).model_copy(update=_SHARED),
+        _on_channel("activation:ep-owner-1"),
+        _on_channel("activation:ep-shared-1").model_copy(update=_SHARED),
+        _semantic("m-owner-2", "coffee gamma", last_updated=_RESTAMPED),
+        _on_channel("activation:ep-owner-2"),
+        _on_channel("activation:ep-shared-2", channel=_CHANNEL_B).model_copy(update=_SHARED),
+        _semantic("m-shared-expired", "coffee expired", expires_at=_LONG_AGO).model_copy(
+            update=_SHARED
+        ),
+        _semantic("m-owner-expired", "coffee expired", expires_at=_LONG_AGO),
+        _open_episode(_OWN_EPISODE),
+        _open_episode("activation:open-shared", channel=_CHANNEL_B).model_copy(update=_SHARED),
+        _semantic("m-shared-2", "coffee delta").model_copy(update=_SHARED),
+        _on_channel("activation:ep-owner-3"),
+    ]
+
+
+_NEVER_WRITTEN: Final = "never-written"
+
+
+async def _whole_walk(store: MemoryStore, walk: str, limit: int) -> list[object]:
+    """Every chunk of ``walk`` to its end, advancing after each, as a walker takes them."""
+    chunks: list[object] = []
+    for _ in range(_WALK_ROUNDS):
+        chunk = await store.walk_records(walk, limit=limit)
+        chunks.append(chunk)
+        if chunk.position is None:
+            return chunks
+        await store.advance_walk(walk, position=chunk.position)
+    msg = f"walk {walk!r} did not exhaust"
+    raise AssertionError(msg)
+
+
+async def _every_page(
+    store: MemoryStore, channel: ChannelIdentity | None, limit: int
+) -> list[object]:
+    """Every page of ``episodes`` from the newest, following each next cursor."""
+    pages: list[object] = []
+    cursor: str | None = None
+    for _ in range(_WALK_ROUNDS):
+        page = await store.episodes(channel=channel, cursor=cursor, limit=limit)
+        pages.append(page)
+        if page.next_cursor is None:
+            return pages
+        cursor = page.next_cursor
+    msg = "episodes did not run out of pages"
+    raise AssertionError(msg)
+
+
+def _on(
+    member: str, /, *args: object, **kwargs: object
+) -> Callable[[MemoryStore], Awaitable[object]]:
+    """A call of ``member`` with these arguments, made on whichever store it is given."""
+
+    async def call(store: MemoryStore) -> object:
+        answer: object = await getattr(store, member)(*args, **kwargs)
+        return answer
+
+    return call
+
+
+def _paging(channel: ChannelIdentity) -> Callable[[MemoryStore], Awaitable[object]]:
+    """Every page of ``channel``'s episodes, one to a page."""
+    return lambda store: _every_page(store, channel, 1)
+
+
+def _walking(limit: int) -> Callable[[MemoryStore], Awaitable[object]]:
+    """A whole walk in chunks of ``limit``, under a walk name of its own."""
+    return lambda store: _whole_walk(store, f"walk-{limit}", limit)
+
+
+def _sight_battery() -> list[ReadCall[MemoryStore]]:
+    """Every read member, at the arguments that reach its totals, pages and "not found"."""
+    ids = [record.id for record in _sight_history()] + [_NEVER_WRITTEN]
+    episodes = [record.id for record in _sight_history() if isinstance(record, EpisodicMemory)]
+    calls: list[ReadCall[MemoryStore]] = []
+    for record_id in ids:
+        calls.append(ReadCall(f"get({record_id})", _on("get", record_id)))
+    for record_id in [*episodes, _NEVER_WRITTEN]:
+        calls.append(ReadCall(f"episode_chunk({record_id})", _on("episode_chunk", record_id)))
+    calls += [
+        ReadCall("get_many(all)", lambda s: s.get_many(ids)),
+        ReadCall("get_history(all)", lambda s: s.get_history(ids)),
+        ReadCall("export()", lambda s: s.export()),
+        ReadCall("open_episodes(limit=1)", lambda s: s.open_episodes(limit=1)),
+        ReadCall("open_episodes(limit=10)", lambda s: s.open_episodes(limit=10)),
+        ReadCall("list_beliefs()", lambda s: s.list_beliefs()),
+        ReadCall("list_beliefs(limit=1, offset=1)", lambda s: s.list_beliefs(limit=1, offset=1)),
+        ReadCall(
+            "list_beliefs(both kinds, limit=3)",
+            lambda s: s.list_beliefs(kinds=[MemoryKind.EPISODIC, MemoryKind.MEMORY], limit=3),
+        ),
+    ]
+    for limit in (1, 2, 3, 10):
+        calls.append(ReadCall(f"search(limit={limit})", _on("search", _ANY, limit=limit)))
+    calls += [
+        ReadCall(
+            "search(episodes)",
+            lambda s: s.search(_ANY, limit=2, kinds=[MemoryKind.EPISODIC]),
+        ),
+        ReadCall("search(person)", lambda s: s.search(_ANY, limit=1, person="Leo")),
+    ]
+    for channel in (_CHANNEL_A, _CHANNEL_B):
+        for limit in (1, 2, 10):
+            calls.append(
+                ReadCall(
+                    f"channel_episodes({channel.instance_id}, limit={limit})",
+                    _on("channel_episodes", channel, limit=limit),
+                )
+            )
+            calls.append(
+                ReadCall(
+                    f"channel_episode_ids({channel.instance_id}, limit={limit})",
+                    _on("channel_episode_ids", channel, limit=limit),
+                )
+            )
+        for after in (1, 3, 5):
+            calls.append(
+                ReadCall(
+                    f"channel_episodes({channel.instance_id}, after={after})",
+                    _on("channel_episodes", channel, after=after, limit=2),
+                )
+            )
+            calls.append(
+                ReadCall(
+                    f"channel_episode_ids({channel.instance_id}, after={after})",
+                    _on("channel_episode_ids", channel, after=after, limit=2),
+                )
+            )
+        calls.append(
+            ReadCall(
+                f"episodes({channel.instance_id}) paged",
+                _paging(channel),
+            )
+        )
+    calls.append(ReadCall("episodes() paged by 2", lambda s: _every_page(s, None, 2)))
+    for limit in (1, 2, 50):
+        calls.append(ReadCall(f"walk(limit={limit})", _walking(limit)))
+    return calls
+
+
+def _one_call_per_member() -> list[ReadCall[MemoryStore]]:
+    """One call of each read member, named by the member alone."""
+    return [
+        ReadCall("get", lambda s: s.get("m-owner-1")),
+        ReadCall("get_many", lambda s: s.get_many(["m-owner-1"])),
+        ReadCall("get_history", lambda s: s.get_history(["m-owner-1"])),
+        ReadCall("search", lambda s: s.search(_ANY, limit=3)),
+        ReadCall("episodes", lambda s: s.episodes(limit=3)),
+        ReadCall("episode_chunk", lambda s: s.episode_chunk("activation:ep-owner-1")),
+        ReadCall("channel_episodes", lambda s: s.channel_episodes(_CHANNEL_A, limit=3)),
+        ReadCall("channel_episode_ids", lambda s: s.channel_episode_ids(_CHANNEL_A, limit=3)),
+        ReadCall("open_episodes", lambda s: s.open_episodes(limit=3)),
+        ReadCall("list_beliefs", lambda s: s.list_beliefs(limit=3)),
+        ReadCall("walk_records", lambda s: s.walk_records("counted", limit=3)),
+        ReadCall("export", lambda s: s.export()),
+    ]
