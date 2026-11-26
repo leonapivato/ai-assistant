@@ -90,6 +90,14 @@ upcoming-event producer and a work with no recorded facts a sight.
 > activation's episode is not held, as it already gives none where the approval's episode is not,
 > so §2:1 refuses no memory for it.
 
+> **Normative.** §2:1 does not judge the takeover lineage a work's capture writes on its own
+> episode: the activation that took it over and the activation each joined input was taken from
+> (ADR-0349 §7:7, §7:21; ADR-0352 §5:2). Code records them from admitted activations, never from a
+> model's output or an input's text, and both sides of a takeover are works for one person
+> (ADR-0349 §5:2, §7:5), so of one home. A capture is not lost because the other side's episode
+> was deleted after the takeover. §2:3 still refuses one that resolves to a held record of another
+> home.
+
 The names are those ADR-0383 §4:7 lists as they reach `memory.db`: an evidence pointer's episode
 on a support, an operation or an open question, a confirmation's asking activation and
 `ran_in`, a track-record entry's and a label's episode, a lineage, and an episode's taker and the
@@ -100,9 +108,9 @@ The writers that add a name, read on `main` at `47a634704`: the observer names t
 episode, which its run holds, and a ticketed confirmation's approval episode, which it reads
 first, but not the asking activation's, which a capture failure, retention, a sweep or a forget
 may have deleted (hence §2:4). A lineage names memories read through the same store, or in the
-same batch. A takeover's names are admitted activations, and only an input whose author is
-established as a person is shown running work, and only that person's (ADR-0349 §5:2, §5:5), so
-each side's sight holds the other's episode. No production path calls `record_use` or
+same batch. A takeover's names are admitted activations whose episodes may since have been
+deleted, hence §2:5; only an input whose author is established as a person is shown running work,
+and only that person's (ADR-0349 §5:2, §5:5). No production path calls `record_use` or
 `write_labels`. The story store already refuses an unresolved member story (`unknown_story`), and
 the conversation store an unresolved reply target (`no_such_reply`).
 
@@ -116,6 +124,12 @@ the conversation store an unresolved reply target (`no_such_reply`).
 > starts lands in the home ADR-0383 §4:1 gives it, and a work whose sight does not see that home
 > does not see the story afterwards: a later note, link or read naming it answers as for a story
 > never written (ADR-0383 §8:2).
+
+> **Normative.** `StoryStore.create` takes the story's first notes as a keyword-only argument,
+> empty by default, each a value of one `core/types.py` model carrying what `append_note` takes:
+> the note's text, its author, the activation it was written during and its outside mark. The
+> store writes them after the members, in the same transaction, logs each as `append_note` logs a
+> note, and where any is refused refuses the whole create, writing nothing.
 
 A start inside a larger story reads that story first, so a work that does not see its home names
 none. A group's stories are held, and ADR-0383 §4:7 makes the new story theirs. The story-links
@@ -148,6 +162,9 @@ aside: every note another work adds to it later would reach that work.
 
 > **Normative.** A work whose facts are recorded later is made its sight again as ADR-0383 §6:6
 > rules, the meet of the two, so it never widens.
+
+> **Normative.** `Sight.of_work` takes its facts as `WorkFacts | None`. Given none, it makes a
+> work's sight of an anyone bound alone and the activation it is given, and reads no sender.
 
 ADR-0387 §6:5 already assumes such a work has its own records. Opening no episode for it was set
 aside: that would lose the one record of a defect. A work with facts and no activation id is
@@ -209,9 +226,10 @@ reader that counts across homes. In this milestone the domain is the owner's.
 ### 8. Relationship to earlier decisions
 
 > **Normative.** This decision partially supersedes ADR-0383 §4:8, in the addition alone: a
-> withholding memory store also refuses a name a write adds that resolves to no record it holds
-> (§2:1, §2:2), and ADR-0383 §6:4, in the addition alone: a work whose facts were not recorded
-> has a work's sight of an anyone bound and its activation (§5:1). Every other clause stands.
+> withholding memory store also refuses a name a write adds that resolves to no record it holds,
+> save a work's own takeover lineage (§2:1, §2:2, §2:5), and ADR-0383 §6:4, in the addition
+> alone: a work whose facts were not recorded has a work's sight of an anyone bound and its
+> activation (§5:1, §5:3). Every other clause stands.
 
 > **Normative.** This decision partially supersedes ADR-0384 §2:1 and its table, in the addition
 > alone: the pin pass is a fourth job it covers, run in the observer's run (§4); and the table's
@@ -219,7 +237,7 @@ reader that counts across homes. In this milestone the domain is the owner's.
 > sight of its source's home's domain (§7). Every other clause stands, the observer's row included.
 
 > **Normative.** This decision partially supersedes ADR-0289 §3:1, in the addition alone:
-> `create` also takes the story's first notes, written in its one write (§3:1). Every other
+> `create` also takes the story's first notes, written in its one write (§3:1, §3:3). Every other
 > clause stands.
 
 > **Normative.** This numbered draft records its replacements on the status lines of ADR-0383,
@@ -240,16 +258,12 @@ reader that counts across homes. In this milestone the domain is the owner's.
 
 Lane B11 builds it, with the switch, or a lane cut before it.
 
-- **`core/types.py`:** `Sight.of_work`'s `facts` parameter becomes `WorkFacts | None`; given
-  `None` it makes a work's sight of an anyone bound alone and the activation it is given, its
-  senders not read (§5:1). A model for a story's first note, carrying what `append_note` takes
-  (the text, its author, the activation it was written during and its outside mark).
-- **`core/protocols.py`:** `StoryStore.create` gains a keyword-only `notes`, a sequence of that
-  model, empty by default, written after the members in the one transaction and each logged as
-  `append_note` logs a note (§3:1). `MemoryStore.bound`'s and the write members' docstrings move
-  the name judgement off the stored row and state §2:1 to §2:3; each conformance suite gains the
-  cases: a withheld name and a never-written one refused alike, an already carried name not
-  judged again, and a name held of another home refused as today. `PlanStore.bound`'s and
+- **`core/types.py`:** `Sight.of_work` as §5:3 states, and the first note's model §3:3 names.
+- **`core/protocols.py`:** `StoryStore.create`'s notes, as §3:3 states. `MemoryStore.bound`'s and the write members' docstrings move
+  the name judgement off the stored row and state §2:1 to §2:3 and §2:5; each conformance suite
+  gains the cases: a withheld name and a never-written one refused alike, an already carried name
+  not judged again, a name held of another home refused as today, and a takeover lineage naming a
+  deleted episode written, the capture kept. `PlanStore.bound`'s and
   `NotificationStore.bound`'s docstrings state §6:1.
 - **`core/errors.py`:** `UnresolvedEvidenceError`'s docstring widens from a support's episode to
   any name §2:1 refuses. No new error.
