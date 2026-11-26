@@ -77,7 +77,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
-from ai_assistant.memory._home_guard import refuse_other_home_evidence, refuse_other_home_targets
+from ai_assistant.memory._home_guard import (
+    named_records,
+    refuse_other_home_evidence,
+    refuse_other_home_targets,
+)
 from ai_assistant.memory._observer_writes import (
     added_inference_fault,
     inference_fault,
@@ -1699,8 +1703,8 @@ class MemoryIngestor:
     async def _ingest_once(self, observed: MemoryUpdateProposal) -> _Ingested:
         held = await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
         # ADR-0383 §4:7: a fold writes the supports onto a stored memory and never this
-        # record, so the store would not see its own pointers; refused before any ruling.
-        refuse_other_home_evidence(observed.proposed, held)
+        # record, so the store would not see its own names; refused before any ruling.
+        refuse_other_home_evidence(observed.proposed, await self._named(observed.proposed, held))
         # ADR-0345 §2:2: every support carries its holder, set here by code. A holder is
         # derived from its part, so the proposal's fingerprint and its question key are
         # what they were (§11:11).
@@ -2075,6 +2079,19 @@ class MemoryIngestor:
         # because a reader who could not tell them apart from a broken determination
         # would have no conclusion to draw from either.
         return failed
+
+    async def _named(
+        self, memory: Memory, held: Mapping[str, MemoryRecord]
+    ) -> Mapping[str, MemoryRecord]:
+        """The records ``memory`` names that the store holds: ``held``, and the rest read.
+
+        Every name :func:`named_records` gives beyond the support episodes already read,
+        a confirmation's asking activation's episode among them, in one ``get_many``. A
+        name of a record the store does not hold is not judged (ADR-0383 §4:7).
+        """
+        others = sorted(named_records(memory) - held.keys())
+        found = await self._store.get_many(others) if others else {}
+        return {**held, **found}
 
     async def _require_held_episodes(
         self, memory_id: str, supports: Sequence[MemorySupport]

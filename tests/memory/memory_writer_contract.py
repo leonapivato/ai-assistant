@@ -4571,6 +4571,36 @@ class MemoryWriterContract:
         assert written is not None
         assert written.home == RecordHome.shared()
 
+    async def test_ingest_of_a_confirmation_asked_in_an_episode_of_another_home_is_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0383 §4:7: a confirmation names the asking activation's episode, whose round
+        holds the question part the yes approved (ADR-0328 §4:5); one of another home is
+        refused before any ruling, the policy not asked and nothing written. Asked in an
+        episode of the memory's own home, the policy rules."""
+        store = await self._two_homes_store()
+        await store.add(
+            _episodic("activation:act-asked-shared", "a question").model_copy(update=_SHARED_HOME)
+        )
+        await store.add(_episodic("activation:act-asked-ours", "a question"))
+        before = await _snapshot(store)
+        policy = FakeMemoryPolicy(MemoryDecisionKind.REJECT)
+
+        def confirmed(asking: str) -> Memory:
+            support = confirmed_support(
+                _CITED, asking_activation=asking, when=_WHEN, added_at=_WHEN
+            )
+            return memory("new", _CONTENT, support)
+
+        with pytest.raises(CrossHomeWriteError):
+            await make_writer(store, policy).ingest(_proposal(confirmed("act-asked-shared")))
+
+        assert policy.calls == []
+        assert await _snapshot(store) == before
+        result = await make_writer(store, policy).ingest(_proposal(confirmed("act-asked-ours")))
+        assert result.decision.kind is MemoryDecisionKind.REJECT
+        assert len(policy.calls) == 1
+
     @pytest.mark.parametrize("kind", _FOLD_KINDS)
     async def test_a_fold_onto_a_memory_of_another_home_is_refused(
         self, make_writer: WriterFactory, kind: MemoryDecisionKind
