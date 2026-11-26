@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from identity_support import owners_trigger
+from story_support import episode, memory_of
 from understanding_support import OWNERS_SIGHT, Rendered, TextAsStructured, bound_stores
 
 from ai_assistant.core.reply_shapes import read_reply
@@ -48,7 +49,7 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     UnderstandingStage,
 )
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore, default_prompt
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
 from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
@@ -377,7 +378,9 @@ async def test_the_story_links_stage_links_a_running_activation_member(where: st
         )
         held = made.story_id
 
-    decision = await StoryLinksStage(stores=bound_stores(FakeMemoryStore(), stories)).record(
+    # The running activation's open episode is a record (ADR-0286 §6).
+    memory = await memory_of(episode(_RIVERSIDE, open_=True))
+    decision = await StoryLinksStage(stores=bound_stores(memory, stories)).record(
         understood.story_links,
         sight=OWNERS_SIGHT,
         home=RecordHome.owners(),

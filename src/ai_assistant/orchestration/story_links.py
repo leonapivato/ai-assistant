@@ -38,7 +38,9 @@ records the decision ``failed``. A link into a standing story of another home th
 activation's, which its work gives, and a start holding an earlier episode of another
 home, write nothing and are recorded as ``another_home`` refusals (ADR-0383 §4:7): a
 story names an episode in another store file, so the stage is the writer that refuses
-it. What it records is bookkeeping, as
+it. A start holding an earlier episode with no record, one the work's sight does not see
+included, writes nothing and is recorded as an ``unknown_activation`` refusal (§4:8).
+What it records is bookkeeping, as
 the hub records understanding's own record, and not an action planning chooses (§6:14).
 
 Neither is saved with the episode (§12:3): the candidates are the understanding phase's
@@ -78,7 +80,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import admits_owner_placed, admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
-from ai_assistant.orchestration.stories import episode_address, of_another_home
+from ai_assistant.orchestration.stories import (
+    episode_address,
+    of_another_home,
+    unknown_activation,
+)
 from ai_assistant.orchestration.story_privacy import SummaryVisibility, activation_of
 
 if TYPE_CHECKING:
@@ -536,11 +542,14 @@ class StoryLinksStage:
     earlier episode it does not see belongs to no story it holds and is judged as one
     with no record.
 
-    **A start holding an episode of another home starts nothing.** The earlier episodes a
-    start would hold are named by understanding's output, its ``story_links``, not picked
-    by the stage, so one of another home than the activation's is refused as such: the
-    start is recorded as an ``another_home`` refusal and nothing of it is written. An
-    episode the memory store no longer holds is not judged.
+    **A start holding an episode of another home, or one with no record, starts
+    nothing.** The earlier episodes a start would hold are named by understanding's
+    output, its ``story_links``, not picked by the stage. One with no record in the bound
+    memory store, one the sight does not see included, is refused as
+    ``unknown_activation``, as a story call refuses one, so the start can neither write
+    an episode of another home it cannot judge nor tell the work that one exists (§4:7,
+    §4:8); one held and of another home than the activation's is refused as
+    ``another_home``. Either way nothing of the start is written.
 
     **One activation's links are recorded at a time.** "The earlier episodes that
     belong to no story by then" (§6:12) is a read and then a create, two transactions;
@@ -686,9 +695,19 @@ class _Writes:
     async def start(self, members: Sequence[StoryMember]) -> None:
         """Start one story holding the earlier episodes in no story, and the activation.
 
-        Refused, with nothing written, where an earlier episode held is of another home
-        than the activation's (ADR-0383 §4:7).
+        Refused, with nothing written, where an earlier episode the start would hold has
+        no record in the memory store bound to the run's sight, ``unknown_activation`` as
+        a story call refuses one (ADR-0289 §4); or where one held is of another home than
+        the activation's, ``another_home`` (ADR-0383 §4:7). An earlier episode the sight
+        does not see is one with no record (§8:2), so a start never writes one of another
+        home it cannot judge, and its refusal is the one a never-written episode gets
+        (§4:8). The activation's own episode is not checked: it is the work's own record
+        (§7:4), and a capture that could not write it leaves it with none.
         """
+        earlier = [member for member in members if member != self._activation]
+        if (unknown := await unknown_activation(self._memory, earlier)) is not None:
+            self.refused.append(unknown)
+            return
         if await of_another_home(self._memory, members, self._home) is not None:
             self.refused.append(StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME))
             return

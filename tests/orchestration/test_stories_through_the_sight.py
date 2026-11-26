@@ -258,24 +258,60 @@ async def test_an_unidentified_senders_work_links_to_nothing() -> None:
     assert await world.held() == before
 
 
-async def test_a_story_an_unidentified_senders_work_starts_takes_its_works_home() -> None:
-    """§4:1, §4:4: the owner's, whose connection it came by; and once written, the work
-    does not see it (§7:4's own records are its episode, effects and approvals)."""
-    world = await _world(SightMode.WITHHOLD)
+@pytest.mark.parametrize(
+    "home", [RecordHome.shared(), RecordHome.owners()], ids=["another-home", "owners"]
+)
+async def test_a_start_holding_an_episode_the_work_does_not_see_writes_nothing(
+    home: RecordHome,
+) -> None:
+    """§4:7, §4:8 (round 1): an unidentified sender's work's understanding names an earlier
+    episode in no story that its sight does not see, of the shared things or of the
+    owner's. The stage cannot judge its home, so it starts no story, and its decision is,
+    field for field, the one naming an episode never written gives."""
+    seen = await _world(SightMode.WITHHOLD)
+    unwritten = await _world(SightMode.WITHHOLD)
+    held = episode("a-unseen").model_copy(update={"home": home})
+    await seen.memory.write_atomic(
+        [MemoryWrite(record=held, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+    )
     with work_of(_UNIDENTIFIED) as work:
-        sight = _sight(work)
+        decisions = [
+            await world.links.record(
+                [activation("a-unseen")],
+                sight=_sight(work),
+                activation_id=WORK_ACTIVATION,
+                home=work.home,
+            )
+            for world in (seen, unwritten)
+        ]
+    assert decisions[0] == decisions[1]
+    assert decisions[0].started is None
+    assert [(one.reason, one.member) for one in decisions[0].refused] == [
+        (StoryRefusalReason.UNKNOWN_ACTIVATION, activation("a-unseen"))
+    ]
+    for world in (seen, unwritten):
+        assert [one.story_id for one in (await world.stories.stories()).stories] == [world.trip]
+
+
+@_LEVELS
+async def test_the_owners_work_still_refuses_a_start_holding_a_shared_episode(
+    sender: InputSender,
+) -> None:
+    """§4:7: one it sees, of another home than its own, is refused as such, as today."""
+    world = await _world(SightMode.WITHHOLD)
+    shared = episode("a-shared").model_copy(update={"home": RecordHome.shared()})
+    await world.memory.write_atomic(
+        [MemoryWrite(record=shared, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+    )
+    with work_of(sender) as work:
         decision = await world.links.record(
-            [activation("a-never-written")],
-            sight=sight,
+            [activation("a-shared")],
+            sight=_sight(work),
             activation_id=WORK_ACTIVATION,
             home=work.home,
         )
-        assert decision.started is not None
-        seen = await world.stories.bound(sight).header(decision.started)
-    header = await world.stories.header(decision.started)
-    assert header is not None
-    assert header.home == RecordHome.owners()
-    assert seen is None
+    assert decision.started is None
+    assert [one.reason for one in decision.refused] == [StoryRefusalReason.ANOTHER_HOME]
 
 
 async def test_a_story_call_naming_the_owners_story_is_told_what_one_never_written_is() -> None:

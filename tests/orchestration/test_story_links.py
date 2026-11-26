@@ -678,7 +678,7 @@ async def test_two_activations_linking_one_unstoried_episode_start_one_story() -
         return found
 
     stories.stories_of = yielding  # type: ignore[method-assign]  # an interleaving point
-    stage = _stage(stories)
+    stage = _stage(stories, await memory_of(episode("e-1")))
 
     first, second = await asyncio.gather(
         stage.record(
@@ -717,8 +717,9 @@ async def test_an_earlier_episode_s_stories_take_the_activation() -> None:
 async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-9"))
+    memory = await memory_of(episode("a-1"), episode("a-2"))
 
-    decision = await _stage(stories).record(
+    decision = await _stage(stories, memory).record(
         [activation("a-1"), story(trip), activation("a-2")],
         sight=OWNERS_SIGHT,
         home=RecordHome.owners(),
@@ -743,8 +744,9 @@ async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation(
 async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHome) -> None:
     """ADR-0383 §4:1, ADR-0386 §2:2: the home whom the activation's work is for gives."""
     stories = _stories()
+    memory = await memory_of(episode("a-1").model_copy(update={"home": home}))
 
-    decision = await _stage(stories).record(
+    decision = await _stage(stories, memory).record(
         [activation("a-1")], sight=OWNERS_SIGHT, home=home, activation_id="now"
     )
 
@@ -871,18 +873,36 @@ async def test_a_start_of_earlier_episodes_of_its_own_home_starts_as_before() ->
     memory = await memory_of(episode("a-1"))
 
     decision = await _stage(stories, memory).record(
-        [activation("a-1"), activation("a-gone")],
-        sight=OWNERS_SIGHT,
-        home=RecordHome.owners(),
-        activation_id="now",
+        [activation("a-1")], sight=OWNERS_SIGHT, home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.started is not None
     assert [entry.member for entry in (await _view(stories, decision.started)).entries] == [
         activation("a-1"),
-        activation("a-gone"),
         activation("now"),
     ]
+
+
+async def test_a_start_holding_an_episode_with_no_record_is_refused_and_writes_nothing() -> None:
+    """ADR-0383 §4:7, §4:8: the stage cannot judge the home of an episode it does not hold,
+    so it writes none, refusing it as a story call refuses one (ADR-0289 §4); the work's
+    own activation, whose episode it does not read, is not judged."""
+    stories = _stories()
+    memory = await memory_of(episode("a-1"))
+
+    decision = await _stage(stories, memory).record(
+        [activation("a-1"), activation("a-gone"), activation("now")],
+        sight=OWNERS_SIGHT,
+        home=RecordHome.owners(),
+        activation_id="now",
+    )
+
+    assert decision.outcome is StageOutcome.DONE
+    assert decision.started is None
+    assert [(one.reason, one.member) for one in decision.refused] == [
+        (StoryRefusalReason.UNKNOWN_ACTIVATION, activation("a-gone"))
+    ]
+    assert (await stories.stories()).stories == ()
 
 
 async def test_a_memory_store_error_is_a_failed_decision_carrying_it() -> None:
