@@ -87,10 +87,19 @@ episode is due and its record's state and revision (:class:`Due`); the facts and
 it reads reach the run only as the sight made from them. The calls made in the last 24
 hours are a store-wide figure that counts writes (§8:5), read unbound. Nothing else is: the
 stores a holder is built over, where the caller hands none, are handed to that holder and
-read by nothing else. Whether a bound store withholds or only counts is its construction
-(§7:10): where it withholds, an episode its sight does not see is read as one never
-written, and nothing is recorded of it; setting such an episode aside is §7:13's, not
-built here.
+read by nothing else.
+
+**An episode its sight does not see is set aside** (§7:13). Whether a bound store
+withholds or only counts is its construction (§7:10), and the composition root hands the
+observer the same value. Where the stores withhold, the finding of what is due hands no
+run an episode whose home the sight made for it does not see: it sets the episode aside
+as stuck (ADR-0329 §16:5), through the plan store it holds unbound, keeping every
+attempt, model call, finding and outcome its observation record holds, a last attempt a
+crash left open closed as failed, as any later write closes it. It is logged under its
+own code-owned reason, ``out_of_sight``, and makes no model call, no diagnostic entry and
+no read through a bound store; settled, it is never due again, so nothing reads its
+record for a run. Where the stores count, such an episode is processed as before, and
+the count event of each read of its run says what would have been withheld (§11:1).
 
 **It logs stage and code-owned reasons only** (§15:7): counts, states and the names of
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
@@ -168,6 +177,7 @@ from ai_assistant.core.types import (
     RecordHome,
     ReplyFailure,
     Sight,
+    SightMode,
     SuggestionKind,
 )
 from ai_assistant.orchestration.bound_stores import BoundStores
@@ -457,6 +467,7 @@ class Observer:
         diagnostics: DiagnosticSink | None = None,
         person_model: PersonModelStore | None = None,
         stores: BoundStores | None = None,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Wire the observer.
 
@@ -501,6 +512,12 @@ class Observer:
                 where one is wired, and the writer ``writes`` writes through. ``None``
                 for a caller that builds the observer outside the composition root: one
                 is then built over the stores handed here, so the binding is the same.
+            sight_mode: Whether the stores the holder binds withhold or only count
+                (ADR-0383 §7:10): the composition root's one value, the mode it built
+                them in. Where they withhold, the finding of what is due sets aside an
+                episode its sight does not see (§7:13); where they count, such an
+                episode is processed as before. Counting by default, as each store's
+                constructor is.
 
         Raises:
             ValueError: If a prompt is not a template of its step's prompt, or no holder
@@ -535,10 +552,12 @@ class Observer:
         self._scout = scout
         self._commit = commit
         # ADR-0383 §7:12: the finding of what is due reads these two unbound, and §8:5
-        # the budget's figure; a run reads only through `_stores`.
+        # the budget's figure; §7:13: it sets aside, through `_plans`, an episode its
+        # sight does not see where the stores withhold. A run reads only through `_stores`.
         self._memory = memory
         self._plans = plans
         self._stores = stores
+        self._withholds = sight_mode is SightMode.WITHHOLD
         self._episodes = episodes
         self._limits = limits
         self._now = checked_clock(now, owner="Observer")
@@ -727,7 +746,53 @@ class Observer:
             )
         if not isinstance(recorded, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
-        return await self._attempted(due, self._bound(_sight_of(recorded)), started)
+        sight = _sight_of(recorded)
+        if self._withholds and not sight.sees(recorded.home):
+            return await self._set_aside(due, recorded)
+        return await self._attempted(due, self._bound(sight), started)
+
+    async def _set_aside(self, due: Due, episode: EpisodicMemory) -> ObservationState:
+        """§7:13: an episode its sight does not see, set aside as stuck; no run is handed it.
+
+        Part of the finding of what is due, so read and written through the plan store
+        the observer holds unbound (ADR-0383 §7:12, §7:13, §9:1): a store bound to the
+        episode's sight would not give the record back, nor take the write. The record
+        keeps every attempt, model call, finding and decline it holds, and its home
+        (§4:6); a first record takes the episode's (§4:2). A last attempt a crash left
+        open is closed as failed, as any later write closes it, since a stuck episode has
+        no attempt running. No model call is made, no diagnostic entry written, and
+        nothing of the episode but its home is read.
+
+        Raises:
+            _Unread: Where its observation record cannot be read: it stays due.
+            _NotRecorded: Where the record is not the one it was queued with, or the
+                write is refused or fails.
+        """
+        held: ObservationRecord | None = None
+        if due.record is not None:
+            try:
+                found = await self._plans.observations([due.episode])
+            except PlanningError as exc:
+                raise _Unread(_reason(exc)) from exc
+            held = next(iter(found), None)
+            if held is None or due.record != DueRecord(state=held.state, revision=held.revision):
+                raise _NotRecorded
+        record = ObservationRecord(
+            episode=due.episode,
+            home=episode.home if held is None else held.home,
+            state=ObservationState.STUCK,
+            attempts=() if held is None else _closed(held.attempts),
+            findings=() if held is None else held.findings,
+            declines=() if held is None else held.declines,
+        )
+        try:
+            await self._plans.write_observation(
+                record, expected_revision=0 if held is None else held.revision
+            )
+        except PlanningError as exc:
+            raise _NotRecorded from exc
+        _log.info("observer_attempt", stage="due", result="stuck", reason="out_of_sight")
+        return ObservationState.STUCK
 
     def _bound(self, sight: Sight) -> _Seen:
         """The stores one episode's run reads and writes through, each bound to ``sight``."""

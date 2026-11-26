@@ -389,8 +389,9 @@ class Harness:
 
     ``labels`` are what the writer's reconciler answers, keyed by stored memory id;
     none by default, which is ADR-0336 §6's floor. ``sight_mode`` is whether a store bound
-    to a sight withholds or only counts (ADR-0383 §7:10), counting by default as the
-    composition root builds them today.
+    to a sight withholds or only counts (ADR-0383 §7:10), counting by default as each
+    store's constructor does; the observer is handed the same value, as the composition
+    root hands it its own (§7:13).
     """
 
     clock: Clock = field(default_factory=Clock)
@@ -469,6 +470,7 @@ class Harness:
             mint=self.mint,
             diagnostics=diagnostics,
             person_model=person_model,
+            sight_mode=self.sight_mode,
         )
 
 

@@ -302,30 +302,30 @@ async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: P
         await engine.aclose()
 
 
-async def test_build_engine_builds_a_memory_store_whose_bindings_only_count(
+async def test_build_engine_builds_a_memory_store_whose_bindings_withhold(
     tmp_path: Path,
 ) -> None:
-    """ADR-0383 §7:10, §11:1: the composition root fixes the mode, to counting, here.
+    """ADR-0383 §7:10, §7:2: the composition root fixes the mode, to withholding, here.
 
-    A store bound to a sight answers every read as the unbound store does in this
-    build; nothing in the root binds it yet, so the engine holds it unbound.
+    A store bound to a sight answers as though it held only what that sight sees; every
+    reader binds it through the holder, so the engine holds it unbound.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
-        assert memory._sight_mode is SightMode.COUNT
+        assert memory._sight_mode is SightMode.WITHHOLD
         assert memory._sight is None
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_builds_story_and_notification_stores_whose_bindings_only_count(
+async def test_build_engine_builds_story_and_notification_stores_whose_bindings_withhold(
     tmp_path: Path,
 ) -> None:
-    """ADR-0383 §7:10, §11:1: each store's mode is fixed at its construction, to counting.
+    """ADR-0383 §7:10: each store's mode is fixed at its construction, to withholding.
 
-    Nothing in the root binds either store yet, so the engine holds both unbound.
+    Every reader binds them through the holder, so the engine holds both unbound.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -333,43 +333,43 @@ async def test_build_engine_builds_story_and_notification_stores_whose_bindings_
         notifications = engine._notifications
         assert isinstance(stories, SqliteStoryStore)  # narrows the Protocol-typed seam
         assert isinstance(notifications, SqliteNotificationStore)
-        assert stories._sight_mode is SightMode.COUNT
-        assert notifications._sight_mode is SightMode.COUNT
+        assert stories._sight_mode is SightMode.WITHHOLD
+        assert notifications._sight_mode is SightMode.WITHHOLD
         assert stories._sight is None
         assert notifications._sight is None
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_builds_a_conversation_store_whose_bindings_only_count(
+async def test_build_engine_builds_a_conversation_store_whose_bindings_withhold(
     tmp_path: Path,
 ) -> None:
-    """ADR-0383 §7:10, §11:1: the root fixes the conversation store's mode, to counting.
+    """ADR-0383 §7:10: the root fixes the conversation store's mode, to withholding.
 
-    Nothing in the root binds it yet, so the engine holds it unbound.
+    Every reader binds it through the holder, so the engine holds it unbound.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         conversations = engine._conversations.chat_space
         assert isinstance(conversations, SqliteConversationStore)  # narrows the Protocol seam
-        assert conversations._sight_mode is SightMode.COUNT
+        assert conversations._sight_mode is SightMode.WITHHOLD
         assert conversations._sight is None
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_builds_a_plan_store_whose_bindings_only_count(
+async def test_build_engine_builds_a_plan_store_whose_bindings_withhold(
     tmp_path: Path,
 ) -> None:
-    """ADR-0383 §7:10, §11:1: the plan store's mode is fixed at its construction, to counting.
+    """ADR-0383 §7:10: the plan store's mode is fixed at its construction, to withholding.
 
-    Nothing in the root binds it yet, so the engine holds it unbound.
+    Every reader binds it through the holder, so the engine holds it unbound.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         plans = engine._plans
         assert isinstance(plans, SqlitePlanStore)  # narrows the Protocol-typed seam
-        assert plans._sight_mode is SightMode.COUNT
+        assert plans._sight_mode is SightMode.WITHHOLD
         assert plans._sight is None
     finally:
         await engine.aclose()

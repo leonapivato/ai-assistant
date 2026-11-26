@@ -48,6 +48,8 @@ from ai_assistant.core.types import (
     ObservationAttemptEnd,
     ObservationRecord,
     ObservationState,
+    ObserverCall,
+    ObserverStep,
     PlanningLabel,
     RecordHome,
     Sight,
@@ -63,7 +65,7 @@ from ai_assistant.core.types import (
     Sureness,
     WorkFor,
 )
-from ai_assistant.orchestration.observer import Observer, RunOutcome
+from ai_assistant.orchestration.observer import Observer, RunOutcome, stage
 from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_FRAMING_PROMPT,
     OBSERVER_PLACEMENT_PROMPT,
@@ -207,37 +209,46 @@ async def test_withholding_an_owners_episode_is_read_placed_and_written_as_today
     assert len(seat.supports) == len(counted_seat.supports) == 2
 
 
-async def test_withholding_an_unidentified_senders_episode_is_read_as_never_written() -> None:
-    """§7:2, §7:13: its sight sees nothing, so its run reads nothing of it. No model is
-    called, nothing is recorded, nothing is written, and it stays due: setting it aside
-    is §7:13's, which this build does not make. Later episodes are not held back."""
+async def test_withholding_an_unidentified_senders_episode_is_set_aside_as_stuck() -> None:
+    """§7:13: its sight sees no home, so the finding of what is due hands no run its
+    episode. It is set aside as stuck, under its own code-owned reason, in a record of
+    the episode's home with no attempt; no model is called, nothing is written onto the
+    owner's records, it is never due again, and later episodes are not held back."""
     harness, outcome, scout, commit, logs = await _run(SightMode.WITHHOLD, stranger=True)
 
-    assert outcome == RunOutcome()
+    assert outcome == RunOutcome(stuck=1)
     assert (scout.calls, commit.calls) == ([], [])
-    assert await harness.plans.observations([_SUBJECT]) == ()
+    (record,) = await harness.plans.observations([_SUBJECT])
+    assert (record.state, record.home, record.attempts) == (
+        ObservationState.STUCK,
+        RecordHome.owners(),
+        (),
+    )
+    assert (record.findings, record.declines, record.next_attempt_at) == ((), (), None)
     (seat,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     assert len(seat.supports) == 1, "nothing written onto the owner's memory"
-    unrecorded = [one for one in logs if one.get("result") == "unrecorded"]
-    assert unrecorded == [
+    set_aside = [one for one in logs if one.get("reason") == "out_of_sight"]
+    assert set_aside == [
         {
             "event": "observer_attempt",
-            "stage": "attempt",
-            "result": "unrecorded",
-            "reason": "unseen",
+            "stage": "due",
+            "result": "stuck",
+            "reason": "out_of_sight",
             "log_level": "info",
         }
     ]
+    assert not _counted(logs), "§11:1: a withholding store writes no count event"
     queue = await harness.observer().due(())
-    assert Due(episode=_SUBJECT, record=None) in queue
+    assert _SUBJECT not in {one.episode for one in queue}, "settled: nothing reads it again"
 
 
-async def test_withholding_a_record_the_sight_does_not_see_is_left_as_it_was() -> None:
-    """§7:5, §7:12: the due-finding hands the run the record's state and revision alone,
-    and the run reads the record through the plan store bound to the episode's sight: one
-    that sight does not see is never read for it, and never written again."""
+async def test_withholding_a_record_the_sight_does_not_see_is_set_aside_whole() -> None:
+    """§7:13: a record held for such an episode keeps every attempt, model call, finding
+    and decline it holds, and its home, and is marked stuck; a last attempt a crash left
+    open is closed as failed. Nothing is read through a bound store and no model called."""
     harness = Harness(sight_mode=SightMode.WITHHOLD)
     await _seeded(harness, stranger=True)
+    calls = (ObserverCall(step=ObserverStep.SCOUT, at=AT - timedelta(hours=2)),)
     earlier = await harness.plans.write_observation(
         ObservationRecord(
             episode=_SUBJECT,
@@ -245,8 +256,11 @@ async def test_withholding_a_record_the_sight_does_not_see_is_left_as_it_was() -
             state=ObservationState.WAITING,
             attempts=(
                 ObservationAttempt(
-                    started_at=AT - timedelta(hours=1), end=ObservationAttemptEnd.FAILED
+                    started_at=AT - timedelta(hours=2),
+                    calls=calls,
+                    end=ObservationAttemptEnd.FAILED,
                 ),
+                ObservationAttempt(started_at=AT - timedelta(hours=1)),
             ),
         ),
         expected_revision=0,
@@ -258,15 +272,45 @@ async def test_withholding_a_record_the_sight_does_not_see_is_left_as_it_was() -
     outcome = await observer.run()
 
     assert Due(_SUBJECT, DueRecord(ObservationState.WAITING, earlier.revision)) in queue
-    assert outcome == RunOutcome()
-    assert scout.calls == []
-    assert await harness.plans.observations([_SUBJECT]) == (earlier,)
+    assert outcome == RunOutcome(stuck=1)
+    assert (scout.calls, commit.calls) == ([], [])
+    (record,) = await harness.plans.observations([_SUBJECT])
+    assert record.state is ObservationState.STUCK
+    assert record.home == earlier.home
+    assert [(one.started_at, one.calls, one.end) for one in record.attempts] == [
+        (AT - timedelta(hours=2), calls, ObservationAttemptEnd.FAILED),
+        (AT - timedelta(hours=1), (), ObservationAttemptEnd.FAILED),
+    ]
+    assert record.call_count() == earlier.call_count() == 1, "the budget counts it as before"
+    assert (record.findings, record.declines) == (earlier.findings, earlier.declines)
 
 
-async def test_withholding_an_episode_that_records_no_facts_is_not_read() -> None:
-    """§6:7: an episode with no processing record records no facts, so its sight is an
-    anyone bound alone, which sees nothing: it is not read, so not skipped by rule as the
-    counting build skips it (ADR-0329 §16:7), and it stays due (§7:13 is not built)."""
+async def test_withholding_a_record_moved_since_it_was_queued_is_not_set_aside() -> None:
+    """§7:13 under ADR-0329 §16:6's backstop: the record is set aside only as it was
+    queued; one another writer moved since stops the run, and nothing is written."""
+    harness = Harness(sight_mode=SightMode.WITHHOLD)
+    await _seeded(harness, stranger=True)
+    earlier = await harness.plans.write_observation(
+        ObservationRecord(
+            episode=_SUBJECT, home=RecordHome.owners(), state=ObservationState.WAITING
+        ),
+        expected_revision=0,
+    )
+    observer = harness.observer()
+    (due,) = [one for one in await observer.due(()) if one.episode == _SUBJECT]
+    moved = await harness.plans.write_observation(
+        earlier.model_copy(update={"revision": 0}), expected_revision=earlier.revision
+    )
+
+    with pytest.raises(stage._NotRecorded):
+        await observer._observed(due)
+    assert await harness.plans.observations([_SUBJECT]) == (moved,)
+
+
+async def test_withholding_an_episode_that_records_no_facts_is_set_aside() -> None:
+    """§6:7, §7:13: an episode with no processing record records no facts, so its sight
+    is an anyone bound alone, which sees nothing: where the stores withhold it is set
+    aside as stuck, not skipped by rule as the counting build skips it (ADR-0329 §16:7)."""
     bare = episode("bare", at=AT - timedelta(minutes=9)).model_copy(
         update={"processing_record": None}
     )
@@ -279,12 +323,12 @@ async def test_withholding_an_episode_that_records_no_facts_is_not_read() -> Non
         results[mode] = await observer.run()
         held = await harness.plans.observations([bare.id])
         assert [one.state for one in held] == (
-            [ObservationState.SKIPPED] if mode is SightMode.COUNT else []
+            [ObservationState.SKIPPED] if mode is SightMode.COUNT else [ObservationState.STUCK]
         )
 
     assert results == {
         SightMode.COUNT: RunOutcome(skipped=1),
-        SightMode.WITHHOLD: RunOutcome(),
+        SightMode.WITHHOLD: RunOutcome(stuck=1),
     }
 
 

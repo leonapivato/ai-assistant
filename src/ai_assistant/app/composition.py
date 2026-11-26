@@ -272,6 +272,16 @@ _READ_CHUNK: Final = 64 * 1024
 #: module does not control.
 CONFLICT_LIMIT: Final = 100
 
+#: **Whether a store bound to a sight withholds or only counts** (ADR-0383 §7:10): the
+#: one value each of the six stores this root builds is constructed with, read from no
+#: setting and no running act. This build **withholds**: a bound store answers as though
+#: it held only what its sight sees (§7:2) and writes no count event, which a counting
+#: store alone writes (§11:1). The first deploy's build counted, and starting it again is
+#: this switch's undo (#3709). The observer is handed the same value: in a build whose
+#: stores withhold, its finding of what is due sets aside an episode its sight does not
+#: see (§7:13).
+SIGHT_MODE: Final = SightMode.WITHHOLD
+
 #: The composition root's numbers for a memory's situation labels (ADR-0345 §7:3,
 #: §7:5): at most eight labels on one memory, each at most eighty characters, and a new
 #: label within a cosine distance of 0.1 of one the memory already carries is a
@@ -1383,16 +1393,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # set it, several of them structurally zero since ADR-0128 §1 and kept
         # rather than dropped by §3. This is the wiring point that arms the emitter.
         #
-        # **A store bound to a sight only counts, in this build** (ADR-0383 §7:10,
-        # §11:1): every read through a binding answers as the unbound store does and
-        # logs what the sight would have withheld. The mode is fixed here, read from no
-        # setting, and the build that switches the filter on changes this one value.
-        # Nothing binds the store yet: the stages read it unbound as they always have.
+        # **A store bound to a sight withholds, in this build** (ADR-0383 §7:10, §7:2):
+        # every read through a binding answers as the store would if it held only what
+        # the sight sees. The mode is :data:`SIGHT_MODE`, the one value each of the six
+        # stores below is built with, read from no setting. The store the root holds is
+        # never bound itself: every reader binds it through the one holder.
         memory = SqliteMemoryStore(
             path=directory / "memory.db",
             embedder=embedder,
             traces_sink=traces,
-            sight_mode=SightMode.COUNT,
+            sight_mode=SIGHT_MODE,
         )
         opened.append(memory.close)
         # **ADR-0289 §1's story store, on its own file.** It reads no other store and
@@ -1404,7 +1414,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # other file here. Deploying it adds the file and changes no existing record
         # (§6), and it joins the ordered shutdown below.
         stories = SqliteStoryStore(
-            path=directory / "stories.db", now=_utcnow, sight_mode=SightMode.COUNT
+            path=directory / "stories.db", now=_utcnow, sight_mode=SIGHT_MODE
         )
         opened.append(stories.close)
         # **ADR-0338 §10's person-model store, on its own file, behind the switch.**
@@ -1421,7 +1431,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 field_chars=PROFILE_FIELD_CHARS,
                 seed_time_zone=seeded_time_zone(settings),
                 now=_utcnow,
-                sight_mode=SightMode.COUNT,
+                sight_mode=SIGHT_MODE,
             )
             if settings.person_model
             else None
@@ -1504,7 +1514,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         opened.append(trail.close)
         # The durable plan store: an activation's stop record and acting's effect
         # records (ADR-0297 §1, ADR-0306 §6), which survive a restart.
-        plans = SqlitePlanStore(path=directory / "plans.db", sight_mode=SightMode.COUNT)
+        plans = SqlitePlanStore(path=directory / "plans.db", sight_mode=SIGHT_MODE)
         opened.append(plans.close)
         # The conversation index (ADR-0074 §9). Both durations come from settings and
         # are the *user's* configuration, not the contract's: ``episode_retention``
@@ -1516,7 +1526,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             path=directory / "conversations.db",
             retention=settings.episode_retention,
             tombstone_grace=settings.conversation_tombstone_grace,
-            sight_mode=SightMode.COUNT,
+            sight_mode=SIGHT_MODE,
         )
         opened.append(conversations.close)
         # The **sixth** connection-owning Tier 1 store (ADR-0102 §7), under the same
@@ -1606,7 +1616,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             traces_sink=traces,
             retention=settings.notification_retention,
             cap=settings.notification_queue_limit,
-            sight_mode=SightMode.COUNT,
+            sight_mode=SIGHT_MODE,
         )
         opened.append(notifications.close)
         # ADR-0131 §3's delivery outbox: the **ninth** connection-owning store and
@@ -2146,6 +2156,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the switch is on; ``None`` where it is off, and then the observer reads and
             # writes nothing of the person model and runs no pin pass (§11:2).
             person_model=person_model,
+            # ADR-0383 §7:13: the mode the stores were built in, so that where they
+            # withhold its finding of what is due sets aside an episode its sight does
+            # not see rather than handing a run one it cannot read.
+            sight_mode=SIGHT_MODE,
         )
         # ADR-0309 §2:6: the phases, which plan every activation, over the objects this
         # root already built (:class:`_PhaseSeams`).
