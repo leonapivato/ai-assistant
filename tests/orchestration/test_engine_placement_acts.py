@@ -163,6 +163,9 @@ class _DeletingStore(FakeMemoryStore):
         # Held in a list, so the bound copy the act reads through (ADR-0385 §3:1) counts
         # into the store the case holds.
         self._reads: list[int] = [0]
+        # The other writer is not the owner's act: it writes through this store unbound,
+        # which a bound copy still names here (ADR-0388 §2:1 judges the owner's writes).
+        self._other_writer: FakeMemoryStore = self
 
     @property
     def reads(self) -> int:
@@ -181,7 +184,7 @@ class _DeletingStore(FakeMemoryStore):
         if self.reads == 1 and found is not None:
             await self.delete(record_id)
             if self._recreated is not None:
-                await self.write_atomic(
+                await self._other_writer.write_atomic(
                     [
                         MemoryWrite(
                             record=_record(self._recreated),
