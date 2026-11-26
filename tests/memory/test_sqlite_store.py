@@ -94,6 +94,7 @@ from ai_assistant.testing.cancellation import (
     worker_finished_before_the_first_check,
 )
 from ai_assistant.testing.memories import (
+    confirmed_support,
     memory,
     memory_in_band,
     remembered_support,
@@ -2353,6 +2354,38 @@ async def test_an_absent_rows_refusal_says_no_record_is_stored_under_that_id(
         )
 
     assert "no record is stored under that id" in str(absent.value)
+
+
+async def test_a_name_a_held_row_carries_in_an_escaped_form_is_found_carried(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """ADR-0388 §2:2 over a row whose JSON spells the name with an escape.
+
+    A held memory's confirmation names an asking activation whose episode the store
+    does not hold, and its stored row spells that id with a ``\\u`` escape, which
+    decodes to the same record. A memory copying the same confirmation through a
+    withholding store adds no name: the held row already carries it, found among its
+    decoded strings though its text does not hold the id as written.
+    """
+    store = make_store(sight_mode=SightMode.WITHHOLD)
+    await store.add(_on_channel("activation:ours"))
+    asked = confirmed_support("activation:ours", asking_activation="act-gone")
+    await store.add(memory("held", "distinctive, confirmed", asked))
+    store._conn.execute(
+        "UPDATE records SET data = replace(data, '\"act-gone\"', '\"\\u0061ct-gone\"') "
+        "WHERE id = 'held'"
+    )
+    row = store._conn.execute("SELECT data FROM records WHERE id = 'held'").fetchone()
+    assert "act-gone" not in row[0]
+    held = await store.get("held")
+    assert isinstance(held, Memory)
+    assert held.supports == (asked,)
+
+    await store.bound(Sight.of_run(RecordHome.owners())).add(
+        memory("dispute", "distinctive, disputed", asked)
+    )
+
+    assert await store.get("dispute") is not None
 
 
 class TestSqliteMemoryStoreContract(MemoryStoreContract):

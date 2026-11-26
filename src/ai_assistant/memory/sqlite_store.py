@@ -2754,8 +2754,9 @@ class SqliteMemoryStore:
         then, for each name still not found, any other row this store holds whose stored
         text holds it, each decoded and judged by what it names. A name of an
         activation's episode is looked for by the activation's id, which is what a
-        record naming it stores. Text of characters no JSON encoder escapes is found in
-        the row as written; any other is looked for among the JSON's decoded strings.
+        record naming it stores. Text of characters no JSON encoder must escape is found
+        in a row as written, unless the row holds an escape; such a row, and any row for
+        other text, is looked through among the JSON's decoded strings.
 
         Raises:
             MemoryStoreError: A row read does not decode.
@@ -2767,19 +2768,21 @@ class SqliteMemoryStore:
         where, params = ("1", []) if seen is None else seen
         for name in sorted(names - found):
             # A name by an activation is stored as the activation's id alone, so the text
-            # looked for is what the record stores; the decoded record then decides.
+            # looked for is what the record stores; the decoded record then decides. A row
+            # holding no escape at all holds the text as written wherever it holds it; a
+            # row holding one, and any row where the text has a character an encoder must
+            # escape, is looked through among its decoded strings.
             stored = name.removeprefix(episode_address(""))
-            text = (
-                "instr(data, ?) > 0"
-                if all(" " <= char <= "~" and char not in '"\\/' for char in stored)
-                else (
-                    "EXISTS (SELECT 1 FROM json_tree(records.data) AS node "
-                    "WHERE node.type = 'text' AND instr(node.atom, ?) > 0)"
-                )
+            decoded = (
+                "EXISTS (SELECT 1 FROM json_tree(records.data) AS node "
+                "WHERE node.type = 'text' AND instr(node.atom, ?) > 0)"
             )
+            plain = all(" " <= char <= "~" and char not in '"\\' for char in stored)
+            text = f"(instr(data, ?) > 0 OR (instr(data, char(92)) > 0 AND {decoded}))"
+            text, values = (text, [stored, stored]) if plain else (decoded, [stored])
             rows = conn.execute(
                 f"SELECT data FROM records WHERE {text} AND {where}",  # noqa: S608 — module text; values bound
-                [stored, *params],
+                [*values, *params],
             )
             if any(name in named_records(self._decode(str(data))) for (data,) in rows):
                 found.add(name)
