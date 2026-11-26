@@ -47,7 +47,7 @@ them.
 
 **What the hub fills** (ADR-0254 §3, ADR-0306 §2:10). Under the names remembering gives
 them, so authorizing fills them as it fills remembering's: ``episode``, the address of
-this activation's episode, which every call but the tidy-up takes; and
+this activation's episode, which every call takes; and
 ``rests_on_outside_content``, whether this activation's record says it has read outside
 content when the round was authorized (ADR-0306 §4:5), which a call writing a note
 takes. Authorizing computes it from :mod:`~ai_assistant.orchestration.outside_content`'s
@@ -128,6 +128,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     DefaultGrant,
+    EpisodicMemory,
     GrantHow,
     Idempotency,
     LabelKind,
@@ -522,14 +523,15 @@ TIDY_STORY: Final = _declared(
         "outcome: started: it runs on its own, and how it went is recorded on the matter, not "
         "shown here"
     ),
-    properties={STORY_ARGUMENT: _STORY_SCHEMA},
-    required=(STORY_ARGUMENT,),
-    system_supplied=(),
+    properties={STORY_ARGUMENT: _STORY_SCHEMA, EPISODE_ARGUMENT: _EPISODE_FILLED},
+    required=(STORY_ARGUMENT, EPISODE_ARGUMENT),
+    system_supplied=(EPISODE_ARGUMENT,),
     safe_to_repeat=True,
     idempotency=Idempotency.NATURAL,
 )
 """Tidy a matter's page (ADR-0300 §10:4, ADR-0307 §7): planning's choice, never added by
-rule."""
+rule. The hub fills this activation's episode, never offered to planning, so the run can
+learn the home that work's records land in (ADR-0384 §6:2)."""
 
 MOVE_STORY: Final = _declared(
     MOVE_STORY_CAPABILITY,
@@ -965,11 +967,22 @@ class StoryCalls:
             raise _refused("the story store refused the change")
 
     async def _tidy(self, parameters: Mapping[str, FrozenJson]) -> None:
-        """Run the tidy-up on a story; what it wrote is in the story's version log (§7)."""
+        """Run the tidy-up on a story; what it wrote is in the story's version log (§7).
+
+        **Only on a story of the domain this work's records land in** (ADR-0384 §6:2).
+        The run is handed that domain as the one it tends, so a story of another domain
+        answers ``no_story`` and nothing is written, and an episode of another home is
+        not taken in nor a flag naming a story of another domain written (§4, §5). The
+        tidy-up runs in a task of its own that inherits no work's state (ADR-0307 §7:2),
+        so the domain is read off this activation's episode, which the hub fills and
+        which carries the home its work gives (ADR-0383 §4:1, §4:6). An episode not held,
+        or of a home no write may carry, leaves the tidy-up not done, writing nothing.
+        """
         if self._tidy_up is None:
             raise _NotDone(ToolFailureKind.UNAVAILABLE, "no tidy-up is wired", reason="no_tidy_up")
         story = await self._current(_text(parameters, STORY_ARGUMENT))
-        outcome = await self._tidy_up.run(story)
+        tends = await self._work_home(self._activation(parameters))
+        outcome = await self._tidy_up.run(story, tends=tends)
         if outcome.result not in _TIDIED:
             raise _NotDone(
                 ToolFailureKind.REFUSED,
@@ -1216,6 +1229,28 @@ class StoryCalls:
                 "the activation named has no episode",
                 reason="unknown_activation",
             )
+
+    async def _work_home(self, activation: str) -> RecordHome:
+        """The home this activation's records land in, read off its episode (§4:1, §4:6).
+
+        Raises:
+            _NotDone: Where the episode is not held, or carries a home no write may
+                carry (ADR-0383 §2:3): nothing is written.
+        """
+        record = await self._memory.get(episode_address(activation))
+        if not isinstance(record, EpisodicMemory):
+            raise _NotDone(
+                ToolFailureKind.INVALID_REQUEST,
+                "the activation named has no episode",
+                reason="unknown_activation",
+            )
+        if not home_may_be_written(record.home):
+            raise _NotDone(
+                ToolFailureKind.REFUSED,
+                "this work's records land in a home no write may carry",
+                reason="home_refused",
+            )
+        return record.home
 
     async def _same_home(self, members: Sequence[StoryMember], home: RecordHome) -> None:
         """Refuse an activation member whose episode is of another home (ADR-0383 §4:7).
