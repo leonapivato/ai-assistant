@@ -39,10 +39,17 @@ everything after that section is the author's recommendation.
   - **Admission.** The existing device rule, unchanged: the owner enrols the
     watch, and the secret and the hub's identity are written to it over USB
     when it is flashed. It presents the secret on every connect, over TLS.
-  - **Route.** The watch gateway listens on the public internet on the hosted
-    box, over TLS, and admits only an enrolled watch.
+  - **Route.** Ruled first as a public door (the watch gateway listening on
+    the public internet on the hosted box, over TLS). Changed 2026-11-26, see
+    below.
   - **Channel.** The watch has a channel of its own for its screen, microphone
     and speaker, as its own place. Its audience is the owner alone.
+- Ruled 2026-11-26 ("Lets try to do private"): the watch joins the private
+  network itself, as the owner's laptop and phone do, so admission stays
+  ADR-0124's as written. The public door is the fallback, not the plan. The
+  earlier ruling rested on a statement of mine that the chip has no Tailscale
+  client, which was not checked and is wrong: a community client for the
+  ESP32-S3 exists (MicroLink).
 
 ## Baseline
 
@@ -407,14 +414,18 @@ at 320 x 192 (Espressif); about 32 frames a second pushed to a similar
    decision of its own before the hub builds it.
 2. **Admission.** Ruled. Left to its decision: where the secret sits in the
    watch's flash, and what a lost watch costs (ADR-0124's expelling a device).
-3. **The public door.** Ruled, and it does not fit beside ruling 2 as put.
-   ADR-0124 §7 admits a device on two facts, its overlay identity and its
-   secret, and a public door has no overlay identity; ADR-0124's alternatives
-   refuse "a public TLS listener with a bearer token" by name. So admission
-   cannot stay unchanged. The prototype now gives each watch a certificate at
-   enrolment, checked in the TLS handshake, as the fact that takes the overlay
-   identity's place; whether that is acceptable is the owner's to rule, in the
-   door's own proposal. The first connection is tried at home on the LAN.
+3. **The route.** Ruled: the private network first. Not verified: that the
+   community Tailscale client (MicroLink) runs on the watch beside the display
+   and sound, that it lets the watch check the hub's overlay identity before
+   sending anything (ADR-0124 §4), and how it fares when Tailscale changes its
+   protocol. If it fails, in order: fix it; a plain WireGuard tunnel from the
+   watch to the hosted box (ADR-0124 §2 is not conditioned on Tailscale); the
+   public door. A public door cannot leave admission unchanged: ADR-0124 §7
+   admits on two facts and its alternatives refuse "a public TLS listener with
+   a bearer token" by name, so the prototype's door gives each watch a
+   certificate as the second fact. A phone's hotspot does not carry the
+   phone's Tailscale to the watch, by users' reports. None of this can be
+   tried before there is hardware.
 4. **Channels.** Ruled. Not yet checked clause by clause against ADR-0292 §2
    and §9; that is owed when this becomes a decision.
 5. **`core` surface.** Whether the watch is the second spoke that fires
