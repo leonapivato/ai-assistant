@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import CrossHomeWriteError
-from ai_assistant.core.types import EpisodicMemory, Memory, part_episode
+from ai_assistant.core.types import ConfirmationPart, EpisodicMemory, Memory, part_episode
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -33,9 +33,11 @@ def _memory_names(memory: Memory) -> set[str]:
     The evidence pointers (ADR-0328 §4, §8, §9; ADR-0345 §7) are the episode of every
     part it carries, on a support, an operation, or an open question, of every
     track-record entry, and of every situation label that names one. A legacy part and a
-    pin point into no episode (:func:`~ai_assistant.core.types.part_episode`). The
-    lineage (§5:6) is every memory a create replaces and every memory an operation names
-    as its successor.
+    pin point into no episode (:func:`~ai_assistant.core.types.part_episode`); a
+    confirmation points into two more, by activation: the asking activation's, whose
+    round holds the question part the yes approved, and, on the request form, the one
+    that ran the ticket (ADR-0328 §4:5, ADR-0361 §5:10). The lineage (§5:6) is every
+    memory a create replaces and every memory an operation names as its successor.
     """
     parts: list[SupportPart] = [support.points_at for support in memory.supports]
     for operation in memory.operations:
@@ -47,6 +49,11 @@ def _memory_names(memory: Memory) -> set[str]:
         if question.resolved_by is not None:
             parts.append(question.resolved_by)
     names = {episode for episode in map(part_episode, parts) if episode is not None}
+    for part in parts:
+        if isinstance(part, ConfirmationPart):
+            names.add(episode_address(part.asking_activation))
+            if part.ran_in is not None:
+                names.add(episode_address(part.ran_in))
     names.update(entry.episode for entry in memory.track_record)
     names.update(label.episode for label in memory.labels if label.episode is not None)
     for operation in memory.operations:

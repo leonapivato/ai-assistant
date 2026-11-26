@@ -38,6 +38,7 @@ from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 from ai_assistant.testing.memories import (
+    confirmed_support,
     memory,
     remembered_support,
     said_support,
@@ -1222,6 +1223,12 @@ def _naming_episode(pointer: str, episode: str) -> Memory:
                 recorded_by=MemoryWriterName.OBSERVER,
             )
             return memory("m", "distinctive, naming", said_support(_OURS), track_record=(entry,))
+        case "confirmation":
+            # ADR-0328 §4:5: the yes is in ``_OURS``; the question it approved is in the
+            # asking activation's episode, ``episode``.
+            asking = episode.removeprefix("activation:")
+            support = confirmed_support(_OURS, asking_activation=asking)
+            return memory("m", "distinctive, naming", support)
         case "label":
             label = SituationLabel(
                 text="when booking a table",
@@ -4459,7 +4466,7 @@ class MemoryStoreContract:
         assert (kept.home, kept.content) == (home, "distinctive, kept")
 
     @pytest.mark.parametrize("door", ["add", "upsert", "insert_if_absent"])
-    @pytest.mark.parametrize("pointer", ["support", "track_record", "label"])
+    @pytest.mark.parametrize("pointer", ["support", "confirmation", "track_record", "label"])
     async def test_a_memory_whose_evidence_points_at_an_episode_of_another_home_is_refused(
         self, store: MemoryStore, pointer: str, door: str
     ) -> None:
