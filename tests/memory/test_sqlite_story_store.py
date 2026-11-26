@@ -1231,3 +1231,32 @@ async def test_a_merge_whose_writes_reach_a_story_the_binding_does_not_hold_is_r
         assert unbound.refusal.story_id == owners
     finally:
         store.close()
+
+
+async def test_a_flag_on_a_story_the_binding_does_not_hold_is_never_read_for_it() -> None:
+    """§7:2, §8:2: unknown, whatever the version a story it does not hold keeps.
+
+    A version of a story the binding does not hold that no longer decodes is never read
+    to answer a flag on it: ``leave_flag`` and a write given it as ``answers`` answer
+    ``unknown_flag``, as for a flag never raised, where the unbound store reports the
+    corrupt record.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        owners = await homed(store, RecordHome.owners(), act("a1"))
+        shared = await homed(store, RecordHome.shared(), act("s1"))
+        other = await homed(store, RecordHome.shared(), act("s2"))
+        flag = await raised(store, owners, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        store._conn.execute("DROP TRIGGER versions_never_rewritten")
+        store._conn.execute("UPDATE versions SET record = 'not json' WHERE story_id = ?", (owners,))
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        for outcome in (
+            await bound.leave_flag(flag, actor=StoryActor.MATTERS_PASS),
+            await bound.link(shared, [sub(other)], actor=StoryActor.MATTERS_PASS, answers=flag),
+        ):
+            assert outcome.refusal is not None
+            assert outcome.refusal.reason is StoryRefusalReason.UNKNOWN_FLAG
+        with pytest.raises(StoryStoreError):
+            await store.leave_flag(flag, actor=StoryActor.MATTERS_PASS)
+    finally:
+        store.close()
