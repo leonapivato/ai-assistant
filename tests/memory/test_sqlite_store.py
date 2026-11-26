@@ -3552,6 +3552,19 @@ _PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
         """'"home":{"kind":"shared","id":"\\ud800","id":null}')""",
         None,
     ),
+    # The whole record's text read as the decoder reads it: an earlier home key whose
+    # value is a JSON5 number SQLite refuses but the decoder parses, and an earlier one
+    # whose escape the decoder refuses, beside a later home it would read.
+    "earlier-nan-home": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":NaN,"home":{"kind":"shared","id":null}')""",
+        RecordHome.shared(),
+    ),
+    "earlier-refused-home": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"shared","id":"\\ud800"},"home":{"kind":"shared","id":null}')""",
+        None,
+    ),
     # A lone surrogate's escape, which SQLite decodes to bytes no driver can read.
     "lone-surrogate-id": (
         f"replace(data, '{_OWNERS_STORED}', "
@@ -3669,3 +3682,20 @@ async def test_a_bound_store_reads_a_planted_home_as_the_decoder_and_the_predica
     withheld = event["other_home"] + event["no_home"] + event["sees_nothing"]
     assert (event["given"], withheld) == (1, 0 if sees else 1)
     assert event["no_home"] == (1 if home is None else 0)
+
+
+async def test_a_works_own_episode_with_no_home_is_held_by_no_bound_store(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """§5:3 over §7:4: the activation's own episode with no home is no one's either."""
+    store = make_store(name="own-no-home.db", sight_mode=SightMode.WITHHOLD)
+    own = "activation:own"
+    await store.add(_on_channel(own))
+    store._conn.execute(
+        "UPDATE records SET data = json_remove(data, '$.home') WHERE id = ?", (own,)
+    )
+    bound = store.bound(SIGHTS["unidentified-senders-work"])
+    assert SIGHTS["unidentified-senders-work"].activation == "own"
+    assert await bound.channel_episode_ids(_CHANNEL_A, limit=10) == ()
+    assert await bound.get(own) is None
+    assert await bound.delete(own) is False

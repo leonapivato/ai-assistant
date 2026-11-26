@@ -3833,12 +3833,13 @@ class Sight(BaseModel):
     ) -> WithheldReason | None:
         """Why this sight does not see a record, or ``None`` where it sees it (§7:3).
 
-        **The one predicate** a store decides by. A record is seen where the store
-        records it as made by this sight's activation (§7:4), or where its home is one
-        every bound sees (§6:1). Otherwise it is withheld: for no home where ``home`` is
-        ``None`` (§5:3), for a bound that sees nothing where every bound not seeing the
-        home is one (anyone, a group), and for another home where any other bound does
-        not see it (§11:2).
+        **The one predicate** a store decides by. A record with no home, or one the
+        store cannot read, is withheld from every sight, its own activation's included
+        (§5:3). Otherwise it is seen where the store records it as made by this sight's
+        activation (§7:4), or where its home is one every bound sees (§6:1); and it is
+        withheld for a bound that sees nothing where every bound not seeing the home is
+        one (anyone, a group), and for another home where any other bound does not see
+        it (§11:2).
 
         Args:
             home: The record's home, or ``None`` where it has none or the store cannot
@@ -3849,10 +3850,10 @@ class Sight(BaseModel):
         Returns:
             ``None`` where the sight sees the record, and otherwise why it does not.
         """
-        if made_by is not None and made_by == self.activation:
-            return None
         if home is None:
             return WithheldReason.NO_HOME
+        if made_by is not None and made_by == self.activation:
+            return None
         failing = [bound for bound in self.bounds if home not in bound.homes_seen]
         if not failing:
             return None

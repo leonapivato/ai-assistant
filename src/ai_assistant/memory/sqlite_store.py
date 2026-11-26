@@ -121,7 +121,7 @@ from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
 from ai_assistant.memory._sight import (
-    STORED_HOME_OBJECT_SQL,
+    STORED_HOME_SQL,
     count_given,
     count_records,
     made_by_id,
@@ -485,16 +485,16 @@ class SqliteMemoryStore:
     or KNN cut, and every write refuses inside its transaction to change a row the
     sight does not see. Counting, every statement is the unbound one, and each read
     logs what the sight would have withheld of the rows it gave back. The sight's
-    expression reads the home from the row's JSON: no column, index or format label
-    is added for it.
+    expression decodes each candidate row to read its home: no column, index or
+    format label is added for it, and the cost of that is #3732's.
 
-    Withholding reads each row's home by the record decoder itself, which the
+    Withholding reads each row's home by the store's record decoder itself, which the
     connection carries as a SQL function
     (:func:`~ai_assistant.memory._sight.register_home_reader`), so the statement and
-    the predicate over the decoded record agree on every row. Counting classifies each
-    record a read gave back by its decoded home, and :meth:`channel_episode_ids`, which
-    decodes nothing, by the same reader over the home object the decoder would find
-    (:data:`~ai_assistant.memory._sight.STORED_HOME_OBJECT_SQL`).
+    the predicate over the decoded record agree on every row: a row the decoder
+    refuses has no home and is withheld. Counting classifies each record a read gave
+    back by its decoded home, and :meth:`channel_episode_ids`, which decodes nothing,
+    by the same function.
     """
 
     def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
@@ -601,7 +601,7 @@ class SqliteMemoryStore:
             conn.enable_load_extension(False)
             # The record decoder's reading of a home, as a SQL function the sight's
             # expression calls (ADR-0383 §7:3).
-            register_home_reader(conn)
+            register_home_reader(conn, SqliteMemoryStore._decode)
             # Serialize format inspection with initialization by other openers.
             # BEGIN acquires the lock without modifying database pages. Refuse
             # old state before chmod or schema writes, then restrict permissions
@@ -3472,7 +3472,7 @@ class SqliteMemoryStore:
         The home is read from the blob only where this store counts for a sight, so
         an unbound enumeration still reads the channel index alone.
         """
-        home = STORED_HOME_OBJECT_SQL if self._counting() is not None else "NULL"
+        home = STORED_HOME_SQL if self._counting() is not None else "NULL"
         sql = (
             f"SELECT rowid, id, kind, {home} FROM records "  # noqa: S608 — module text; values bound
             "WHERE channel_type = ? AND channel_instance = ?"
