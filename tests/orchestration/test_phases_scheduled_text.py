@@ -183,8 +183,9 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
     """ADR-0364 §9:4, §14:4: a task's work keeps its list, and the list holds the origin
     of each input it took by a take, where it takes a text, beside what its task
     suggests."""
-    from types import SimpleNamespace  # noqa: PLC0415
+    from types import MethodType, SimpleNamespace  # noqa: PLC0415
 
+    from sight_support import sight_of  # noqa: PLC0415
     from task_support import activation, write_task  # noqa: PLC0415
 
     from ai_assistant.core.types import (  # noqa: PLC0415
@@ -195,6 +196,7 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
         RecordedTextInput,
         WholeTextReply,
     )
+    from ai_assistant.orchestration.activation_state import ActivationState  # noqa: PLC0415
     from ai_assistant.orchestration.channel_kinds import place_of  # noqa: PLC0415
     from ai_assistant.orchestration.conversations import conversation_channel  # noqa: PLC0415
     from ai_assistant.orchestration.matters import Became, Named  # noqa: PLC0415
@@ -232,6 +234,12 @@ async def test_a_tasks_work_may_reply_into_the_origin_of_an_input_it_took() -> N
             ],
         )
 
+        # ADR-0387 §2, §4: its own places, by the one rule, from its inputs; and the sight
+        # a task's work for the owner reads every other place by.
+        state.asked_places = ()
+        state.own_places = ActivationState.own_places.fget(state)  # type: ignore[attr-defined]
+        state.owns = MethodType(ActivationState.owns, state)
+        state.sight = sight_of(at=AT)
         scheduling = harness.engine._scheduling(state, SCHEDULE, task)  # type: ignore[arg-type]
         assert scheduling is not None
         places, targets = await scheduling.build()

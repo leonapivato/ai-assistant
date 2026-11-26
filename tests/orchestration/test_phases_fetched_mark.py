@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from exchange_support import section, tag
@@ -54,7 +53,7 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
 )
-from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.activation_writer import OpenEpisodes
 from ai_assistant.orchestration.authorizer import (
     OutsideGround,
     WorkingRecord,
@@ -277,11 +276,11 @@ async def _closed_by_a_restart(harness: Harness, address: str) -> EpisodicMemory
 
     The episode closes ``interrupted`` / ``hub_stopped``, with the provenance it stored.
     """
-    restarted = ActivationWriter(
-        memory=harness.memory,
+    restarted = OpenEpisodes(
         conversations=harness.conversation_store,
-        retention=timedelta(days=30),
+        memory=harness.memory,
         now=lambda: AT,
+        holds=lambda _address: False,
     )
     await restarted.close_open(stage_limit=64, payload_limit=1 << 20)
     closed = await harness.memory.get(address)

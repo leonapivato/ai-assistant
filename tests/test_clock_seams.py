@@ -140,6 +140,7 @@ from ai_assistant.orchestration.authorizer import (
     RoundToAuthorize,
     WorkingRecord,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT, ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
@@ -1779,7 +1780,7 @@ async def test_capture_clock_fault_degrades_receipt_without_writing_an_invalid_r
     )
     writer = ActivationWriter(
         conversations=FakeConversationStore(now=lambda: _AWARE),
-        memory=memory,
+        stores=BoundStores(memory=memory),
         retention=None,
         now=now if label == "ActivationWriter" else lambda: _AWARE,
     )

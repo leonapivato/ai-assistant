@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     canonical_senders,
 )
+from ai_assistant.orchestration.channel_kinds import places_inputs_came_from
 from ai_assistant.orchestration.controller import (
     DEFAULT_STAGE_RECORD_LIMIT,
     StageRecord,
@@ -259,6 +260,11 @@ class ActivationState:
     #: takeover step offers the input to without reading §7:5's third condition (§6:4).
     #: ``None`` for every other activation.
     meant_for: str | None = None
+    #: ADR-0382 §2:1-§2:2, ADR-0387 §2:2: for an approval's work, each place an input of
+    #: the asking activation came from, as code read them from that activation for the
+    #: work's place list, kept for the work; none where it could not be read (ADR-0382
+    #: §4:4), and none for every other work. Read by :attr:`own_places` alone.
+    asked_places: tuple[str, ...] = ()
     #: ADR-0349 §7:7: the activation that absorbed this one, where one did.
     absorbed_by: str | None = field(default=None, init=False)
     #: §7:21: the older activation that took this one's offered input, where one did.
@@ -354,6 +360,28 @@ class ActivationState:
         """
         target = self.trigger.target
         return target if isinstance(target, ChannelIdentity) else None
+
+    @property
+    def own_places(self) -> tuple[str, ...]:
+        """The work's own places, each once in order (ADR-0387 §2), decided here alone.
+
+        The place each input it holds came through, its trigger's and each joined
+        input's, absorbed or taken, as its inputs record them (§2:1, ADR-0367 §4:7); and,
+        in an approval's work, each place its request was asked from (§2:2,
+        :attr:`asked_places`). No other place is its own, not a task's suggested places
+        and not any other connection it is shown (§2:3). Code reads them from the work's
+        inputs, never from a model's output or an input's text (§2:4).
+
+        The writes of the work's own turn go into these places outside the filter, and
+        whether one still stands is answered outside it (§3:1, §4:2); every other place
+        is reached through the store bound to the work's sight (§3:2, §4:3).
+        """
+        held = places_inputs_came_from(self.trigger, self.joined)
+        return tuple(dict.fromkeys((*held, *self.asked_places)))
+
+    def owns(self, place: str) -> bool:
+        """Whether ``place`` is one of the work's :attr:`own_places` (ADR-0387 §2:4)."""
+        return place in self.own_places
 
     @property
     def inputs_held(self) -> int:

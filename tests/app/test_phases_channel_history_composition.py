@@ -376,7 +376,7 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_a_live_episode(
 
         assert await composed.conversations.get(kept) is not None
         assert await composed.engine.conversation(kept) is not None
-        assert await composed.conversations.get(empty.id) is None
+        assert await composed.conversations.get(empty) is None
     finally:
         await composed.engine.aclose()
 

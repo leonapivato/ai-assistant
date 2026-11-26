@@ -8,7 +8,7 @@ fills.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -40,6 +40,8 @@ from ai_assistant.core.types import (
     ApprovalRequestState,
     ApprovalTap,
     ApprovalWriteAnswer,
+    ChannelIdentity,
+    ChannelInput,
     DueAfterTasks,
     DueAt,
     OccurrenceState,
@@ -52,12 +54,16 @@ from ai_assistant.core.types import (
     ScheduledTaskAuthor,
     Sureness,
     TapOnCard,
+    TextChannelPayload,
     TicketState,
     ToolCall,
     ToolOutcome,
     ToolResult,
+    WholeTextReply,
 )
 from ai_assistant.orchestration.acting import Unwritten
+from ai_assistant.orchestration.activation_state import admit_channel
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_manager import (
     PlaceLists,
@@ -81,6 +87,7 @@ from ai_assistant.orchestration.task_scheduler import (
     spawning,
 )
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakePlanStore
+from ai_assistant.testing.parties import OWNER_SENDER
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -663,17 +670,38 @@ async def test_a_call_with_no_spawner_is_not_done() -> None:
 # --- the place list (§5:8-§5:11) ------------------------------------------------------------
 
 
+def _lists(conversations: FakeConversationStore, **knobs: Any) -> PlaceLists:
+    """The place list's builder over ``conversations``, with the holder the root builds."""
+    return PlaceLists(
+        conversations=conversations,
+        stores=BoundStores(memory=FakeMemoryStore(now=lambda: AT), conversations=conversations),
+        **knobs,
+    )
+
+
+def _work(came_through: ChannelIdentity = CHAT) -> ActivationState:
+    """The owner's work the list is for, its input come through ``came_through``."""
+    return admit_channel(
+        ChannelInput(target=came_through, payload=TextChannelPayload(text="the request")),
+        WholeTextReply(),
+        clock=lambda: AT,
+        id_factory=lambda: "60f3c223-6a54-4b06-aab8-4fc397c3d43b",
+        senders=(OWNER_SENDER,),
+    )
+
+
 async def test_a_task_suggesting_two_places_one_deleted_still_lists_the_other() -> None:
     """§5:8, §13:3."""
     conversations = FakeConversationStore(now=lambda: AT)
     kept = await conversations.start(home=RecordHome.owners())
     gone = await conversations.start(home=RecordHome.owners())
     await conversations.stamp_deleted(gone.id)
-    lists = PlaceLists(conversations=conversations)
+    lists = _lists(conversations)
 
     shown = await lists.shown(
         input_place=None,
         suggested=[f"conversation:{gone.id}", f"conversation:{kept.id}"],
+        work=_work(),
     )
 
     assert [(one.place, one.suggested) for one in shown] == [(f"conversation:{kept.id}", True)]
@@ -686,12 +714,10 @@ async def test_a_deleted_conversation_leaves_the_line_or_nothing() -> None:
     await conversations.stamp_deleted(gone.id)
     suggested = [f"conversation:{gone.id}"]
 
-    with_line = await PlaceLists(conversations=conversations, line=LINE).shown(
-        input_place=None, suggested=suggested
+    with_line = await _lists(conversations, line=LINE).shown(
+        input_place=None, suggested=suggested, work=_work()
     )
-    without = await PlaceLists(conversations=conversations).shown(
-        input_place=None, suggested=suggested
-    )
+    without = await _lists(conversations).shown(input_place=None, suggested=suggested, work=_work())
 
     assert [(one.place, one.suggested) for one in with_line] == [
         (f"telegram:{LINE.instance_id}", False)
@@ -708,12 +734,12 @@ async def test_an_activation_not_a_tasks_lists_its_input_conversation_and_the_li
     async def disconnected() -> bool:
         return False
 
-    shown = await PlaceLists(conversations=conversations, line=LINE).shown(
-        input_place=channel, suggested=None
+    shown = await _lists(conversations, line=LINE).shown(
+        input_place=channel, suggested=None, work=_work(channel)
     )
-    no_line = await PlaceLists(
-        conversations=conversations, line=LINE, line_connected=disconnected
-    ).shown(input_place=channel, suggested=None)
+    no_line = await _lists(conversations, line=LINE, line_connected=disconnected).shown(
+        input_place=channel, suggested=None, work=_work(channel)
+    )
 
     assert [one.heading for one in shown] == ["The hub's chat", "Telegram"]
     assert [one.place for one in no_line] == [f"conversation:{here.id}"]
@@ -770,8 +796,8 @@ async def test_a_conversation_that_cannot_be_read_stays_on_the_list() -> None:
     """§5:8: a failed read is no answer that the conversation was deleted."""
     conversations = _GetFails(now=lambda: AT)
 
-    shown = await PlaceLists(conversations=conversations).shown(
-        input_place=None, suggested=["conversation:c-9"]
+    shown = await _lists(conversations).shown(
+        input_place=None, suggested=["conversation:c-9"], work=_work()
     )
 
     assert [(one.place, one.suggested) for one in shown] == [("conversation:c-9", True)]

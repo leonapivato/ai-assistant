@@ -469,7 +469,9 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
         # ADR-0329 §4:1: a candidate's lookup, over the same store.
         similar = LookUps(stores=holder, views=reads, search_limit=5)
         chat = ChatWriter(
-            conversations=harness.conversation_store, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
+            conversations=harness.conversation_store,
+            stores=holder,
+            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
         )
         place: MessageWriter = chat if wrap is None else wrap(chat)
         return path(

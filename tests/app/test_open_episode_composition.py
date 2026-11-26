@@ -218,7 +218,8 @@ async def test_the_root_hands_the_admission_write_the_story_store_every_stage_wr
     """
     stories = composed.engine._stories
     assert stories is not None
-    assert composed.writer._stories is stories
+    assert composed.writer._reads_story_position
+    assert composed.writer._stores._stories is stories
     position = await stories.position()
     seen = _before_first_stage(monkeypatch, composed, "_windows_stage")
 

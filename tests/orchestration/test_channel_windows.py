@@ -425,7 +425,9 @@ async def test_the_hub_chats_window_is_read_inside_the_admitted_work_by_its_sigh
     windows = [
         one for one in logs if one["event"] == "sight_counted" and one["store"] == "conversations"
     ]
-    assert {one["member"] for one in windows} == {"transcript", "taken_in"}
+    # The window's reads, and the Connections section's recent conversations, which a
+    # work reads through the same holder (ADR-0387 §4:3).
+    assert {one["member"] for one in windows} == {"transcript", "taken_in", "recent"}
     assert all(one["reader"] == "work" and one["bounds"] == ["person_owner"] for one in windows)
 
 

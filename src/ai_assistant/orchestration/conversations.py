@@ -66,7 +66,8 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     TranscriptPage,
 )
-from ai_assistant.orchestration.activation_writer import ActivationWriter
+from ai_assistant.orchestration.activation_writer import ActivationWriter, OpenEpisodes
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.payloads import canonical_payload, check_payload
 
 if TYPE_CHECKING:
@@ -720,7 +721,7 @@ def fit_stream_chunk(chunk: ChatStreamChunk, *, max_bytes: int) -> ChatStreamChu
 class ConversationLifecycle:
     """Owns every ``ConversationStore``/``MemoryStore`` sequence (ADR-0074 §9)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the two stores, the horizon, the clock, the story store and the holder over them
         self,
         *,
         conversations: ConversationStore,
@@ -728,6 +729,7 @@ class ConversationLifecycle:
         retention: timedelta | None,
         now: Clock = _utcnow,
         stories: StoryStore | None = None,
+        stores: BoundStores | None = None,
     ) -> None:
         """Wire the stage from the injected stores.
 
@@ -763,6 +765,11 @@ class ConversationLifecycle:
             stories: The story store whose position each episode's admission write
                 records (ADR-0347 §4:1), handed to the writer and read by nothing
                 else here. With none, no episode records a position.
+            stores: The holder that binds stores for a pass, over these same stores,
+                through which the writer reads and writes a work's episode and reads the
+                story store's position, bound to the work's sight (ADR-0383 §7:4). The
+                composition root hands its one holder; with none, one is built over
+                ``memory``, ``stories`` and ``conversations``, which binds alike.
         """
         self._conversations = conversations
         self._memory = memory
@@ -770,10 +777,22 @@ class ConversationLifecycle:
         self._clock = checked_clock(now, owner="ConversationLifecycle")
         self.activation_writer = ActivationWriter(
             conversations=conversations,
-            memory=memory,
+            stores=(
+                stores
+                if stores is not None
+                else BoundStores(memory=memory, stories=stories, conversations=conversations)
+            ),
             retention=retention,
             now=now,
-            stories=stories,
+            reads_story_position=stories is not None,
+        )
+        #: The restart's close of the episodes a dead process left open, the engine's
+        #: start's (ADR-0286 §7, ADR-0383 §7:8), passing over each capture in flight.
+        self.open_episodes = OpenEpisodes(
+            conversations=conversations,
+            memory=memory,
+            now=now,
+            holds=self.activation_writer.holds,
         )
 
     @property
@@ -788,7 +807,7 @@ class ConversationLifecycle:
 
     # --- resolving the conversation a turn runs under (§2) -------------------
 
-    async def begin(self, conversation_id: str | None, *, home: RecordHome) -> Conversation:
+    async def begin(self, conversation_id: str | None, *, home: RecordHome) -> str:
         """Resolve the conversation this turn runs under, **before** its work (§2).
 
         No id starts one; an id continues that one and marks it active. Both happen
@@ -799,6 +818,12 @@ class ConversationLifecycle:
         it. Marking activity is a separate fact from recording a turn:
         ``last_active_at`` moves, ``last_turn_at`` does not.
 
+        **Marking active is a write of the work's own turn** (ADR-0387 §3:1): the
+        conversation its trigger came through, marked as the turn begins outside the
+        filter, as the store marks it, a conversation gone refusing it and so the turn
+        (§6:1). Only its id comes back: no field of the conversation the store returns
+        reaches the turn (§3:4).
+
         Args:
             conversation_id: The conversation to continue, or ``None`` to start a
                 fresh one. Untrusted input from an adapter, refused rather than
@@ -807,7 +832,7 @@ class ConversationLifecycle:
                 a continued one keeps its own (§4:6).
 
         Returns:
-            The conversation the turn runs under.
+            The id of the conversation the turn runs under.
 
         Raises:
             UnknownConversationError: If ``conversation_id`` names nothing, or
@@ -817,8 +842,9 @@ class ConversationLifecycle:
             ConversationStoreError: If the store cannot be read or written.
         """
         if conversation_id is None:
-            return await self._conversations.start(home=home)
-        return await self._conversations.mark_active(conversation_id)
+            return (await self._conversations.start(home=home)).id
+        await self._conversations.mark_active(conversation_id)
+        return conversation_id
 
     # --- deletion (§8) -------------------------------------------------------
 

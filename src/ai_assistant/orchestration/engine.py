@@ -2369,6 +2369,9 @@ class Engine:
                 conversations=conversations.chat_space,
             )
         )
+        #: The one holder, which the place lists and the Connections section read a place
+        #: that is not one of the work's own through, bound to its sight (ADR-0387 §4:3).
+        self._stores = held
         self._matters = Matters(
             running=lambda: (one.state for one in self._running if one.state is not None),
             # ADR-0383 §9:1: the peer view's reads and a merge's stop record go through
@@ -2663,7 +2666,7 @@ class Engine:
         async with self._open_episodes_lock:
             if self._open_episodes_closed:
                 return
-            await self._conversations.activation_writer.close_open(
+            await self._conversations.open_episodes.close_open(
                 stage_limit=self._stage_record_limit, payload_limit=self._max_payload_bytes
             )
             self._open_episodes_closed = True
@@ -7188,6 +7191,7 @@ class Engine:
             line = self._telegram_seams
             self._place_lists = PlaceLists(
                 conversations=self._conversations.chat_space,
+                stores=self._stores,
                 line=None if line is None else line.channel,
                 line_connected=None if line is None else self._line_connected,
             )
@@ -7633,6 +7637,9 @@ class Engine:
             stage_limit=self._stage_record_limit,
         )
         state.meant_for = str(request.activation_id)
+        # ADR-0382 §2:2, ADR-0387 §2:2: where its request was asked, as code read it from the
+        # asking activation, kept for the work: each place one of its own.
+        state.asked_places = brings.asked.places
         # ADR-0349 §7:21: what a take of its offer brings, the input as the hub stated it.
         state.input_messages = (RecordedInputMessage(text=text, sent_at=self._now()),)
         self._approval_inputs[activation_id] = request
@@ -7758,13 +7765,14 @@ class Engine:
         lists = self._place_lists
         # ADR-0368 §9:5: an approval's work is a person's, its request's person's.
         person = None if state is None else persons_work(state.work_facts, state.held_senders)
-        if lists is None or person is None:
+        if lists is None or person is None or state is None:
             return None
+        work = state
 
         async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
             # ADR-0364 §9:4: and the origin of each input it took by a take.
-            taken = () if state is None else _taken_channels(state)
-            places = await lists.shown(input_place=None, suggested=suggests, taken=taken)
+            taken = _taken_channels(work)
+            places = await lists.shown(input_place=None, suggested=suggests, taken=taken, work=work)
             targets = {
                 one.place: target
                 for one in places
@@ -7830,6 +7838,7 @@ class Engine:
         line = self._telegram_seams
         self._place_lists = PlaceLists(
             conversations=self._conversations.chat_space,
+            stores=self._stores,
             line=None if line is None else line.channel,
             line_connected=None if line is None else self._line_connected,
         )
@@ -7932,16 +7941,24 @@ class Engine:
         lists = self._place_lists
         # ADR-0368 §9:5, ADR-0350 §3:4: spawn is offered only to a person's work.
         person = None if state is None else persons_work(state.work_facts, state.held_senders)
-        if lists is None or person is None or set_in.channel_type not in SPAWNING_KINDS:
+        if (
+            lists is None
+            or person is None
+            or state is None
+            or set_in.channel_type not in SPAWNING_KINDS
+        ):
             return None
+        work = state
         suggested = None if task is None else [place_of(one) for one in task.places]
         input_place = None if task is not None else set_in
 
         async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
             # ADR-0361 §7:3, ADR-0364 §9:4: a place an input taken by a take came from is
             # on the list, a task's work's included.
-            taken = () if state is None else _taken_channels(state)
-            places = await lists.shown(input_place=input_place, suggested=suggested, taken=taken)
+            taken = _taken_channels(work)
+            places = await lists.shown(
+                input_place=input_place, suggested=suggested, taken=taken, work=work
+            )
             targets = {
                 one.place: target
                 for one in places
@@ -7962,12 +7979,18 @@ class Engine:
         schedule and the approvals, where each is wired; and each account the composition
         root registered, pending or disconnected where its record is not active. A read
         that fails shows what it could not read as nothing, never as something it is not.
+
+        The origin, one of the work's own places, is named from its input; the recent
+        conversations are read through the conversation store bound to the running
+        work's sight, so one it does not see is not shown (ADR-0387 §4:1, §4:3).
         """
         shown: list[ConnectionShown] = []
         targets: dict[str, PlaceTarget] = {}
         conversation = CONNECTION_KINDS["conversation"]
         try:
-            recent = await self._conversations.chat_space.recent(limit=self._connections_recent)
+            recent = await self._stores.conversations(work_sight()).recent(
+                limit=self._connections_recent
+            )
         except ConversationStoreError:
             _log.warning("connections_unread", stage="planning", reason="conversations")
             recent = []
@@ -9233,11 +9256,13 @@ class Engine:
         one a device starts, which takes the home of whoever the connection it came by
         belongs to (ADR-0383 §4:3).
         """
-        conversation = await self._conversations.begin(working.requested, home=source_home())
+        # ADR-0387 §3:1, §3:4: marking the trigger's conversation active is a write of the
+        # work's own turn, made outside the filter; only its id comes back.
+        conversation_id = await self._conversations.begin(working.requested, home=source_home())
         if (state := active_state()) is not None:
-            state.resolved_conversation(conversation.id)
+            state.resolved_conversation(conversation_id)
         working.input = ResolvedChannelInput(
-            channel=ChannelIdentity(channel_type="conversation", instance_id=conversation.id),
+            channel=ChannelIdentity(channel_type="conversation", instance_id=conversation_id),
             text=working.utterance,
             modality=Modality.TEXT,
             context=working.context,

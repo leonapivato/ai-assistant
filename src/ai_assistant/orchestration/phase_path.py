@@ -864,6 +864,13 @@ class _ConversationWriter:
     conversation's home is not read. A work whose home no write may carry, one for a
     person the hub knows but does not admit, writes no message: it is not done, with
     nothing written, never unknown (ADR-0383 §2:3, §4:1).
+
+    **Into one of the work's own places outside the filter, into any other through its
+    sight**: the chat writer decides which from the work's inputs (ADR-0387 §2:4, §3:1,
+    §3:2), so a place the work's sight does not see, and that is not its own, is gone to
+    it. **The position the conversation recorded the message at is delivery
+    bookkeeping**: it goes into the work's effect record alone, and reaches no stage,
+    model or surface (§3:4).
     """
 
     writer: MessageWriter

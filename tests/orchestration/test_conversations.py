@@ -133,10 +133,10 @@ async def _seed_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
     """Start a conversation and put ``count`` completed episodes on its channel."""
     conversation = await wiring.stage.begin(None, home=RecordHome.owners())
     episodes = [
-        await wiring.seed(conversation.id, f"activation:{conversation.id}-{index}")
+        await wiring.seed(conversation, f"activation:{conversation}-{index}")
         for index in range(count)
     ]
-    return conversation.id, episodes
+    return conversation, episodes
 
 
 # --- the digest a deletion ceremony shows (ADR-0283 §4:2) ----------------
@@ -165,7 +165,7 @@ async def test_the_digest_of_a_conversation_with_no_episodes_counts_none() -> No
     wiring = Wiring()
     conversation = await wiring.stage.begin(None, home=RecordHome.owners())
 
-    digest = await wiring.stage.digest(conversation.id)
+    digest = await wiring.stage.digest(conversation)
 
     assert digest is not None
     assert digest.recorded_turns == 0
@@ -248,22 +248,22 @@ async def test_forgetting_a_conversation_forgets_every_episode_on_its_channel() 
     clock = MovableClock()
     wiring = Wiring(clock=clock)
     conversation = await wiring.stage.begin(None, home=RecordHome.owners())
-    await wiring.seed(conversation.id, "activation:completed")
-    await wiring.seed(conversation.id, "activation:failed", completed=False)
-    await wiring.seed(conversation.id, "activation:expired", expires_at=AT + MINUTE)
+    await wiring.seed(conversation, "activation:completed")
+    await wiring.seed(conversation, "activation:failed", completed=False)
+    await wiring.seed(conversation, "activation:expired", expires_at=AT + MINUTE)
     await wiring.seed(
-        conversation.id, "activation:not-yet-valid", validity=Validity(valid_from=AT + DAY)
+        conversation, "activation:not-yet-valid", validity=Validity(valid_from=AT + DAY)
     )
     other_id, other_episodes = await _seed_turns(wiring, 1)
     clock.advance(HOUR)  # the expired one is now past its horizon and not yet purged
-    assert len(await channel_ids(wiring.memory, conversation.id)) == 4
+    assert len(await channel_ids(wiring.memory, conversation)) == 4
 
-    assert await wiring.stage.forget(conversation.id) is True
+    assert await wiring.stage.forget(conversation) is True
 
-    assert await channel_ids(wiring.memory, conversation.id) == []
+    assert await channel_ids(wiring.memory, conversation) == []
     assert await channel_ids(wiring.memory, other_id) == other_episodes
-    assert await wiring.conversations.get(conversation.id) is not None, "§5:6: it stands"
-    assert await wiring.stage.forget(conversation.id) is False, "nothing left to forget"
+    assert await wiring.conversations.get(conversation) is not None, "§5:6: it stands"
+    assert await wiring.stage.forget(conversation) is False, "nothing left to forget"
 
 
 async def test_forgetting_reaches_a_deleted_conversations_episodes() -> None:
@@ -531,8 +531,8 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             now=clock,
         )
         conversation = await stage.begin(None, home=RecordHome.owners())
-        await memory.add(conversation_episode(conversation.id, "activation:before-the-crash"))
-        assert await first.stamp_deleted(conversation.id) is True
+        await memory.add(conversation_episode(conversation, "activation:before-the-crash"))
+        assert await first.stamp_deleted(conversation) is True
         # ...and here the process dies: no episode deleted, no record dropped.
     finally:
         first.close()
@@ -555,7 +555,7 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             "deleting forgets nothing (ADR-0293 §2:3)"
         )
         assert await reopened.stamped_conversation_ids() == []
-        assert await reopened.get(conversation.id) is None
+        assert await reopened.get(conversation) is None
     finally:
         reopened.close()
 
@@ -593,12 +593,12 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_an_episode(held:
     wiring = Wiring(clock=clock, retention=7 * DAY)
     conversation = await wiring.stage.begin(None, home=RecordHome.owners())
     if held == "live":
-        episode = await wiring.seed(conversation.id, "activation:held", unexpiring=True)
+        episode = await wiring.seed(conversation, "activation:held", unexpiring=True)
     elif held == "expired-unpurged":
-        episode = await wiring.seed(conversation.id, "activation:held")
+        episode = await wiring.seed(conversation, "activation:held")
     else:
         episode = await wiring.seed(
-            conversation.id,
+            conversation,
             "activation:held",
             unexpiring=True,
             validity=Validity(valid_from=AT + 365 * DAY),
@@ -607,10 +607,8 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_an_episode(held:
     clock.advance(30 * DAY)
 
     assert await wiring.stage.reclaim() == 0
-    assert await wiring.conversations.get(conversation.id) is not None
-    assert await channel_ids(wiring.memory, conversation.id) == [episode], (
-        "reclaim destroys nothing"
-    )
+    assert await wiring.conversations.get(conversation) is not None
+    assert await channel_ids(wiring.memory, conversation) == [episode], "reclaim destroys nothing"
 
 
 class RetunableStore(FakeConversationStore):
@@ -666,7 +664,7 @@ async def test_reclaim_judges_against_the_horizon_in_force_when_it_runs(
     )
 
     assert await reclaiming.reclaim() == expected
-    assert (await conversations.get(conversation.id) is None) is bool(expected)
+    assert (await conversations.get(conversation) is None) is bool(expected)
 
 
 async def test_reclaim_is_switched_off_when_retention_is_unset() -> None:
@@ -682,4 +680,4 @@ async def test_reclaim_is_switched_off_when_retention_is_unset() -> None:
     clock.advance(1000 * DAY)
 
     assert await wiring.stage.reclaim() == 0
-    assert await wiring.conversations.get(conversation.id) is not None
+    assert await wiring.conversations.get(conversation) is not None

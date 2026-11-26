@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     TaskSpawn,
     parties_are_outside,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.chat import COULDNT_FINISH
 from ai_assistant.orchestration.task_manager import PlaceLists
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
         OfferedTool,
         PlanningExchange,
         ScheduledTask,
+        Sight,
     )
     from ai_assistant.testing import FakeConversationStore
 
@@ -360,6 +362,11 @@ class _DeletedWhilePlanning:
             await self._store.stamp_deleted(self._id)
         return await self._store.get(conversation_id)
 
+    def bound(self, sight: Sight) -> _DeletedWhilePlanning:
+        """Itself: the fake it wraps only counts, so bound it answers as it does."""
+        del sight
+        return self
+
 
 async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_by_rule() -> None:
     """§5:9, §6:7, #3448: authorizing refuses it, so no message of the round is claimed."""
@@ -372,7 +379,10 @@ async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
     gone = await harness.conversation_store.start(home=RecordHome.owners())
     space.append(_DeletedWhilePlanning(harness.conversation_store, gone.id))
-    harness.engine._place_lists = PlaceLists(conversations=cast("ConversationStore", space[0]))
+    chat = cast("ConversationStore", space[0])
+    harness.engine._place_lists = PlaceLists(
+        conversations=chat, stores=BoundStores(memory=harness.memory, conversations=chat)
+    )
     place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
     await write_task(harness.plans, activation(), places=(place,))
     await harness.engine.start()
@@ -649,7 +659,9 @@ async def test_a_task_whose_conversation_was_deleted_speaks_on_the_line() -> Non
     # The harness's connection records hold no account, so the line is read as connected
     # wherever it is configured, as its own suite drives it.
     harness.engine._place_lists = PlaceLists(
-        conversations=harness.conversation_store, line=line.channel
+        conversations=harness.conversation_store,
+        stores=BoundStores(memory=harness.memory, conversations=harness.conversation_store),
+        line=line.channel,
     )
     gone = await harness.conversation_store.start(home=RecordHome.owners())
     place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
