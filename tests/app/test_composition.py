@@ -85,6 +85,7 @@ from ai_assistant.memory import (
     SqliteNotificationStore,
     SqliteStoryStore,
 )
+from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.upcoming import (
@@ -335,6 +336,23 @@ async def test_build_engine_builds_story_and_notification_stores_whose_bindings_
         assert notifications._sight_mode is SightMode.COUNT
         assert stories._sight is None
         assert notifications._sight is None
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_builds_a_conversation_store_whose_bindings_only_count(
+    tmp_path: Path,
+) -> None:
+    """ADR-0383 §7:10, §11:1: the root fixes the conversation store's mode, to counting.
+
+    Nothing in the root binds it yet, so the engine holds it unbound.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        conversations = engine._conversations.chat_space
+        assert isinstance(conversations, SqliteConversationStore)  # narrows the Protocol seam
+        assert conversations._sight_mode is SightMode.COUNT
+        assert conversations._sight is None
     finally:
         await engine.aclose()
 

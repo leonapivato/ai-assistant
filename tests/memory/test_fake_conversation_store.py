@@ -16,11 +16,20 @@ import pytest
 from conversation_store_contract import (
     ConversationStoreContract,
     ConversationStoreFactory,
+    KeepOnly,
     MovableClock,
+    SightStoreFactory,
 )
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
-from ai_assistant.core.types import RecordHome
+from ai_assistant.core.types import (
+    ConversationStartedChange,
+    DevicesChangedChange,
+    MessageAddedChange,
+    MessageDeletedChange,
+    RecordHome,
+    SightMode,
+)
 from ai_assistant.testing import FakeConversationStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite, settle
 
@@ -28,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.core.types import ChatChange, Sight
     from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The fake's own defaults, restated here rather than imported: the suite asserts
@@ -75,6 +85,19 @@ class TestFakeConversationStoreContract(ConversationStoreContract):
     @pytest.fixture
     def purge_default(self) -> int:
         return _PURGE_DEFAULT
+
+    @pytest.fixture
+    def sight_store_factory(self) -> SightStoreFactory:
+        def build(
+            mode: SightMode, *, now: Callable[[], datetime], new_id: Callable[[], str]
+        ) -> ConversationStore:
+            return FakeConversationStore(now=now, new_id=new_id, sight_mode=mode)
+
+        return build
+
+    @pytest.fixture
+    def keep_only(self) -> KeepOnly:
+        return _keep_only
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
@@ -212,3 +235,61 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
 
     with pytest.raises(ConversationStoreError):
         await store.start(home=RecordHome.owners())
+
+
+def _keep_only(store: ConversationStore, sight: Sight) -> None:
+    """Make the fake hold only what ``sight`` sees, as though nothing else was written.
+
+    The ``KeepOnly`` the shared suite asks of each implementation, written against the
+    fake's own state: every conversation and every message or marker ``sight`` does not
+    see goes, with its bookkeeping, claims and changes; every device row goes, a start
+    is recorded with no devices and a deletion with no readers; a deletion of a
+    conversation no longer held goes. The counter is left as it is (ADR-0383 §8:5).
+    """
+    assert isinstance(store, FakeConversationStore)
+    for conversation_id, conversation in list(store._conversations.items()):
+        if not sight.sees(conversation.home):
+            del store._conversations[conversation_id]
+            store._clear_chat_of(conversation_id)
+    for conversation_id, held in store._messages.items():
+        for position in list(held):
+            if not sight.sees(store._message_home(conversation_id, position)):
+                _forget_message(store, conversation_id, position)
+    store._changes[:] = [
+        one.model_copy(update={"devices": ()})
+        if isinstance(one, ConversationStartedChange)
+        else one
+        for one in store._changes
+        if _kept(store, one)
+    ]
+    store._shared.my_devices = ()
+    for conversation_id in store._devices:
+        store._devices[conversation_id] = ()
+    for seq in store._deleted_ends:
+        store._deleted_ends[seq] = ()
+
+
+def _forget_message(store: FakeConversationStore, conversation_id: str, position: int) -> None:
+    """Remove one message or marker from the fake, with its bookkeeping and claims."""
+    del store._messages[conversation_id][position]
+    store._marker_homes[conversation_id].pop(position, None)
+    store._taken[conversation_id].pop(position, None)
+    sent, claimed = store._sent[conversation_id], store._claimed[conversation_id]
+    for sent_key in [key for key, at in sent.items() if at == position]:
+        del sent[sent_key]
+    for claim in [key for key, at in claimed.items() if at == position]:
+        del claimed[claim]
+
+
+def _kept(store: FakeConversationStore, change: ChatChange) -> bool:
+    """Whether a store holding only what is left would have recorded ``change``."""
+    if isinstance(change, DevicesChangedChange):
+        return False
+    conversation_id = change.conversation_id
+    if conversation_id not in store._conversations:
+        return False
+    if isinstance(change, MessageAddedChange):
+        return change.message.position in store._messages[conversation_id]
+    if isinstance(change, MessageDeletedChange):
+        return change.marker.position in store._messages[conversation_id]
+    return True

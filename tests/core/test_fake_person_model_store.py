@@ -20,12 +20,13 @@ from person_model_store_contract import (
     PANEL,
     PersonModelStoreContract,
     PersonModelStoreFactory,
+    SightStoreFactory,
     pin_suggestion,
     ticking,
 )
 
 from ai_assistant.core.errors import PersonModelStoreError
-from ai_assistant.core.types import OWNER_PERSON_ID, PersonModelWriteKind, ProfileField
+from ai_assistant.core.types import OWNER_PERSON_ID, PersonModelWriteKind, ProfileField, SightMode
 from ai_assistant.testing import DEFAULT_PROFILE_FIELD_CHARS, FakePersonModelStore
 
 if TYPE_CHECKING:
@@ -58,6 +59,17 @@ class TestFakePersonModelStoreContract(PersonModelStoreContract):
             if now is None:
                 return FakePersonModelStore(field_chars=field_chars)
             return FakePersonModelStore(field_chars=field_chars, now=now)
+
+        return build
+
+    @pytest.fixture
+    def sight_store_factory(self) -> SightStoreFactory:
+        def build(
+            mode: SightMode, *, now: Callable[[], datetime], new_id: Callable[[str], str]
+        ) -> PersonModelStore:
+            return FakePersonModelStore(
+                field_chars=FIELD_CHARS, now=now, new_id=new_id, sight_mode=mode
+            )
 
         return build
 

@@ -26,15 +26,26 @@ reads or writes anything, as a store fault would.
 
 Every member runs to its end without awaiting, so on one event loop each is one
 indivisible step, which is the exclusion the contract asks of it.
+
+**It can be bound to a sight** (ADR-0383 §7:1), as the store is: a record's home is its
+person's domain (§3, §5:2), and :meth:`FakePersonModelStore.bound` returns a copy sharing
+every piece of this fake's state, with the sight set. Built to withhold, the copy answers
+as this fake would holding only the people whose domain the sight sees, and refuses a
+write naming another ``unknown_person``; built to count, the default, it answers as
+unbound and logs ``sight_counted`` for each read (§11:1).
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from typing import TYPE_CHECKING, Final, final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PersonModelStoreError
@@ -54,6 +65,8 @@ from ai_assistant.core.types import (
     Profile,
     ProfileChange,
     ProfileField,
+    RecordHome,
+    SightMode,
     StyleMark,
     SuggestionKind,
     SuggestionState,
@@ -61,15 +74,20 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
-    from ai_assistant.core.types import ProposedSuggestion
+    from ai_assistant.core.types import ProposedSuggestion, Sight
 
 __all__ = ["DEFAULT_PROFILE_FIELD_CHARS", "FakePersonModelStore", "profile_value_fault"]
 
 #: The fake's bound on a text field's length, where a test names none. The deployment's
 #: is a composition-root constant (ADR-0338 §3:2); this is only the fake's default.
 DEFAULT_PROFILE_FIELD_CHARS: Final = 200
+
+_log = structlog.get_logger(__name__)
+
+#: The store's code in ADR-0383 §11:1's event, as the person-model store writes it.
+_STORE_CODE: Final = "person_model"
 
 _WRITTEN: Final = PersonModelWriteKind.WRITTEN
 _UNCHANGED: Final = PersonModelWriteKind.UNCHANGED
@@ -125,6 +143,18 @@ def _refused(
     )
 
 
+def _home_of(person_id: str) -> RecordHome | None:
+    """The home of a record keyed by ``person_id``: that person's domain (ADR-0383 §3).
+
+    ``None`` where the id does not read back, unchanged, as a person's, as the store has it.
+    """
+    try:
+        home = RecordHome.person(person_id)
+    except ValidationError:
+        return None
+    return home if home.id == person_id else None
+
+
 def _checked(value: object, *, name: str) -> str:
     """A non-blank ``str`` argument, or a ``ValueError`` before anything is read."""
     if not isinstance(value, str) or not value.strip():
@@ -155,6 +185,7 @@ class FakePersonModelStore:
         field_chars: int = DEFAULT_PROFILE_FIELD_CHARS,
         now: Callable[[], datetime] = _utcnow,
         new_id: Callable[[str], str] | None = None,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Build the store as first created: the owner, with an empty profile.
 
@@ -164,6 +195,8 @@ class FakePersonModelStore:
             new_id: Mints a record's id from its kind (``pin``, ``mark`` or
                 ``suggestion``); sequential per kind where ``None``. An id it mints
                 that a held record carries is refused as a store fault.
+            sight_mode: Whether a copy bound to a sight withholds or only counts
+                (ADR-0383 §7:10).
 
         Raises:
             ValueError: If ``field_chars`` is below 1.
@@ -180,7 +213,10 @@ class FakePersonModelStore:
         self._new_id = new_id or (lambda kind: f"{kind}:{next(numbers)}")
         owner = Person(id=OWNER_PERSON_ID, role=PersonRole.OWNER, created_at=self._now())
         self._people: dict[str, _Held] = {owner.id: _Held(person=owner)}
-        self._fail = False
+        #: Whether the next member fails, held in a list so a bound copy shares it.
+        self._fail = [False]
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
 
     def _now(self) -> datetime:
         """One reading of the clock, taken before the write it dates changes anything.
@@ -199,13 +235,52 @@ class FakePersonModelStore:
 
     def fail_next(self) -> None:
         """Make the next member called raise ``PersonModelStoreError``, touching nothing."""
-        self._fail = True
+        self._fail[0] = True
 
     def _fault(self) -> None:
-        if self._fail:
-            self._fail = False
+        if self._fail[0]:
+            self._fail[0] = False
             msg = "the fake person-model store was told to fail"
             raise PersonModelStoreError(msg)
+
+    # --- a copy bound to a sight (ADR-0383 §7, §11) -----------------------------------
+
+    def bound(self, sight: Sight) -> FakePersonModelStore:
+        """This fake, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing every piece of this fake's state, with the sight set: the
+        meet of the one it was already bound to, where it was (§6:6).
+
+        Raises:
+            ValueError: If this fake is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _sees(self, person_id: str) -> bool:
+        """Whether this fake, as bound, holds ``person_id``'s records (§7:2)."""
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return True
+        return self._sight.sees(_home_of(person_id))
+
+    def _held(self, person_id: str) -> _Held | None:
+        """The person's records, where this fake, as bound, holds them."""
+        return self._people.get(person_id) if self._sees(person_id) else None
+
+    def _holding(self) -> list[_Held]:
+        """Every person this fake, as bound, holds, in the order created."""
+        return [one for one in self._people.values() if self._sees(one.person.id)]
+
+    def _counted(self, member: str, given: Iterable[str]) -> None:
+        """Write §11:1's count of one read, given each record's person, where counting."""
+        if self._sight is None or self._sight_mode is not SightMode.COUNT:
+            return
+        count = self._sight.count(
+            store=_STORE_CODE, member=member, given=((_home_of(one), None) for one in given)
+        )
+        _log.info("sight_counted", **count.model_dump(mode="json"))
 
     def _mint(self, kind: str) -> str:
         """A new record's id, never one a held record carries, minted before any change.
@@ -231,9 +306,21 @@ class FakePersonModelStore:
         """Read one person's model (ADR-0338 §10:2)."""
         _checked(person_id, name="person_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
+            self._counted("read", ())
             return None
+        self._counted(
+            "read",
+            [held.person.id]
+            * (
+                1
+                + len(held.changes)
+                + len(held.pins)
+                + len(held.marks)
+                + sum(one.state is SuggestionState.PENDING for one in held.suggestions)
+            ),
+        )
         return PersonModel(
             person=held.person,
             profile=held.profile,
@@ -248,7 +335,17 @@ class FakePersonModelStore:
     async def export(self) -> PersonModelExport:
         """Every record held (ADR-0338 §10:5)."""
         self._fault()
-        people = list(self._people.values())
+        people = self._holding()
+        self._counted(
+            "export",
+            [
+                one.person.id
+                for one in people
+                for _ in range(
+                    1 + len(one.changes) + len(one.pins) + len(one.marks) + len(one.suggestions)
+                )
+            ],
+        )
         return PersonModelExport(
             persons=tuple(one.person for one in people),
             profiles=tuple((one.person.id, one.profile) for one in people),
@@ -261,11 +358,13 @@ class FakePersonModelStore:
     async def clear(self) -> int:
         """Erase every record, the owner included (ADR-0338 §10:5)."""
         self._fault()
+        held = self._holding()
         erased = sum(
             2 + len(one.changes) + len(one.pins) + len(one.marks) + len(one.suggestions)
-            for one in self._people.values()
+            for one in held
         )
-        self._people.clear()
+        for one in held:
+            del self._people[one.person.id]
         return erased
 
     # --- the profile (§3) -------------------------------------------------------------
@@ -281,7 +380,7 @@ class FakePersonModelStore:
         """Set or clear one field, logging the change in the same step (§3:2-§3:5)."""
         _checked(person_id, name="person_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         if act.how is PersonActHow.SUGGESTION:
@@ -345,7 +444,7 @@ class FakePersonModelStore:
         _checked(person_id, name="person_id")
         _checked(memory_id, name="memory_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         if act.how not in _PIN_ACTS:
@@ -383,7 +482,7 @@ class FakePersonModelStore:
         _checked(person_id, name="person_id")
         _checked(pin_id, name="pin_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         for index, pin in enumerate(held.pins):
@@ -401,7 +500,7 @@ class FakePersonModelStore:
         _checked(person_id, name="person_id")
         _checked(memory_id, name="memory_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         existing = next((mark for mark in held.marks if mark.memory_id == memory_id), None)
@@ -421,7 +520,7 @@ class FakePersonModelStore:
         _checked(person_id, name="person_id")
         _checked(mark_id, name="mark_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         for index, mark in enumerate(held.marks):
@@ -440,7 +539,7 @@ class FakePersonModelStore:
         """Record a pending suggestion, unless held, pending or dismissed (§9:2, §9:5)."""
         _checked(person_id, name="person_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         if suggestion.kind is SuggestionKind.FIELD:
@@ -489,7 +588,7 @@ class FakePersonModelStore:
         _checked(suggestion_id, name="suggestion_id")
         _checked(by, name="by")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         found = self._pending(held, suggestion_id)
@@ -516,7 +615,7 @@ class FakePersonModelStore:
         _checked(person_id, name="person_id")
         _checked(suggestion_id, name="suggestion_id")
         self._fault()
-        held = self._people.get(person_id)
+        held = self._held(person_id)
         if held is None:
             return _refused(PersonModelRefusal.UNKNOWN_PERSON)
         found = self._pending(held, suggestion_id)

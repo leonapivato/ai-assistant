@@ -7752,6 +7752,91 @@ class ConversationStore(Protocol):
         """
         ...
 
+    # --- a store bound to a sight (ADR-0383 §7) -------------------------------------
+
+    def bound(self, sight: Sight) -> ConversationStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back. No record here is made by an activation,
+        so §7:4 adds none: a message written under an effect, or taken in by the
+        sight's activation, is held by its home alone.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **Withholding** (§3:3, §7:2, §7:5, §8). Save a write's own checks, a bound store
+        answers every member as this store would answer it if it held only the records
+        ``sight`` sees, decided by :meth:`~ai_assistant.core.types.Sight.withheld` and
+        by nothing else (§7:3), applied before it orders, limits, pages or counts. It
+        holds a conversation whose home ``sight`` sees and, within it, each message
+        whose own home ``sight`` sees, a deleted message's marker by the home it keeps;
+        it holds no device row (§3:3), and no record with no home (§5:3).
+
+        * A conversation it does not hold is, for every member naming it, one never
+          started: :meth:`get`'s and :meth:`transcript`'s ``None``,
+          :meth:`conversation_devices`' ``None``, :meth:`untaken_messages`' ``()``,
+          :meth:`taken_in`'s ``{}``, :meth:`record_turn`'s ``None``,
+          :meth:`stamp_deleted`'s and :meth:`drop_if_eligible`'s ``False``, and
+          ``UnknownConversationError`` from :meth:`mark_active`,
+          :meth:`effect_position`, :meth:`delete_message`,
+          :meth:`set_conversation_devices` and :meth:`take_in`. :meth:`recent`,
+          :meth:`stamped_conversation_ids`, :meth:`conversations_awaiting` and
+          :meth:`export` list none of it.
+        * In a conversation it holds, a message it does not hold is absent from
+          :meth:`transcript`, :meth:`untaken_messages`, :meth:`taken_in`,
+          :meth:`changes`, :meth:`export` and every count, its marker with it:
+          :meth:`effect_position` answers ``None`` for it, :meth:`delete_message`
+          ``False``, :meth:`take_in` passes it over, and a reply to it is refused
+          ``NO_SUCH_REPLY``, the refusal a reply to a position never held gets
+          (§4:8). :meth:`conversations_awaiting` lists a conversation only for a
+          message it holds.
+        * :meth:`changes` gives back a change only where it names a conversation the
+          store holds and, for a message's addition or deletion, a message it holds; a
+          change to a set of devices never, a conversation's start with no devices, and
+          the deletion of a conversation since dropped never, its home being held by no
+          row any more. :meth:`my_devices` gives ``()``, :meth:`conversation_devices`
+          ``()`` for a conversation it holds, :meth:`device_conversations` an empty
+          page, and :meth:`device_changes` no change, each device reached by none.
+        * **What counts writes answers alike bound or not** (§8:5): a message's
+          position and a change's sequence number are issued by the one store-wide
+          counter each, gaps where records it does not hold sit included, and a page's
+          ``as_of`` and, where the page is not full, ``next_after`` are the change
+          stream's head.
+        * A write that would change or remove a record it does not hold is refused as
+          above, writing nothing (§7:5): :meth:`stamp_deleted` and
+          :meth:`drop_if_eligible` answer ``False`` for a conversation keeping a message
+          it does not hold. A write's own checks are decided over every record the
+          store holds, as the unbound store decides them (§7:11): a minted id, a
+          repeated send or claim, a device's being an end for writing, a message's
+          position. :meth:`start`, :meth:`set_my_devices` and :meth:`remove_device`
+          write as the unbound store does.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and every read member writes one
+        event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes: how many
+        records the read gave back (the conversations it presents, each message or
+        marker by the home it would be withheld by, and each device row or change
+        reaching a device by one, as having no home), how many ``sight`` would have
+        withheld by reason, and the reader's kind and bounds. It carries no record's
+        text and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
+        """
+        ...
+
 
 @runtime_checkable
 class StoryStore(Protocol):
@@ -15037,6 +15122,54 @@ class PersonModelStore(Protocol):
 
         Raises:
             PersonModelStoreError: If the store cannot be written.
+        """
+        ...
+
+    def bound(self, sight: Sight) -> PersonModelStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back.
+
+        **A record's home here is its person's domain** (§3, §5:2): a person, their
+        profile and change log, and each pin, mark and suggestion keyed by their
+        ``person_id``. No record here is made by an activation, so §7:4 adds none.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **Withholding** (§7:2, §7:5, §8). Save a write's own checks, a bound store
+        answers every member as this store would answer it if it held only the people
+        whose domain ``sight`` sees, and their records, decided by
+        :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else (§7:3):
+        :meth:`read` gives ``None`` for a person it does not hold, as for one never
+        held; :meth:`export` carries, and :meth:`clear` erases and counts, only what it
+        holds. Every write naming a person it does not hold is refused
+        ``unknown_person``, writing nothing, as for a person the store never held: it
+        creates no second model beside the one withheld. A write's own checks are
+        decided over every record the store holds, as the unbound store decides them
+        (§7:11): a minted id is one no pin, mark or suggestion of any person carries.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and :meth:`read` and
+        :meth:`export` each write one event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes: how many
+        records the read gave back (the person, and each change, pin, mark and
+        suggestion), how many ``sight`` would have withheld by reason, and the reader's
+        kind and bounds. It carries no record's text and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
         """
         ...
 
