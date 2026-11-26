@@ -28,6 +28,7 @@ from plan_store_contract import (
     _request,
     _request_held,
     _spending_ticket,
+    _tap,
 )
 from pydantic import ValidationError
 
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalRequestState,
     ApprovalWriteAnswer,
     ChannelIdentity,
     DueNow,
@@ -2407,8 +2409,7 @@ async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_ca
     hold a string, and a request of another person's whose cards hold one: through a
     binding over the owner's domain, a read of a part, a claim spending a part and one
     under a ticket, a push of a task never written and a card answer as though the broken
-    records were never written. Unbound, the read of the part refuses the broken row, as
-    before.
+    records were never written.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
@@ -2448,8 +2449,9 @@ async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_ca
         )
         carded = await owners.record_approval_card("q-owner", _card("tok-owner"))
         assert [card.token for card in carded.cards] == ["tok-owner"]
-        with pytest.raises(PlanningError):
-            await store.part_effects([part])
+        # Unbound too: the part is read through the store's decoder, which names none for
+        # a record that does not decode, so a broken row that carries no part is no error.
+        assert await store.part_effects([part]) == (await store.activation_effects(["act-o"]))[:1]
     finally:
         store.close()
 
@@ -2572,5 +2574,99 @@ async def test_a_key_check_fetches_nothing_of_a_row_the_binding_does_not_hold(
             await owners.claim_ticket_call(_spending_ticket("e-ticket-2", "q-owner"), match=None)
             is TicketClaim.USED
         )
+    finally:
+        store.close()
+
+
+async def test_every_key_a_statement_reads_from_a_record_is_the_decoders(
+    tmp_path: Path,
+) -> None:
+    """§7:3, §7:11: a key named twice in a record is the one the decoder keeps, the last.
+
+    Through a binding over the owner's domain, a shared effect whose record names no part
+    and then the part a claim spends answers that claim ``ALREADY_USED``; a held effect
+    whose record names another ticket and then the owner's answers ``USED``; and another
+    person's request whose record names two activations its outcome was pushed to refuses
+    a push to the last. Read as JSON, each would have been the first.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        await store.claim_activation_effect(
+            _effect("e-shared", activation="act-s").model_copy(
+                update={"home": RecordHome.shared()}
+            ),
+            match=None,
+        )
+        await _approved(store, "q-owner")
+        await store.claim_ticket_call(_spending_ticket("e-ticket", "q-owner"), match=None)
+        await _asked(store, _request("q-bob", person="person:bob", hotel="the Savoy"))
+        await store.answer_approval_request(
+            "q-bob",
+            ApprovalRequestState.DENIED,
+            _tap(),
+        )
+        await store.mark_approval_outcome_pushed("q-bob", "act-push")
+        await _approved(store, "q-other")
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE activation_effects SET data = replace(data, '\"part\":null', "
+                '\'"part":null,"part":{"round":"q-dup","part":1}\') '
+                "WHERE id = 'e-shared'"
+            )
+            conn.execute(
+                'UPDATE activation_effects SET data = replace(data, \'"ticket":"q-owner"\', '
+                '\'"ticket":"q-elsewhere","ticket":"q-owner"\') WHERE id = \'e-ticket\''
+            )
+            conn.execute(
+                'UPDATE approval_requests SET data = replace(data, \'"pushed_to":"act-push"\', '
+                '\'"pushed_to":"act-push","pushed_to":"act-later"\') WHERE id = \'q-bob\''
+            )
+            conn.execute(
+                "UPDATE approval_requests SET data = json_set(data, '$.ticket', 'held', "
+                "'$.spent_by', json('null')) WHERE id = 'q-owner'"
+            )
+            counts = conn.execute(
+                "SELECT (SELECT count(*) FROM activation_effects WHERE instr(data, "
+                '\'"part":{"round":"q-dup"\') > 0), (SELECT count(*) FROM activation_effects '
+                "WHERE instr(data, '\"q-elsewhere\"') > 0), (SELECT count(*) FROM "
+                "approval_requests WHERE instr(data, '\"act-later\"') > 0)"
+            ).fetchone()
+        assert counts == (1, 1, 1)
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        spends = _effect("e-spends", activation="act-o").model_copy(
+            update={"part": QuestionPart(round="q-dup", part=1)}
+        )
+        assert (
+            await owners.claim_activation_effect(spends, match=None)
+            is ActivationEffectClaim.ALREADY_USED
+        )
+        assert (
+            await owners.claim_ticket_call(_spending_ticket("e-again", "q-owner"), match=None)
+            is TicketClaim.USED
+        )
+        with pytest.raises(PlanningError, match="already pushed"):
+            await owners.mark_approval_outcome_pushed("q-other", "act-later")
+    finally:
+        store.close()
+
+
+async def test_a_bound_observation_write_fetches_no_column_of_a_record_it_does_not_hold(
+    tmp_path: Path,
+) -> None:
+    """§7:5: the refusal is decided by whether the row is held, read before any column."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        shared = _observed("activation:act-s").model_copy(update={"home": RecordHome.shared()})
+        await store.write_observation(shared, expected_revision=0)
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE observations SET data = CAST(x'41' || x'80' AS TEXT) "
+                "WHERE episode_id = 'activation:act-s'"
+            )
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        with pytest.raises(PlanningError, match="may not change"):
+            await owners.write_observation(_observed("activation:act-s"), expected_revision=0)
     finally:
         store.close()

@@ -125,12 +125,12 @@ def person_home(person: object) -> RecordHome | None:
     return home if home.id == person else None
 
 
-#: What :func:`_stored_value` gives for a column that holds no text it can read: not a
+#: What :func:`stored_value` gives for a column that holds no text it can read: not a
 #: ``str``, so the readings refuse it.
 _UNREADABLE: Final = object()
 
 
-def _stored_value(storage: object, raw: object) -> object:
+def stored_value(storage: object, raw: object) -> object:
     """A column's value as the readings take it, from its storage class and its bytes.
 
     The statement hands the storage class (``typeof``) and the value cast to a blob, so no
@@ -151,13 +151,13 @@ def _stored_value(storage: object, raw: object) -> object:
 
 def _home_readable(kind_type: object, kind: object, id_type: object, home_id: object) -> int:
     """``1`` where :func:`stored_home` reads a home in the two columns, ``0`` otherwise."""
-    home = stored_home(_stored_value(kind_type, kind), _stored_value(id_type, home_id))
+    home = stored_home(stored_value(kind_type, kind), stored_value(id_type, home_id))
     return int(home is not None)
 
 
 def _person_readable(person_type: object, person: object) -> int:
     """``1`` where :func:`person_home` reads a person in the column, ``0`` otherwise."""
-    return int(person_home(_stored_value(person_type, person)) is not None)
+    return int(person_home(stored_value(person_type, person)) is not None)
 
 
 def _request_asker(storage: object, raw: object) -> str | None:
@@ -168,7 +168,7 @@ def _request_asker(storage: object, raw: object) -> str | None:
     altered outside the store too: one naming its asker twice names the one the decoder
     keeps. A record that does not decode names none.
     """
-    text = _stored_value(storage, raw)
+    text = stored_value(storage, raw)
     if not isinstance(text, str):
         return None
     try:
@@ -184,7 +184,7 @@ def register_readers(conn: sqlite3.Connection) -> None:
     read (§5:3, §7:4). Whether it is turns on whether an identifier is blank or encodable,
     which SQL cannot decide as the model does, so the statement asks
     :func:`stored_home` and :func:`person_home` themselves. Each function takes a column
-    as its storage class and its value cast to a blob (:func:`_stored_value`), so a value
+    as its storage class and its value cast to a blob (:func:`stored_value`), so a value
     no reading accepts, text that is not UTF-8 included, answers ``0`` and never raises.
     Each is deterministic and reads nothing but its arguments.
 
