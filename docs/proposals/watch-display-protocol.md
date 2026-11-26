@@ -444,6 +444,18 @@ to thirty times a second; whether the real chip and display keep up is not
 known without a watch. Which things earn the "one thing" screen, and who
 decides, is the hub's to say and is open.
 
+Tools for the model were tried twelfth, as one answer to item 7. The model that
+answers is given four tools and never the protocol: `show` (one thing: a label,
+a headline, a detail), `ask` (a question with two answers, which returns the one
+touched), `timer` and `buzz`. The gateway carries each out on the fixed screens,
+with the model's words cut to length and put in as text, so a model cannot
+draw. When a tool puts a screen up, the spoken answer is heard and not shown.
+A small model used them as meant: it started a countdown when asked for one,
+used none for an ordinary question, and said it could not send a message. Not
+decided, and the hub's to say: whether these are tools in the hub's registry,
+what each needs from permissions (a buzz interrupts a person), and how a work
+that did not start at the watch may reach it.
+
 One thing the engine does is not protocol but shapes it: the watch frees a
 screen's decoded pixels when it leaves the screen, unless an update or a
 flipbook changed them, because those cannot be rebuilt from the stored image.
