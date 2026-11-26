@@ -549,6 +549,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.acting import OwnRecordsAnswer, OwnRecordsCalls
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import EpisodeLookedUp, LookUps
@@ -4532,16 +4533,24 @@ class PhasePath:
         return working
 
     async def written(
-        self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
+        self,
+        conversation_id: str,
+        activation_ids: Sequence[str],
+        positions: Sequence[int],
+        plans: Bound[PlanStore],
     ) -> dict[int, WrittenBy]:
         """Which of ``activation_ids`` wrote each message at ``positions`` in a conversation.
 
         :meth:`written_in`, for the hub chat's reader, which names the conversation.
         """
-        return await self.written_in(_place_id(conversation_id), activation_ids, positions)
+        return await self.written_in(_place_id(conversation_id), activation_ids, positions, plans)
 
     async def written_in(
-        self, place: str, activation_ids: Sequence[str], positions: Sequence[int] | None
+        self,
+        place: str,
+        activation_ids: Sequence[str],
+        positions: Sequence[int] | None,
+        plans: Bound[PlanStore],
     ) -> dict[int, WrittenBy]:
         """Which of ``activation_ids`` wrote each message at ``positions`` (ADR-0303 §7:1).
 
@@ -4558,6 +4567,9 @@ class PhasePath:
             positions: The assistant messages' positions, or ``None`` for every
                 message the candidates wrote into the place: the Telegram line's
                 window, built from its episodes, reads them so (ADR-0323 §10).
+            plans: The plan store bound to the sight of the work whose window this
+                links (ADR-0383 §7:7, §7:9), handed by its channel's reader: an effect
+                record the sight does not see links nothing (§8:3).
 
         Returns:
             What wrote each message, by its position.
@@ -4566,7 +4578,7 @@ class PhasePath:
         if not activation_ids or (wanted is not None and not wanted):
             return {}
         try:
-            recorded = await self._plans.activation_effects(activation_ids)
+            recorded = await plans.activation_effects(activation_ids)
         except Exception:  # the store is down: nothing is linked by what wrote it
             _log.warning("phase_writers_unread", stage="reader", reason="store_failed")
             return {}

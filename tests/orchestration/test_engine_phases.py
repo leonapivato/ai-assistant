@@ -29,6 +29,7 @@ import pytest
 from channel_receiver_contract import event_input
 from exchange_support import labels as shown_labels
 from exchange_support import reported, says, section, shown_text, tag, tags, text_call
+from sight_support import sight_of
 from story_support import episode
 from structlog.testing import capture_logs
 from structured_support import structured
@@ -233,6 +234,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.story_links import Candidates
     from ai_assistant.orchestration.understanding import Windows
+    from ai_assistant.testing import FakePlanStore
 
 _PHONE: Final = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
 
@@ -2392,6 +2394,11 @@ async def test_planning_is_shown_an_earlier_exchange_once_with_its_notes() -> No
     assert rendered.count("Hello!") == 1
 
 
+def _bound(plans: FakePlanStore) -> FakePlanStore:
+    """The plan store bound to the owner's work's sight, as a channel's reader hands it."""
+    return plans.bound(sight_of(at=AT))
+
+
 async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() -> None:
     """ADR-0306 §5:5: only a message done carries its position, in its own place."""
     completer = FakeToolCallingCompleter.scripted()
@@ -2418,11 +2425,11 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
     await claimed(message("e4"), ToolOutcome.SUCCEEDED, position=9)
     await _claimed(harness, "e5", "remember_fact", ToolOutcome.SUCCEEDED)
 
-    assert await path.written("c1", [_ACTIVATION], [2, 3, 5]) == {
+    assert await path.written("c1", [_ACTIVATION], [2, 3, 5], _bound(harness.plans)) == {
         2: WrittenBy(activation_id=_ACTIVATION, round="round:1")
     }
-    assert await path.written("c1", [], [2]) == {}
-    assert await path.written("c1", ["activation-unknown"], [2]) == {}
+    assert await path.written("c1", [], [2], _bound(harness.plans)) == {}
+    assert await path.written("c1", ["activation-unknown"], [2], _bound(harness.plans)) == {}
 
 
 async def test_the_writers_read_marks_no_message_a_question_even_from_a_round_that_asked() -> None:
@@ -2462,7 +2469,7 @@ async def test_the_writers_read_marks_no_message_a_question_even_from_a_round_th
             effect.id, ToolOutcome.SUCCEEDED, position=position
         )
 
-    assert await path.written("c1", ["act-a", "act-b"], [2, 3]) == {
+    assert await path.written("c1", ["act-a", "act-b"], [2, 3], _bound(harness.plans)) == {
         2: WrittenBy(activation_id="act-a", round="round:1"),
         3: WrittenBy(activation_id="act-b", round="round:1"),
     }
@@ -2487,7 +2494,7 @@ async def test_the_writers_read_links_nothing_where_the_records_cannot_be_read(
 
     monkeypatch.setattr(harness.plans, "activation_effects", unreadable)
 
-    assert await path.written("c1", [_ACTIVATION], [2]) == {}
+    assert await path.written("c1", [_ACTIVATION], [2], _bound(harness.plans)) == {}
 
 
 # --- the story views (ADR-0307 §6:1, §6:3-§6:4) -------------------------------------------

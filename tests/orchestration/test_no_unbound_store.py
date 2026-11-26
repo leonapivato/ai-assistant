@@ -77,10 +77,19 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # (`settle_restart`), and voiding a held ticket, which ADR-0384 §2's table leaves
     # unchanged.
     "approval_sensor.py:ApprovalsSensor": "§7:8",
+    # §7:8: the hub chat's reader's intake, a sensor's finding of what is due (ADR-0293
+    # §1:2): what waits (`untaken_messages`), its marking (`take_in`) and, at the engine's
+    # start and each sweep, `notice_awaiting`. Its window reads through the holder (§7:9,
+    # milestone 22's B8b).
+    "chat.py:ChatReader": "§7:8",
+    # §7:8: the line's reader's read of the chat's last activation before its first
+    # poll, the engine's start's (`_after_restart`). Its window reads through the holder
+    # (§7:9, B8b).
+    "telegram.py:TelegramReader": "§7:8",
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B8b the channel readers' windows, B8c look-ups, stories, the person block and matters,
+#: B8c look-ups, stories, the person block and matters,
 #: B8d the plan store's users, authorizing, acting, tasks, approvals and the holders
 #: ADR-0387 names, B9 the observer and the upkeep runs, B10 the owner's own acts
 #: (ADR-0385). A holder more than one lane converts names the last of them. **Only
@@ -102,7 +111,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "candidates.py:_page_candidates": "B10",
     "candidates.py:_approved_candidates": "B10",
     "change_stream.py:ChangeStream": "B10",
-    "chat.py:ChatReader": "B8b",
     # The phases' message writer, a work's turn in its own place (ADR-0387).
     "chat.py:ChatWriter": "B8d",
     # The surface's acts (B10); its sweeps are §7:8's.
@@ -172,16 +180,15 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "task_manager.py:PlaceLists": "B8d",
     "task_manager.py:TaskManager": "B8d",
     "task_rules.py:PersonZones": "B8d",
-    # The line's cards: a work's approval (B8d), the line's window (B8b), the owner's tap
-    # (B10).
+    # The line's cards: a work's approval (B8d) and the owner's tap (B10); the line's
+    # window reads them through the stores it is handed bound (B8b).
     "telegram.py:TelegramCards": "B10",
-    "telegram.py:TelegramReader": "B8b",
     # The observer's use of the one selector; the windows stage walks it bound.
     "understanding.py:RecentEpisodes": "B9",
     "writes.py:MemoryWriteStage": "B9",
 }
 
-_LANES: Final = frozenset({"B8b", "B8c", "B8d", "B9", "B10"})
+_LANES: Final = frozenset({"B8c", "B8d", "B9", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -370,6 +377,52 @@ def test_the_holders_b8e_converted_hold_no_store() -> None:
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
+
+
+#: The stores a channel's reader holds unbound for its §7:8 reads, by the attribute each
+#: is held under, which no read made for a work's window may reach (milestone 22's B8b).
+_INTAKE_STORES: Final = frozenset({"_conversations", "_memory", "_plans"})
+
+#: The methods that read a work's window, by module and class (§7:9).
+_WINDOW_READS: Final[dict[tuple[str, str], frozenset[str]]] = {
+    ("chat.py", "ChatReader"): frozenset({"windowed", "_window", "_links", "_taken_in"}),
+    ("telegram.py", "TelegramReader"): frozenset(
+        {"windowed", "_window", "_episode_items", "_input_message", "_replied"}
+    ),
+    ("telegram.py", "TelegramCards"): frozenset({"on_line", "_posted_words"}),
+}
+
+
+def _unbound_reaches(path: Path, holder: str, methods: frozenset[str]) -> dict[str, set[str]]:
+    """Each of ``methods`` of ``holder`` that reaches a store its class holds unbound."""
+    tree = _parsed(path)
+    (cls,) = (one for one in tree.body if isinstance(one, ast.ClassDef) and one.name == holder)
+    found: dict[str, set[str]] = {}
+    seen: set[str] = set()
+    for node in cls.body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or node.name not in methods:
+            continue
+        seen.add(node.name)
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "self"
+                and inner.attr in _INTAKE_STORES
+            ):
+                found.setdefault(node.name, set()).add(inner.attr)
+    assert seen == methods, f"{holder} no longer has {sorted(methods - seen)}"
+    return found
+
+
+def test_the_channel_readers_read_a_works_window_through_the_holder_alone() -> None:
+    """§7:9: the readers keep their intake unbound (§7:8), and their window reads reach no
+    store but one the holder bound to the work's sight, handed in per read (B8b)."""
+    reaches = {
+        f"{module}:{holder}": _unbound_reaches(_ROOT / module, holder, methods)
+        for (module, holder), methods in _WINDOW_READS.items()
+    }
+    assert reaches == {key: {} for key in reaches}
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:

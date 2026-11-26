@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import pytest
 from identity_support import owners_identities
+from sight_support import sight_of
 from story_support import episode
 from telegram_support import (
     AT,
@@ -76,6 +77,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.approval_calls import OUTSIDE_LINE, CardFacts
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.matters import HeldInput
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
@@ -95,12 +97,13 @@ from ai_assistant.orchestration.telegram import (
     is_stop_command,
     line_channel,
 )
-from ai_assistant.orchestration.understanding import LineMessage, WrittenBy
+from ai_assistant.orchestration.understanding import LineMessage, TranscriptWindow, WrittenBy
 from ai_assistant.orchestration.work_facts import LINE_ACCOUNT_KIND
 from ai_assistant.testing import (
     FakeIdentityStore,
     FakeMemoryStore,
     FakePlanStore,
+    FakeStoryStore,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
 )
@@ -110,7 +113,7 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import IdentityStore
+    from ai_assistant.core.protocols import IdentityStore, PlanStore
 
 
 class _Hold(HeldInput):
@@ -128,6 +131,24 @@ class _Hold(HeldInput):
     def release(self) -> None:
         super().release()
         self._told.append(("released", self.activation_id))
+
+
+def _bound_away(
+    written: Callable[
+        [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
+    ],
+) -> Callable[
+    [str, Sequence[str], Sequence[int] | None, PlanStore], Awaitable[Mapping[int, WrittenBy]]
+]:
+    """A case's ``written`` stand-in, taking the bound plan store the reader hands it."""
+
+    async def bound(
+        place: str, activations: Sequence[str], positions: Sequence[int] | None, plans: PlanStore
+    ) -> Mapping[int, WrittenBy]:
+        del plans
+        return await written(place, activations, positions)
+
+    return bound
 
 
 class _Line:
@@ -183,6 +204,8 @@ class _Line:
         )
         self.rests: list[float] = []
         self.inputs: list[TelegramInput] = []
+        # Each input's window, read as the engine's activation reads it once admitted.
+        self.windows: list[TranscriptWindow] = []
         self.marked: list[tuple[int, ...]] = []
         self.held_then: list[dict[int, TelegramIntake]] = []
         self.gate: asyncio.Event | None = None
@@ -212,7 +235,13 @@ class _Line:
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
             identities=self.identities,
-            written=written,
+            # ADR-0383 §7:9: the window is read through the holder, by the work's sight.
+            stores=BoundStores(
+                memory=self.memory,
+                stories=FakeStoryStore(now=lambda: AT),
+                plans=plans if plans is not None else FakePlanStore(now=lambda: AT),
+            ),
+            written=None if written is None else _bound_away(written),
             hold=lambda place: _Hold(place, self.told),
             sleep=self._rest,
         )
@@ -234,6 +263,11 @@ class _Line:
         if self.marking is not None:
             await self.marking.wait()
         await self.reader.take_in(taken, into=marked)
+        # As the engine's activation does once its input is marked: the window, by the
+        # work's sight (ADR-0383 §7:9).
+        window = (await self.reader.windowed(taken, sight=sight_of(at=AT))).window
+        assert window is not None
+        self.windows.append(window)
         self.marked.append(tuple(marked))
         self.held_then.append(dict(await self.intake.recorded(taken.update_ids)))
         self.entered.set()
@@ -375,8 +409,9 @@ async def test_a_forward_is_taken_in_with_its_original_sender_claimed() -> None:
     assert forwarded.forwarded_from is not None
     assert (forwarded.forwarded_from.name, forwarded.forwarded_from.account_id) == ("Sam", 77)
     assert own.forwarded_from is None
-    assert set(taken.window.forwarded) == {1}
-    assert [one.author for one in taken.window.input_messages] == [MessageAuthor.USER] * 2
+    (window,) = line.windows
+    assert set(window.forwarded) == {1}
+    assert [one.author for one in window.input_messages] == [MessageAuthor.USER] * 2
 
 
 # --- no place waits (ADR-0349 §8:1-§8:2, ADR-0332 §8:7-§8:8) ----------------------------
@@ -643,7 +678,7 @@ async def test_the_window_is_the_lines_recent_episodes_and_a_reply_brings_its_qu
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = line.inputs[0].window
+    window = line.windows[0]
     assert window.conversation == channel
     assert [(one.position, one.author, one.text) for one in window.messages] == [
         (20, MessageAuthor.USER, "Book Friday?"),
@@ -694,7 +729,7 @@ async def test_the_window_shows_a_message_that_joined_an_earlier_activation() ->
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = line.inputs[0].window
+    window = line.windows[0]
     assert [(one.position, one.author, one.text) for one in window.messages] == [
         (20, MessageAuthor.USER, "book Riverside"),
         (21, MessageAuthor.USER, "actually Saturday"),
@@ -710,7 +745,7 @@ async def test_a_reply_to_a_message_older_than_the_window_is_brought_in_from_its
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = line.inputs[0].window
+    window = line.windows[0]
     (replied,) = window.replied_to
     assert isinstance(replied, LineMessage)
     assert (replied.position, replied.author, replied.text) == (
@@ -764,7 +799,7 @@ async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_who
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = line.inputs[0].window
+    window = line.windows[0]
     (said,) = [one for one in window.messages if one.position == 26]
     assert said.text == long_text, "the whole message, its question at its end"
     assert said.text.endswith("Would you prefer Tuesday?")
@@ -857,7 +892,7 @@ async def _window_of(
     line.start()
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
-    return tuple((one.position, one.author, one.text) for one in line.inputs[0].window.messages)
+    return tuple((one.position, one.author, one.text) for one in line.windows[0].messages)
 
 
 async def test_the_window_shows_what_a_text_call_sent_and_an_older_rounds_text() -> None:
@@ -1576,13 +1611,13 @@ async def test_the_lines_window_shows_a_card_as_its_asking_activations_message()
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = tuple((one.position, one.author, one.text) for one in line.inputs[0].window.messages)
+    window = tuple((one.position, one.author, one.text) for one in line.windows[0].messages)
     assert window == (
         (20, MessageAuthor.USER, "Book the table"),
         (21, MessageAuthor.ASSISTANT, "I'll ask you first."),
         (card.position, MessageAuthor.ASSISTANT, card_words),
     )
-    assert line.inputs[0].window.links[card.position or 0] == "act-ask"
+    assert line.windows[0].links[card.position or 0] == "act-ask"
 
 
 async def test_the_lines_window_shows_a_card_the_hub_chat_asked_for_and_nothing_else_of_it() -> (
@@ -1622,7 +1657,7 @@ async def test_the_lines_window_shows_a_card_the_hub_chat_asked_for_and_nothing_
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    window = line.inputs[0].window
+    window = line.windows[0]
     assert tuple((one.position, one.author, one.text) for one in window.messages) == (
         (card.position, MessageAuthor.ASSISTANT, card_words),
     )
@@ -1673,7 +1708,7 @@ async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
     await line.stop()
 
     sent = dict(line.fake.messages)
-    shown = {one.position: one.text for one in line.inputs[0].window.messages}
+    shown = {one.position: one.text for one in line.windows[0].messages}
     for request in await plans.approval_requests(["approval:1", "approval:2"]):
         (card,) = request.cards
         assert card.position is not None
@@ -1703,7 +1738,7 @@ async def test_the_window_shows_a_card_as_posted_when_its_edit_did_not_land() ->
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
     await line.stop()
 
-    shown = {one.position: one.text for one in line.inputs[0].window.messages}
+    shown = {one.position: one.text for one in line.windows[0].messages}
     assert shown[card.position or 0] == posted
     assert posted.endswith("Waiting for your answer.")
 
@@ -1772,7 +1807,7 @@ async def test_after_a_start_the_window_shows_each_card_by_its_entry() -> None:
     await restarted.stop()
 
     sent = dict(first.fake.messages)
-    shown = {one.position: one.text for one in restarted.inputs[0].window.messages}
+    shown = {one.position: one.text for one in restarted.windows[0].messages}
     for request in await plans.approval_requests(["approval:1", "approval:2"]):
         (card,) = request.cards
         assert card.position is not None

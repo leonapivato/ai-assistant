@@ -134,6 +134,7 @@ from ai_assistant.orchestration import (
     GrantOperations,
     HeldSource,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeAuditTrail,
@@ -499,6 +500,14 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         max_payload_bytes=max_payload_bytes,
         stories=stories,
         chat_reader=chat_reader,
+        # ADR-0383 §7:9, §9:1: the holder the chat's reader reads a work's window
+        # through, over the same stores the engine holds, as the root's is.
+        stores=BoundStores(
+            memory=records,
+            stories=FakeStoryStore() if stories is None else stories,
+            conversations=conversation_store,
+            plans=store,
+        ),
         person_blocks=person_blocks,
         now=(lambda: datetime.now(UTC)) if now is None else now,
         identities=identities,
