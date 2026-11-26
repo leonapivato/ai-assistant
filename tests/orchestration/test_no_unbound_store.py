@@ -2,11 +2,13 @@
 
 **What it fails on.** Any class or function under ``src/ai_assistant/orchestration/``
 that takes or holds one of the six store Protocols of §7:1 or ``MemoryWriter`` unbound,
-save the holder that binds stores for a pass, the holders §7:8, §7:12 and §7:13 name, the
-holders ADR-0387 §7:4 admits for the conversation store alone, and a closed list of
-holders not yet converted, each naming the lane of milestone 22 that removes it. The
-list only shrinks: an entry that no longer holds a store fails too, so a lane that
-converts a holder takes its entry off in the same change.
+save the holder that binds stores for a pass, the holders §7:8, §7:12 and §7:13 name and
+those that read device rows as today (ADR-0385 §3:2, ADR-0389 §4:4), the holders ADR-0387
+§7:4 admits for the conversation store alone, and a closed list of holders not yet
+converted, each naming the lane of milestone 22 that removes it. The list only shrinks: an
+entry that no longer holds a store fails too, so a lane that converts a holder takes its
+entry off in the same change. **The list is empty** (B10g, ADR-0389, the last lane on it):
+that is its end state, and a new holder off every list still fails.
 
 **How it reads "takes or holds".** By annotation, which strict typing makes total: every
 parameter and return of every function and method, and every annotated name, a class's
@@ -68,8 +70,8 @@ BOUND_MARK: Final = "Bound"
 #: The holder that binds stores for a pass (§9:1).
 THE_HOLDER: Final = "bound_stores.py:BoundStores"
 
-#: The holders §7:8, §7:12 and §7:13 name, each with its clause: they read unbound for
-#: good.
+#: The holders §7:8, §7:12 and §7:13 name, and those that read device rows as today
+#: (ADR-0385 §3:2, ADR-0389 §4:4), each with its clause: they read unbound for good.
 NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # §7:8: every lane from B8b to B10f converted a use; a work's reads, and the owner's
     # acts (ADR-0385 §3:1), read through the holder. What it holds unbound, method by
@@ -133,6 +135,19 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # card is recorded through the plan store bound to its sight (`post`, B8d), and the
     # line's window reads the cards bound (`on_line`, B8b).
     "telegram.py:TelegramCards": "§7:8",
+    # ADR-0389 §4:4: whether a device reads a conversation as a change or a state is sent,
+    # read from its devices as today (`_reads`, ADR-0298 §7:5). Its pages, its listings
+    # and whether the owner's sight sees a conversation read through the store bound to
+    # the owner's sight for each read (ADR-0389 §5:1, B10g); the canonical fake engine
+    # hands none, and reads its one store whole (`_bound`).
+    "change_stream.py:ChangeStream": "ADR-0389 §4:4",
+    # §7:8: the engine's start and its sweeps (`sweep_deletions`, `reclaim`, the restart's
+    # close); ADR-0387 §7:4: `begin`, a work's own turn; ADR-0385 §3:2: "my devices" and a
+    # conversation's devices, read and written as today; and the chat space handed to the
+    # holders that keep it under their own clauses, ADR-0298 §5's device checks among them
+    # (ADR-0389 §4:4). Every owner's act, a device's listing, its changes and the hub's
+    # changes among them (ADR-0389 §5:1, B10g), reads through the stores handed it bound.
+    "conversations.py:ConversationLifecycle": "§7:8, ADR-0385 §3:2, ADR-0387 §7:4",
 }
 
 #: The holders that make ADR-0387 §3's writes of a work's own turn and answer its §4:2,
@@ -149,8 +164,8 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B10g the reads of the owner's acts on conversations that join device rows to records
-#: of a home (ADR-0389); B8b's windows, B8c's stories, B8d's authorizing, acting,
+#: none is left. B10g's reads of the owner's acts on conversations that join device rows
+#: to records of a home (ADR-0389), B8b's windows, B8c's stories, B8d's authorizing, acting,
 #: approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of a work's
 #: own turn, B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, B10b's
 #: owner's acts on memory and stories, B10e's on conversations, B10f's on notifications,
@@ -160,24 +175,11 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 #: whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
 #: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's finding
 #: of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged jobs
-#: (§7:8).
-NOT_YET_CONVERTED: Final[dict[str, str]] = {
-    # Each state it sends, and the hub's own machine's listing, read through the store
-    # bound to the owner's sight for each read (B10e). Held unbound: each conversation's
-    # devices, read as today (ADR-0385 §3:2); and, not yet converted, the pages of changes
-    # and a device's listing, which mix device rows with records of a home where a store
-    # bound to any sight gives back no device row (ADR-0383 §3:3): ADR-0389's to decide,
-    # B10g's to build.
-    "change_stream.py:ChangeStream": "B10g",
-    # The owner's acts on conversations read and write through stores bound to the
-    # owner's sight, handed per call (B10e). Held unbound: the sweeps (§7:8); `begin`,
-    # admitted by ADR-0387 §7:4; "my devices" and a conversation's devices (ADR-0385
-    # §3:2); and, not yet converted, a device's listing, its changes and the hub's
-    # changes, as `ChangeStream`'s pages (ADR-0383 §3:3): ADR-0389's, then B10g's.
-    "conversations.py:ConversationLifecycle": "B10g",
-}
+#: (§7:8). **Empty is its end state**: the machinery stays, so a holder added off every
+#: list fails :func:`test_no_holder_outside_the_lists_takes_or_holds_a_store_unbound`.
+NOT_YET_CONVERTED: Final[dict[str, str]] = {}
 
-_LANES: Final = frozenset({"B10g"})
+_LANES: Final[frozenset[str]] = frozenset()
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -313,10 +315,15 @@ def unbound_holders(root: Path = _ROOT) -> dict[str, frozenset[str]]:
     return found
 
 
+def _stray(held: dict[str, frozenset[str]]) -> dict[str, list[str]]:
+    """The holders of ``held`` on no list, each with the stores it holds unbound."""
+    allowed = {THE_HOLDER, *NAMED_BY_THE_DECISION, *OWN_TURN_HOLDERS, *NOT_YET_CONVERTED}
+    return {key: sorted(stores) for key, stores in held.items() if key not in allowed}
+
+
 def test_no_holder_outside_the_lists_takes_or_holds_a_store_unbound() -> None:
     """§9:1: a stage holds the holder that gives a store only for a sight, never a store."""
-    allowed = {THE_HOLDER, *NAMED_BY_THE_DECISION, *OWN_TURN_HOLDERS, *NOT_YET_CONVERTED}
-    stray = {key: sorted(stores) for key, stores in unbound_holders().items() if key not in allowed}
+    stray = _stray(unbound_holders())
     assert stray == {}, (
         "these take or hold a store unbound: read through the holder "
         "(orchestration.bound_stores.BoundStores) by the pass's sight, or mark a store "
@@ -340,6 +347,34 @@ def test_every_unconverted_holder_names_a_lane_and_none_is_named_twice() -> None
     named = (set(NOT_YET_CONVERTED), set(NAMED_BY_THE_DECISION), set(OWN_TURN_HOLDERS))
     assert all(not one & other for one in named for other in named if one is not other)
     assert THE_HOLDER not in {*NOT_YET_CONVERTED, *OWN_TURN_HOLDERS}
+
+
+def test_no_holder_is_left_unconverted_and_the_last_two_are_named_by_their_clauses() -> None:
+    """Milestone 22's B10g, the last lane on the list (ADR-0389 §7): the change stream and
+    the conversation stage leave it for the clauses that keep what each still holds, and
+    the list of lanes is empty."""
+    assert NOT_YET_CONVERTED == {}
+    assert not _LANES
+    assert NAMED_BY_THE_DECISION["change_stream.py:ChangeStream"] == "ADR-0389 §4:4"
+    assert NAMED_BY_THE_DECISION["conversations.py:ConversationLifecycle"] == (
+        "§7:8, ADR-0385 §3:2, ADR-0387 §7:4"
+    )
+    held = unbound_holders()
+    assert held["change_stream.py:ChangeStream"] == frozenset({"ConversationStore"})
+    # The story store is taken only to hand to the holder it builds where none is handed.
+    assert held["conversations.py:ConversationLifecycle"] == frozenset(
+        {"ConversationStore", "MemoryStore", "StoryStore"}
+    )
+
+
+def test_a_holder_off_every_list_still_fails_with_the_list_empty(tmp_path: Path) -> None:
+    """An empty list is the end state, not the test's: a new holder of a store unbound,
+    on no list, is still found and still stray."""
+    (tmp_path / "new.py").write_text(
+        "class Reader:\n    def __init__(self, chat: ConversationStore) -> None: ...\n",
+        encoding="utf-8",
+    )
+    assert _stray(unbound_holders(tmp_path)) == {"new.py:Reader": ["ConversationStore"]}
 
 
 def test_the_holders_of_a_works_own_turn_hold_the_conversation_store_alone() -> None:
@@ -659,10 +694,6 @@ _KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]
                 "my_devices",
                 "set_my_devices",
                 "conversation_devices",
-                # Not yet converted (ADR-0383 §3:3); the device checks read them as today.
-                "device_conversations",
-                "device_changes",
-                "changes",
                 # §7:8: the engine's start and its sweeps.
                 "sweep_deletions",
                 "_finish_deletion",
@@ -697,13 +728,12 @@ _KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]
         frozenset(
             {
                 "__init__",
-                # A device's listing, not yet converted; the hub's own machine's listing
-                # reads the bound store, or `_chat` where none is handed (the canonical
-                # fake engine).
-                "_read_conversations",
-                # The pages of changes, not yet converted.
-                "_page",
-                # ADR-0385 §3:2: whether a device reads a conversation, from its devices.
+                # The store the pages and listings read: the one bound to the owner's
+                # sight for the read, or `_chat` where none is handed (the canonical fake
+                # engine).
+                "_bound",
+                # ADR-0389 §4:4, ADR-0298 §7:5: whether a device reads a conversation,
+                # from its devices.
                 "_reads",
             }
         ),
@@ -714,7 +744,7 @@ _KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]
 def test_the_owners_acts_on_conversations_reach_no_store_unbound() -> None:
     """ADR-0385 §3:1: the lifecycle's and the change stream's methods the owner's acts
     reach read through the stores handed them bound; the unbound store is reached only
-    where a clause keeps a read so, or a read is not yet converted (B10g)."""
+    where a clause keeps a read so (ADR-0389 §4:4 and §5:1 among them, B10g)."""
     reaches: dict[str, list[str]] = {}
     for (module, holder), (attributes, kept) in _KEPT_UNBOUND.items():
         tree = _parsed(_ROOT / module)

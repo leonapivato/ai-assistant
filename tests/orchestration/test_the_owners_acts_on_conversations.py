@@ -19,9 +19,9 @@ count and built to withhold:
   read of the very same store still writes its count (ADR-0383 §11:1).
 
 **Not here**: a device's listing (``recent_conversations`` from a device other than the
-hub's own machine), ``chat_changes`` and the change stream's pages, which are not yet read
-through a bound store (``ConversationLifecycle``'s docstring says why). The change stream
-is pinned for what it reads bound: the states it opens with.
+hub's own machine), ``chat_changes`` and the change stream's pages, which ADR-0389 has read
+through the owner's sight too, are pinned in ``test_the_three_device_reads`` (B10g). The
+change stream is pinned here for the states it opens with.
 
 A record of another home cannot be written through a store in this milestone (ADR-0383
 §2:3), so each is written as the owner's and then altered in place, as a row altered
@@ -264,8 +264,7 @@ async def _as_phone[T](call: Callable[[], Awaitable[T]]) -> T:
 async def _reads(world: _World, *, stream: bool = True) -> dict[str, object]:
     """What each seeing act of this lane gives back over the owner's records (§4:1).
 
-    ``stream`` reads the states the change stream opens with; its first page, which is
-    not yet read through a bound store, raises on a row with no home, as it did before.
+    ``stream`` reads the states the change stream opens with, up to its first change.
     """
     engine = world.engine
     seen: dict[str, object] = {
@@ -362,7 +361,7 @@ async def test_the_change_stream_opens_with_the_states_of_what_the_owners_sight_
     """§4:1: the hub's own machine's listing and each state the stream opens with are read
     through the stores bound to the owner's sight, so a conversation of another person's
     domain is sent no state, and an episode of theirs on the owner's place ends nothing
-    shown. Its pages, not yet converted, are not pinned here."""
+    shown. Its pages are pinned in ``test_the_three_device_reads``."""
     clean = await _opened(mode)
     crowded = await _opened(mode)
     await _seed_the_others(crowded, ((_SAM, _SAMS),))

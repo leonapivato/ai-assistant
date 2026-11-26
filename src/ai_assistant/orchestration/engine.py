@@ -2541,10 +2541,12 @@ class Engine:
             self._wire_approvals(approvals, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads. Following
-        # the stream is an owner's act (ADR-0385 §4:1): each state it reads, and the hub's
-        # own machine's listing of the conversations to read them of, is read through the
-        # store bound to the owner's sight, made anew for each read, never once for a
-        # stream. Its pages and a device's listing are not yet (`ChangeStream`).
+        # the stream is an owner's act (ADR-0385 §4:1): each state it reads, its pages of
+        # changes and its listing of the conversations to read them of, the hub's own
+        # machine's and a device's, are read through the store bound to the owner's
+        # sight from none, made anew for each read, never once for a stream (ADR-0389
+        # §5:1). Whether a device reads a conversation as a change is sent is read from
+        # its devices, unbound, as today (§4:4).
         self._change_stream = ChangeStream(
             chat=conversations.chat_space,
             seen_chat=lambda: self._stores.conversations(self._owners_sight(None)),
@@ -5088,11 +5090,12 @@ class Engine:
         hold a role, and is listed only the conversations it reads, in the same
         order and pages (``ConversationStore.device_conversations``).
 
-        The hub's own machine's listing is read through the conversation store bound to
-        the owner's sight from none (ADR-0385 §4:1). **A device's listing is not yet**
-        (B10g, ADR-0389): each entry is a device row's access beside the
-        conversation, and a store bound to any sight gives back no device row (ADR-0383
-        §3:3), so bound, every device's listing would be empty.
+        Both listings are read through the conversation store bound to the owner's sight
+        from none, made for the read (ADR-0385 §4:1, ADR-0389 §5:1): the hub's own
+        machine's by ``recent``, a device's by ``device_conversations``, which a store
+        bound to that sight answers with the conversations it holds that the device
+        reads (ADR-0389 §2:3). The device's role is checked first, unbound, as today
+        (§4:4).
         """
         if device.is_hub:
             listed = await self._conversations.recent(
@@ -5103,7 +5106,10 @@ class Engine:
             return tuple(conversation_summary(one) for one in listed)
         await self._device_checks.reading_many(device, "recent_conversations")
         reads = await self._conversations.device_conversations(
-            device.device_id, limit=limit, offset=offset
+            device.device_id,
+            limit=limit,
+            offset=offset,
+            conversations=self._stores.conversations(self._owners_sight(None)),
         )
         return tuple(conversation_summary(one.conversation) for one in reads)
 
@@ -5620,20 +5626,25 @@ class Engine:
         its membership as each change was recorded — restricted to the conversations
         it named as :meth:`ConversationStore.changes` restricts them.
 
-        **Not yet read through the owner's sight** (B10g, ADR-0389). A store bound to
-        any sight gives back no device row (ADR-0383 §3:3): bound, the hub's page would
-        lose every change of a set of devices and each start's devices, and a device's
-        page every change, where the owner reads them today (ADR-0385 §3:2).
+        Both pages are read through the conversation store bound to the owner's sight
+        from none, made for the read (ADR-0389 §5:1): the hub's own machine's by
+        ``changes``, every change that store holds (§2:2); a device's by
+        ``device_changes`` over it, those of them that reach the device. The device's
+        role is checked first, unbound, as today (§4:4).
         """
         if device.is_hub:
             page = await self._conversations.changes(
-                after=after, conversation_ids=conversation_ids, limit=limit
+                after=after,
+                conversation_ids=conversation_ids,
+                limit=limit,
+                conversations=self._stores.conversations(self._owners_sight(None)),
             )
         else:
             await self._device_checks.reading_many(device, "chat_changes")
             page = await device_changes(
                 self._conversations,
                 device.device_id,
+                conversations=self._stores.conversations(self._owners_sight(None)),
                 after=after,
                 conversation_ids=conversation_ids,
                 limit=limit,
