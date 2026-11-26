@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     Memory,
+    MemoryOperationKind,
     ObservationState,
     PlanningRound,
     ProposedCall,
@@ -330,6 +331,9 @@ async def test_a_run_whose_asking_episode_is_gone_is_refused_nothing() -> None:
     assert record.state is ObservationState.PROCESSED
     (finding,) = record.findings
     assert finding.candidate == "effect-run", "the candidate is accounted for"
+    assert finding.outcome is not None
+    assert finding.outcome.unwritten is None, "nothing refused"
+    assert [one.operations for one in finding.outcome.writes] == [(MemoryOperationKind.CREATE,)]
     written = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     assert written, "the finding lands"
     assert all(
