@@ -592,3 +592,54 @@ async def test_a_work_s_tidy_up_of_a_story_of_the_shared_things_is_not_done() ->
         "the tidy-up wrote nothing: no_story",
     )
     assert model.messages == []
+
+
+# --- the matters pass's episodes: from the members the bound store gives back -------------
+
+
+@_MODES
+async def test_withheld_members_take_no_episode_slot_and_are_not_counted(mode: SightMode) -> None:
+    """ADR-0384 §5:2 (round 2's regression): one owner episode, then six of the shared
+    things linked in error, with six slots. Where the stores withhold, the owner's episode
+    is shown and nothing of the six is shown or counted; the counting build shows the six
+    as before, the oldest link left over and counted."""
+    world = _World(mode)
+    shared = [f"s-{index}" for index in range(1, 7)]
+    await world.hold(
+        episode("a-1", text="Plan the camping trip."),
+        *(_of(_SHARED, episode(one, text=f"Shared {one}.")) for one in shared),
+    )
+    trip = await world.story(_OWNERS, "a-1", *shared)
+    await world.summarise(trip, "A trip.", StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+    model = _Model(_LEAVE, key="story")
+
+    await world.matters(model).run()
+
+    (story,) = model.shown["A trip."]["stories"]
+    shown = [one["the_users_own_input"] for one in model.shown["A trip."]["episodes"]]
+    if mode is SightMode.WITHHOLD:
+        assert shown == ["Plan the camping trip."]
+        assert (len(story["episodes"]), story["episodes_not_shown"]) == (1, 0)
+    else:
+        assert shown == [f"Shared {one}." for one in shared]
+        assert (len(story["episodes"]), story["episodes_not_shown"]) == (6, 1)
+
+
+async def test_forgotten_members_take_no_slot_and_are_not_counted() -> None:
+    """Where every record is the owner's: a story whose latest links name episodes the
+    memory store no longer holds shows its older held episodes in their place, and counts
+    nothing of the forgotten ones (ADR-0384 §5's paragraph under §5:3, ADR-0383 §8:2)."""
+    world = _World(SightMode.WITHHOLD)
+    held = [f"a-{index}" for index in range(1, 4)]
+    forgotten = [f"gone-{index}" for index in range(1, 7)]
+    await world.hold(*(episode(one, text=f"Held {one}.") for one in held))
+    trip = await world.story(_OWNERS, *held, *forgotten)
+    await world.summarise(trip, "A trip.", StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+    model = _Model(_LEAVE, key="story")
+
+    await world.matters(model).run()
+
+    (story,) = model.shown["A trip."]["stories"]
+    shown = [one["the_users_own_input"] for one in model.shown["A trip."]["episodes"]]
+    assert shown == [f"Held {one}." for one in held]
+    assert (len(story["episodes"]), story["episodes_not_shown"]) == (3, 0)

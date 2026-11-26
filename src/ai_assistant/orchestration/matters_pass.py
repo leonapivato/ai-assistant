@@ -539,6 +539,9 @@ class _Story:
 
     ``notes`` are the notes shown of it, newest first, up to the pass's bound, and
     ``notes_held`` how many it held when they were read (ADR-0303 §8:7).
+    ``activations`` are its activation members whose episode the run's bound memory
+    store gave back, in link order: a member whose episode it does not give back,
+    withheld or no longer held, is neither shown nor counted (ADR-0384 §5:2).
     """
 
     story_id: str
@@ -1064,37 +1067,43 @@ class MattersPass:
         nothing is decided on them this run.
         """
         records = run.records
-        read: list[_Story] = []
+        stories: list[tuple[str, StorySummaryState, list[StoryEntry], list[StoryNote]]] = []
         for story_id in concerned:
             state = await run.stories.current_summary(story_id)
             if state is None or state.story.merged_into is not None:
                 return None
-            held = await _held_notes(run.stories, story_id)
-            entries = await _members(run.stories, story_id)
-            read.append(
-                _Story(
-                    story_id=story_id,
-                    state=state,
-                    activations=tuple(
-                        entry
-                        for entry in entries
-                        if entry.member.kind is StoryMemberKind.ACTIVATION
-                    ),
-                    holds=frozenset(
-                        entry.member.id
-                        for entry in entries
-                        if entry.member.kind is StoryMemberKind.STORY
-                    ),
-                    notes=tuple(reversed(held[-self._notes :])) if self._notes else (),
-                    notes_held=len(held),
-                )
+            notes = await _held_notes(run.stories, story_id)
+            stories.append((story_id, state, await _members(run.stories, story_id), notes))
+        episodes = await _member_episodes(
+            run.memory,
+            [entry for _, _, entries, _ in stories for entry in entries],
+        )
+        read = [
+            _Story(
+                story_id=story_id,
+                state=state,
+                activations=tuple(
+                    entry
+                    for entry in entries
+                    if entry.member.kind is StoryMemberKind.ACTIVATION
+                    and entry.member.id in episodes
+                ),
+                holds=frozenset(
+                    entry.member.id
+                    for entry in entries
+                    if entry.member.kind is StoryMemberKind.STORY
+                ),
+                notes=tuple(reversed(notes[-self._notes :])) if self._notes else (),
+                notes_held=len(notes),
             )
+            for story_id, state, entries, notes in stories
+        ]
         decisions = _decisions_shown(records, flag.name, concerned, self._decisions)
         return _Reading(
             flag=flag,
             tends=run.tends,
             stories={f"S{index}": story for index, story in enumerate(read, start=1)},
-            episodes=await self._shown_episodes(run.memory, read),
+            episodes=self._shown_episodes(episodes, read),
             decisions=decisions,
             # ADR-0384 §5:2, ADR-0383 §8:4: only the stories the run's bound store gave
             # back are named or counted.
@@ -1103,35 +1112,30 @@ class MattersPass:
             },
         )
 
-    async def _shown_episodes(
-        self, memory: Bound[MemoryStore], stories: Sequence[_Story]
+    def _shown_episodes(
+        self, episodes: Mapping[str, EpisodicMemory], stories: Sequence[_Story]
     ) -> dict[str, _Episode]:
-        """Each story's latest member episodes that are frozen and held, labelled.
+        """Each story's latest member episodes that are frozen, labelled.
 
-        A story's latest links, up to the bound. Each is shown once, under one label,
-        with every story read that holds it, so one input in two stories is visibly
-        one input (#2775). An open episode is never shown (ADR-0286 §6:4), nor one the
-        memory store no longer holds, and an outside episode's raw input is never
-        rendered (§4). Read through the memory store bound to the run's sight, so where
-        the stores withhold an episode of another home than the run's domain is one the
-        store does not hold, and is not shown (ADR-0384 §5:2); the counting build shows
-        it as before, and a change naming it is refused (:func:`_episodes_of`).
+        A story's latest links among the members whose episode the run's bound memory
+        store gave back (``episodes``, :func:`_member_episodes`), up to the bound. Each
+        is shown once, under one label, with every story read that holds it, so one
+        input in two stories is visibly one input (#2775). An open episode is never
+        shown (ADR-0286 §6:4), and an outside episode's raw input is never rendered
+        (§4). A member whose episode the store does not give back, one it no longer
+        holds or, where the stores withhold, one of another home than the run's domain,
+        takes no slot and is not counted (ADR-0384 §5:2, §5's paragraph under §5:3,
+        ADR-0383 §8:2); in the counting build an episode of another home is given back
+        and shown as before, and a change naming it is refused (:func:`_episodes_of`).
         """
         chosen: dict[str, None] = {}
         for story in stories:
             for entry in story.activations[-self._episodes :]:
                 chosen.setdefault(entry.member.id)
-        if not chosen:
-            return {}
-        found = await memory.get_many([episode_address(a) for a in chosen])
         shown: dict[str, _Episode] = {}
         for activation_id in chosen:
-            record = found.get(episode_address(activation_id))
-            if (
-                not isinstance(record, EpisodicMemory)
-                or is_open_episode(record)
-                or activation_of(record) != activation_id
-            ):
+            record = episodes[activation_id]
+            if is_open_episode(record):
                 continue
             shown[f"E{len(shown) + 1}"] = _Episode(
                 activation_id=activation_id,
@@ -1241,6 +1245,33 @@ async def _members(stories: Bound[StoryStore], story_id: str) -> list[StoryEntry
         if page.next_cursor is None or page.next_cursor == cursor:
             return entries
         cursor = page.next_cursor
+
+
+async def _member_episodes(
+    memory: Bound[MemoryStore], entries: Sequence[StoryEntry]
+) -> dict[str, EpisodicMemory]:
+    """The episode of each activation member ``entries`` name that the bound store gives back.
+
+    One ``get_many`` over every activation member of the stories a flag concerns, in one
+    snapshot: which members' episodes the run's sight sees and the store still holds is
+    only learnt by reading them, and the shown episodes and the count of those not shown
+    are both made from this answer alone (ADR-0383 §8:4). A member whose episode is not
+    given back, or whose record is not its activation's episode, is absent.
+    """
+    wanted = list(
+        dict.fromkeys(
+            entry.member.id for entry in entries if entry.member.kind is StoryMemberKind.ACTIVATION
+        )
+    )
+    if not wanted:
+        return {}
+    found = await memory.get_many([episode_address(activation) for activation in wanted])
+    held: dict[str, EpisodicMemory] = {}
+    for activation_id in wanted:
+        record = found.get(episode_address(activation_id))
+        if isinstance(record, EpisodicMemory) and activation_of(record) == activation_id:
+            held[activation_id] = record
+    return held
 
 
 def _within(records: StoryRecords, concerned: Sequence[str], tends: RecordHome) -> bool:
