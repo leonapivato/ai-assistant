@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import MemoryRecord, RecordHome
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.bound_stores import Bound, BoundStores
 
@@ -161,8 +161,8 @@ class ActivationWriter:
         for progress in self._in_flight.get(address, ()):
             progress.forgotten = True
 
-    def forgetting_conversation(self, conversation_id: str) -> None:
-        """Tell every capture in flight from ``conversation_id`` that it is forgotten.
+    def forgetting_conversation(self, conversation_id: str, home: RecordHome) -> None:
+        """Tell every capture in flight from ``conversation_id`` in ``home`` it is forgotten.
 
         ``forget_conversation`` calls this **before** it walks the conversation's place
         (ADR-0293 §2:6): a capture whose admission write is still on its way — which
@@ -170,10 +170,14 @@ class ActivationWriter:
         :meth:`forgetting` forgets one by its address (ADR-0286 §8:2). Only the
         captures in flight now are marked; an activation admitted after the call is
         the user talking on, and its episode is written as usual.
+
+        Only the captures of ``home``, the domain the forgetting acts on, are marked: a
+        capture of another home on the place is not that domain's, and is neither
+        found nor destroyed (ADR-0385 §5:4).
         """
         for held in self._in_flight.values():
             for progress in held:
-                if progress.conversation_id == conversation_id:
+                if progress.conversation_id == conversation_id and progress.home == home:
                     progress.forgotten = True
 
     def holds(self, address: str) -> bool:
@@ -234,7 +238,10 @@ class ActivationWriter:
             capture_loss("admission", "clock")
             return
         progress = EpisodeProgress(
-            address=address, captured_at=captured_at, conversation_id=state.conversation_id
+            address=address,
+            captured_at=captured_at,
+            home=state.home,
+            conversation_id=state.conversation_id,
         )
         state.capture = progress
         self._in_flight.setdefault(address, []).append(progress)

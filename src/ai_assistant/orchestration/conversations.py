@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
     NewMessage,
     ProcessingReason,
     ProcessingStatus,
+    RecordHome,
     TranscriptMessage,
     TranscriptPage,
 )
@@ -86,7 +87,6 @@ if TYPE_CHECKING:
         DeviceConversation,
         MemoryRecord,
         MessageReceipt,
-        RecordHome,
         UserMessage,
     )
     from ai_assistant.orchestration.bound_stores import Bound
@@ -1006,7 +1006,7 @@ class ConversationLifecycle:
 
     # --- one device's view (ADR-0296 §4, ADR-0298 §5) ------------------------
     #
-    # Not yet converted (milestone 22's B10e). Each mixes device rows, which a bound store
+    # Not yet converted (B10g, ADR-0389). Each mixes device rows, which a bound store
     # gives back none of (ADR-0383 §3:3), with records of a home, so a device's listing
     # and its changes, and the hub's changes, cannot be read through a bound store as the
     # owner reads them today; the device checks read them as today (ADR-0385 §3:2).
@@ -1104,8 +1104,9 @@ class ConversationLifecycle:
         Walked and forgotten through ``memory``, the store the engine bound to the
         owner's sight from the owner's domain for the call (ADR-0385 §5:4), so an
         episode of another home on the place is neither found nor destroyed. The mark on
-        the captures in flight from the conversation is set by its id before any read,
-        and judges no home (ADR-0293 §2:6).
+        the captures in flight from the conversation is set by its id before any read
+        (ADR-0293 §2:6), on those of the owner's domain alone, by the home each capture
+        recorded as it was tracked (§5:4).
 
         Returns:
             Whether an episode was forgotten.
@@ -1113,7 +1114,7 @@ class ConversationLifecycle:
         Raises:
             MemoryStoreError: If the store cannot be read or an episode deleted.
         """
-        self.activation_writer.forgetting_conversation(conversation_id)
+        self.activation_writer.forgetting_conversation(conversation_id, RecordHome.owners())
         forgot = False
         for episode_id in await episodes_on_place(memory, conversation_id):
             self.activation_writer.forgetting(episode_id)

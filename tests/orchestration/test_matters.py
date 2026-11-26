@@ -169,6 +169,7 @@ def _running(  # noqa: PLR0913 — the place, the id, and one knob per fact a ca
         state.capture = EpisodeProgress(
             address=f"activation:{activation_id}",
             captured_at=_AT,
+            home=state.home,
             written=_episode(state, activation_id),
         )
     return state

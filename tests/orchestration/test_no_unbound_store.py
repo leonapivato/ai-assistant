@@ -71,6 +71,17 @@ THE_HOLDER: Final = "bound_stores.py:BoundStores"
 #: The holders §7:8, §7:12 and §7:13 name, each with its clause: they read unbound for
 #: good.
 NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
+    # §7:8: every lane from B8b to B10f converted a use; a work's reads, and the owner's
+    # acts (ADR-0385 §3:1), read through the holder. What it holds unbound, method by
+    # method (`_KEPT_UNBOUND`): the stores it hands the sensors, the readers and the
+    # holder (`__init__`); the sweeps (`_purge_expired`); the task sensor's and the
+    # approvals sensor's pushes and their settling, which compose a pushed work's input
+    # (`_push_occurrence`, `_settle_ended`, `_write_unwritten`, `_push_outcome`,
+    # `_approval_context`, `_task_places`, `_void_tickets`); the reader's `/stop`
+    # (`_stop_memory`, `_stop_plans`, with no sight); and the wiring checks
+    # (`_notification_surface`, `_story_store`). None reads for ADR-0389's three reads,
+    # which go through `ConversationLifecycle` and `ChangeStream`.
+    "engine.py:Engine": "§7:8",
     # §7:8: "a sensor's finding of what is due" (`look`) and "the engine's start" (its
     # `settle_restart` and the `confirm` that settles one occurrence).
     "task_sensor.py:TaskSchedulerSensor": "§7:8",
@@ -128,11 +139,12 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B9 the observer's pin pass and the upcoming-event producer's writes, B10e the owner's
-#: own acts on conversations (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing,
-#: acting, approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of
-#: a work's own turn, B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks
-#: for, B10b's owner's acts on memory and stories, and B10f's on notifications, the
+#: B9 the observer's pin pass and the upcoming-event producer's writes, B10g the reads
+#: of the owner's acts on conversations that join device rows to records of a home
+#: (ADR-0389); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals and
+#: tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
+#: B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, B10b's owner's
+#: acts on memory and stories, B10e's on conversations, and B10f's on notifications, the
 #: profile, the approvals panel and tasks are converted, save the parts named here for a
 #: later lane.
 #: A holder more than one lane converts names the last of them. **Only shrinks.** A holder
@@ -145,18 +157,15 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # bound to the owner's sight for each read (B10e). Held unbound: each conversation's
     # devices, read as today (ADR-0385 §3:2); and, not yet converted, the pages of changes
     # and a device's listing, which mix device rows with records of a home where a store
-    # bound to any sight gives back no device row (ADR-0383 §3:3).
-    "change_stream.py:ChangeStream": "B10e",
+    # bound to any sight gives back no device row (ADR-0383 §3:3): ADR-0389's to decide,
+    # B10g's to build.
+    "change_stream.py:ChangeStream": "B10g",
     # The owner's acts on conversations read and write through stores bound to the
     # owner's sight, handed per call (B10e). Held unbound: the sweeps (§7:8); `begin`,
     # admitted by ADR-0387 §7:4; "my devices" and a conversation's devices (ADR-0385
     # §3:2); and, not yet converted, a device's listing, its changes and the hub's
-    # changes, as `ChangeStream`'s pages (ADR-0383 §3:3).
-    "conversations.py:ConversationLifecycle": "B10e",
-    # Every lane from B8b to B10e converts a use; its start is §7:8's. The owner's acts on
-    # memory and stories (B10b), and on notifications, the profile and the approvals panel
-    # (B10f), read through the holder, bound to the owner's sight.
-    "engine.py:Engine": "B10e",
+    # changes, as `ChangeStream`'s pages (ADR-0383 §3:3): ADR-0389's, then B10g's.
+    "conversations.py:ConversationLifecycle": "B10g",
     # The upcoming-event producer's writes (ADR-0132): it reads a source, not a store, so
     # ADR-0384 §2's table makes it no upkeep run, and no clause yet gives it a sight. It
     # reads the owner's zone from the person-model store and rules into the notification
@@ -176,7 +185,7 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "observer/stage.py:Observer": "B9",
 }
 
-_LANES: Final = frozenset({"B9", "B10e"})
+_LANES: Final = frozenset({"B9", "B10g"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -653,6 +662,26 @@ _KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]
             }
         ),
     ),
+    ("engine.py", "Engine"): (
+        frozenset({"_memory", "_plans", "_stories", "_notifications"}),
+        frozenset(
+            {
+                "__init__",
+                "_purge_expired",
+                "_push_occurrence",
+                "_settle_ended",
+                "_write_unwritten",
+                "_push_outcome",
+                "_approval_context",
+                "_task_places",
+                "_void_tickets",
+                "_stop_memory",
+                "_stop_plans",
+                "_notification_surface",
+                "_story_store",
+            }
+        ),
+    ),
     ("change_stream.py", "ChangeStream"): (
         frozenset({"_chat"}),
         frozenset(
@@ -675,7 +704,7 @@ _KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]
 def test_the_owners_acts_on_conversations_reach_no_store_unbound() -> None:
     """ADR-0385 §3:1: the lifecycle's and the change stream's methods the owner's acts
     reach read through the stores handed them bound; the unbound store is reached only
-    where a clause keeps a read so, or a read is not yet converted (B10e)."""
+    where a clause keeps a read so, or a read is not yet converted (B10g)."""
     reaches: dict[str, list[str]] = {}
     for (module, holder), (attributes, kept) in _KEPT_UNBOUND.items():
         tree = _parsed(_ROOT / module)
