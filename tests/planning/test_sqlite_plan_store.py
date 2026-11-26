@@ -2452,3 +2452,37 @@ async def test_no_record_a_binding_does_not_hold_reaches_a_json_function_that_ca
             await store.part_effects([part])
     finally:
         store.close()
+
+
+async def test_a_home_held_as_text_that_is_not_utf8_is_no_home_to_its_own_activation(
+    tmp_path: Path,
+) -> None:
+    """§5:3, §7:4: such a home id or person withholds the row, reads and clear alike.
+
+    Its own activation's binding neither gives it back, nor fails on it, nor removes it.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        claimed = await store.claim_activation_effect(
+            _effect("e-own", activation=OWN_ACTIVATION), match=None
+        )
+        assert claimed is ActivationEffectClaim.CLAIMED
+        await _asked(store, _request("q-own", activation=OWN_ACTIVATION))
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE activation_effects SET home_id = CAST(x'80' AS TEXT) WHERE id = 'e-own'"
+            )
+            conn.execute(
+                "UPDATE approval_requests SET person = CAST(x'80' AS TEXT) WHERE id = 'q-own'"
+            )
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        held = [one.id for one in await own.activation_effects([OWN_ACTIVATION])]
+        assert held == ["ask-q-own"]
+        assert await own.approval_requests(["q-own"]) == ()
+        assert await own.clear() == 1
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT id FROM activation_effects").fetchall() == [("e-own",)]
+            assert conn.execute("SELECT id FROM approval_requests").fetchall() == [("q-own",)]
+    finally:
+        store.close()

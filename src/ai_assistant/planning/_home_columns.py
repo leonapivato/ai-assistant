@@ -119,27 +119,62 @@ def person_home(person: object) -> RecordHome | None:
     return home if home.id == person else None
 
 
+#: What :func:`_stored_value` gives for a column that holds no text it can read: not a
+#: ``str``, so the readings refuse it.
+_UNREADABLE: Final = object()
+
+
+def _stored_value(storage: object, raw: object) -> object:
+    """A column's value as the readings take it, from its storage class and its bytes.
+
+    The statement hands the storage class (``typeof``) and the value cast to a blob, so no
+    text reaches Python's own decoding of a callback's argument, which raises on bytes
+    that are not UTF-8. Text is decoded strictly here, and text that is not UTF-8 is
+    :data:`_UNREADABLE`; ``NULL`` is ``None``; anything else is :data:`_UNREADABLE` too,
+    since no reading accepts a value that is not text.
+    """
+    if storage == "null":
+        return None
+    if storage != "text" or not isinstance(raw, bytes):
+        return _UNREADABLE
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _UNREADABLE
+
+
+def _home_readable(kind_type: object, kind: object, id_type: object, home_id: object) -> int:
+    """``1`` where :func:`stored_home` reads a home in the two columns, ``0`` otherwise."""
+    home = stored_home(_stored_value(kind_type, kind), _stored_value(id_type, home_id))
+    return int(home is not None)
+
+
+def _person_readable(person_type: object, person: object) -> int:
+    """``1`` where :func:`person_home` reads a person in the column, ``0`` otherwise."""
+    return int(person_home(_stored_value(person_type, person)) is not None)
+
+
 def register_readers(conn: sqlite3.Connection) -> None:
     """Give ``conn`` :data:`HOME_READER` and :data:`PERSON_READER`, the one reading in SQL.
 
     A row of a sight's own activation is held only where its home is one the store can
     read (§5:3, §7:4). Whether it is turns on whether an identifier is blank or encodable,
     which SQL cannot decide as the model does, so the statement asks
-    :func:`stored_home` and :func:`person_home` themselves. Each is deterministic and reads
-    nothing but its arguments.
+    :func:`stored_home` and :func:`person_home` themselves. Each function takes a column
+    as its storage class and its value cast to a blob (:func:`_stored_value`), so a value
+    no reading accepts, text that is not UTF-8 included, answers ``0`` and never raises.
+    Each is deterministic and reads nothing but its arguments.
 
     Raises:
         sqlite3.Error: If the connection refuses a function.
     """
-    conn.create_function(
-        HOME_READER,
-        2,
-        lambda kind, home_id: int(stored_home(kind, home_id) is not None),
-        deterministic=True,
-    )
-    conn.create_function(
-        PERSON_READER, 1, lambda person: int(person_home(person) is not None), deterministic=True
-    )
+    conn.create_function(HOME_READER, 4, _home_readable, deterministic=True)
+    conn.create_function(PERSON_READER, 2, _person_readable, deterministic=True)
+
+
+def _reader_args(*columns: str) -> str:
+    """The arguments a reader takes for ``columns``: each one's storage class and blob."""
+    return ", ".join(f"typeof({one}), CAST({one} AS BLOB)" for one in columns)
 
 
 def seen_sql(
@@ -186,7 +221,7 @@ def seen_sql(
     if made_by is not None and sight.activation is not None:
         terms.append(
             f"(typeof({made_by}) = 'text' AND {made_by} = ? AND "
-            f"{HOME_READER}({kind_column}, {id_column}))"
+            f"{HOME_READER}({_reader_args(kind_column, id_column)}))"
         )
         params.append(sight.activation)
     if not terms:
@@ -227,7 +262,7 @@ def seen_person_sql(
         terms.append(f"({person_column} IN ({marks}))")
         params.extend(persons)
     if made_by is not None and sight.activation is not None:
-        terms.append(f"({made_by} = ? AND {PERSON_READER}({person_column}))")
+        terms.append(f"({made_by} = ? AND {PERSON_READER}({_reader_args(person_column)}))")
         params.append(sight.activation)
     if not terms:
         return "0", []
