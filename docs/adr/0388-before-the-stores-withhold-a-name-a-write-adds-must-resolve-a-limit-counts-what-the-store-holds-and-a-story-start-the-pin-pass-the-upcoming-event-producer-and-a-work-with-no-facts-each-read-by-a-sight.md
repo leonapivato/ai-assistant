@@ -1,6 +1,6 @@
 # 388. Before the stores withhold: a name a write adds must resolve, a limit counts what the store holds, and a story's start, the pin pass, the upcoming-event producer and a work with no facts each read by a sight
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: an amendment to decisions D1 and D2 of milestone 22, "Every record has a home"
   (acceptance [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
