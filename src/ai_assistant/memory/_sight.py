@@ -88,15 +88,16 @@ HOME_READER: Final = "assistant_record_home"
 #: A ``records`` row's home, read by the store's record decoder over the row's whole
 #: JSON and rendered as ``RecordHome.model_dump_json()`` renders it, or ``NULL`` where
 #: the decoder reads no record there, and so no home (ADR-0383 §5:3, §7:3).
-STORED_HOME_SQL: Final = f"{HOME_READER}(data)"
+STORED_HOME_SQL: Final = f"{HOME_READER}(CAST(data AS BLOB))"
 
 
 def register_home_reader(conn: sqlite3.Connection, decode: Callable[[str], MemoryRecord]) -> None:
     """Give ``conn`` :data:`HOME_READER`: the store's record decoder, as a SQL function.
 
-    The function decodes a row's whole JSON with ``decode``, the very decoder every
-    read of the store decodes a row with, and answers the home the record carries; a
-    row the decoder refuses has none. So nothing re-implements how the decoder reads a
+    The function takes a row's bytes, reads them as UTF-8 as the driver reads a row,
+    decodes the whole JSON with ``decode``, the very decoder every read of the store
+    decodes a row with, and answers the home the record carries; a row that is not
+    UTF-8, or that the decoder refuses, has none. So nothing re-implements how the decoder reads a
     repeated key, a key's order, a value's type, an escape or a malformed record, and
     a statement that compares the function's value with the homes a sight sees agrees
     with the predicate over the decoded record on every row by construction (§7:3).
@@ -108,12 +109,15 @@ def register_home_reader(conn: sqlite3.Connection, decode: Callable[[str], Memor
             refuses.
     """
 
-    def home_of(data: object) -> str | None:
-        if not isinstance(data, str):
+    def home_of(stored: object) -> str | None:
+        # The row's bytes, decoded here as the driver decodes a row it hands the store,
+        # so a payload that is not UTF-8 is a row the decoder never reads, answered as
+        # no home rather than raised inside SQLite (§5:3, §11:1).
+        if not isinstance(stored, bytes):
             return None
         try:
-            return decode(data).home.model_dump_json()
-        except MemoryStoreError:
+            return decode(stored.decode("utf-8")).home.model_dump_json()
+        except UnicodeDecodeError, MemoryStoreError:
             return None
 
     conn.create_function(HOME_READER, 1, home_of, deterministic=True)
