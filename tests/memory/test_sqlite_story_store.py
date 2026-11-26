@@ -21,9 +21,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
+from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 from story_store_contract import (
     STORY_AT,
     StoryStoreContract,
@@ -31,6 +33,7 @@ from story_store_contract import (
     draft,
     everything,
     held,
+    homed,
     line,
     logged,
     made,
@@ -46,6 +49,7 @@ from story_store_contract import (
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     RecordHome,
+    SightMode,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -59,9 +63,11 @@ from ai_assistant.core.types import (
     StorySummaryVersionName,
 )
 from ai_assistant.memory import SqliteStoryStore
+from ai_assistant.memory.story_store import _SCHEMA
+from sight_equivalence import SIGHTS
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Collection, Iterator
     from pathlib import Path
 
     from ai_assistant.core.protocols import StoryStore
@@ -77,6 +83,54 @@ class TestSqliteStoryStoreContract(StoryStoreContract):
             yield built
         finally:
             built.close()
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Iterator[Callable[[SightMode], StoryStore]]:
+        opened: list[SqliteStoryStore] = []
+
+        def build(mode: SightMode) -> StoryStore:
+            ids = count(1)
+            built = SqliteStoryStore(
+                path=":memory:",
+                now=lambda: STORY_AT,
+                new_id=lambda: f"{next(ids):04d}",
+                sight_mode=mode,
+            )
+            opened.append(built)
+            return built
+
+        try:
+            yield build
+        finally:
+            for built in opened:
+                built.close()
+
+    @pytest.fixture
+    def remove_stories(self) -> Callable[[StoryStore, Collection[str]], None]:
+        """Remove stories whole from the file, as the suite's test-only door asks.
+
+        The append-only triggers are dropped for the removal alone and made again by the
+        module's own schema; the store's counter and the log's sequence stand.
+        """
+
+        def remove(store: StoryStore, story_ids: Collection[str]) -> None:
+            assert isinstance(store, SqliteStoryStore)
+            conn = store._conn  # the test-only door the Protocol has none of
+            conn.execute("BEGIN IMMEDIATE")
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall():
+                conn.execute(f'DROP TRIGGER "{name}"')
+            for story_id in story_ids:
+                for table in ("stories",):
+                    conn.execute(f"DELETE FROM {table} WHERE id = ?", (story_id,))  # noqa: S608
+                for table in ("members", "log", "notes", "versions", "summaries"):
+                    conn.execute(f"DELETE FROM {table} WHERE story_id = ?", (story_id,))  # noqa: S608
+            for statement in _SCHEMA:
+                conn.execute(statement)
+            conn.execute("COMMIT")
+
+        return remove
 
 
 def test_the_file_is_owner_only(tmp_path: Path) -> None:
@@ -1061,5 +1115,119 @@ async def test_a_merge_copies_no_membership_across_homes_a_file_holds(
         assert outcome.refusal.reason is StoryRefusalReason.ANOTHER_HOME
         assert outcome.refusal.story_id == other
         assert await everything(store) == before
+    finally:
+        store.close()
+
+
+# --- a store bound to a sight: what the file alone can hold (ADR-0383 §5:3, §7) --------
+
+#: Home columns a file altered outside the store could hold, each one the store cannot
+#: read: a missing kind, a missing identifier, bytes, a kind no build writes, a blank one.
+_ODD_HOMES = [
+    (None, None),
+    ("person", None),
+    ("person", b"person:owner"),
+    (b"shared", None),
+    ("PERSON", "person:owner"),
+    ("shared", ""),
+]
+
+
+def _bound_store(mode: SightMode) -> SqliteStoryStore:
+    ids = count(1)
+    return SqliteStoryStore(
+        path=":memory:", now=lambda: STORY_AT, new_id=lambda: f"{next(ids):04d}", sight_mode=mode
+    )
+
+
+def _set_home(store: SqliteStoryStore, story_id: str, kind: object, home_id: object) -> None:
+    store._conn.execute(
+        "UPDATE stories SET home_kind = ?, home_id = ? WHERE id = ?", (kind, home_id, story_id)
+    )
+
+
+@pytest.mark.parametrize(("kind", "home_id"), _ODD_HOMES)
+async def test_a_story_whose_home_the_store_cannot_read_is_held_by_no_sight(
+    kind: object, home_id: object
+) -> None:
+    """§5:3: the home of no one, given back by no binding and never read as anyone's.
+
+    Withholding, every sight passes over it, in a list, a reverse look-up and a look-up
+    by id alike, and a write naming it is refused as one to a story never written; the
+    unbound store, reading it, reports a corrupt row.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        odd = await homed(store, RecordHome.owners(), act("a1"))
+        kept = await homed(store, RecordHome.shared(), act("a1"))
+        _set_home(store, odd, kind, home_id)
+        for sight in SIGHTS.values():
+            bound = store.bound(sight)
+            assert await bound.header(odd) is None
+            assert odd not in {one.story_id for one in (await bound.stories()).stories}
+            assert odd not in {one.story_id for one in await bound.stories_of(act("a1"))}
+            refusal = await bound.link(odd, [act("a2")], actor=StoryActor.OWNER)
+            assert refusal.refusal is not None
+            assert refusal.refusal.reason is StoryRefusalReason.UNKNOWN_STORY
+        assert await store.bound(SIGHTS["owners-work"]).header(kept) is not None
+        with pytest.raises(StoryStoreError):
+            await store.header(odd)
+    finally:
+        store.close()
+
+
+async def test_counting_reads_a_kept_summary_of_a_story_with_no_home_and_counts_it_so() -> None:
+    """§7:10, §11:1: counting answers as unbound, which reads no header for a kept summary."""
+    store = _bound_store(SightMode.COUNT)
+    try:
+        story_id = await homed(store, RecordHome.owners(), act("a1"))
+        await noted(store, story_id, "Note.")
+        version = await written(
+            store, story_id, draft(line("Line.")), as_of=(await state_of(store, story_id)).as_of
+        )
+        _set_home(store, story_id, None, None)
+        bound = store.bound(SIGHTS["owners-work"])
+        with structlog.testing.capture_logs() as events:
+            kept = await bound.summary_at(story_id, version.version)
+        assert kept == await store.summary_at(story_id, version.version)
+        assert kept is not None
+        assert [(event["given"], event["no_home"]) for event in events] == [(1, 1)]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("reaches", ["a-holder", "a-member"])
+async def test_a_merge_whose_writes_reach_a_story_the_binding_does_not_hold_is_refused(
+    reaches: str,
+) -> None:
+    """§4:8, §7:5: refused ``unknown_story`` naming the absorbed story, writing nothing.
+
+    A membership across two homes is one only a file from before the store refused them
+    can hold (§4:7); made here by hand. A merge would change a story holding the absorbed
+    one, or name in the target a story member the absorbed one holds, of a home the
+    binding does not see. Unbound, the same merge is refused ``another_home`` naming it.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        absorbed = await homed(store, RecordHome.shared(), act("s1"))
+        target = await homed(store, RecordHome.shared(), act("s2"))
+        owners = await homed(store, RecordHome.owners(), act("a1"))
+        holder, member = (owners, absorbed) if reaches == "a-holder" else (absorbed, owners)
+        store._conn.execute(
+            "INSERT INTO members(story_id, kind, member_id, position, linked_at, actor) "
+            "VALUES(?, 'story', ?, 1000000, 0, 'owner')",
+            (holder, member),
+        )
+        before = await everything(store)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        outcome = await bound.merge(absorbed, target, actor=StoryActor.OWNER)
+        assert outcome.refusal is not None
+        assert outcome.refusal.reason is StoryRefusalReason.UNKNOWN_STORY
+        assert outcome.refusal.story_id == absorbed
+        assert await everything(store) == before
+        unbound = await store.merge(absorbed, target, actor=StoryActor.OWNER)
+        assert unbound.refusal is not None
+        assert unbound.refusal.reason is StoryRefusalReason.ANOTHER_HOME
+        assert unbound.refusal.story_id == owners
     finally:
         store.close()

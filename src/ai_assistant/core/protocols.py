@@ -8473,6 +8473,88 @@ class StoryStore(Protocol):
         """
         ...
 
+    def bound(self, sight: Sight) -> StoryStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **What it holds.** A story is held where ``sight`` sees its home, decided by
+        :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else (§7:3), and
+        with it every note, summary, version, log line and member entry of it, which
+        take its home (§3:2). No story is recorded as made by an activation, so a sight
+        sees a story by its home alone (§7:4), and a story with no home, or one the store
+        cannot read, is held by no sight (§5:3).
+
+        **Withholding** (§7:2, §7:5, §8). Save a write's own checks, a bound store answers
+        every member as this store would if it held only the stories it holds, and a
+        story it does not hold answers as one never written:
+
+        - :meth:`header` its ``None``; :meth:`view`, :meth:`log`, :meth:`notes`,
+          :meth:`summary_versions` and :meth:`current_summary` their ``None``; and
+          :meth:`summary_at` its ``None``.
+        - :meth:`stories` lists, and :meth:`stories_of` gives back, only stories it holds,
+          the sight applied before the order, the limit and the cursor: a page of
+          ``limit`` is ``limit`` stories it holds, and a cursor's next page passes over a
+          story it does not hold without counting it (§8:1).
+        - A page of a story it holds is that story's whole, as unbound: its member count,
+          entries, lines, notes and versions, and the names they carry. By §4:7 no story
+          a sight sees names a story of another home, so no name it gives back is of a
+          story it does not hold (§8:3).
+        - :meth:`create`, :meth:`link`, :meth:`unlink`, :meth:`merge`, :meth:`split` and
+          :meth:`move` refuse ``unknown_story`` for a story they name, written to or as a
+          member, that it does not hold, in that refusal's place in the fixed check
+          order, so ``another_home`` is answered only between two stories it holds
+          (§4:8). A merge whose writes would change or name a story it does not hold, a
+          story holding the absorbed one or a story member the target would gain, is
+          refused ``unknown_story`` naming the absorbed story. A loop is looked for down
+          through the stories it holds alone.
+        - :meth:`append_note` and :meth:`write_summary` refuse ``unknown_story`` for a
+          story it does not hold, and :meth:`write_summary` for a flag or a summary version
+          read naming one.
+        - A flag the story that raised it, the story it names, or either as followed
+          through its merges, is a story it does not hold is a flag never raised:
+          ``unknown_flag`` from :meth:`leave_flag` and from every write given it as
+          ``answers``.
+        - :meth:`create` mints a story in the ``home`` it is handed whether or not the
+          sight sees it (§4:1, §7:5): a write mints, and changes no record it does not
+          hold. A story the sight does not see is then one it does not hold.
+
+        A write's own checks are decided over every story the store holds (§7:11):
+        whether a minted id is already taken, and whether a ``decided`` line already
+        answers a flag.
+
+        **What counts writes answers alike bound or not** (§8:5): :meth:`position`, and
+        the sequence numbers, note identities and version numbers the store issues, gaps
+        where stories it does not hold sit included.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and every read member writes one
+        event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes for the stories
+        the read gave back, by their homes: one for each story a read of one story gave
+        back a header, a page, a state or a summary of, and one for each header a list
+        gave back; :meth:`position`'s event counts no record. It carries no record's text
+        and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
+        """
+        ...
+
 
 @runtime_checkable
 class NotificationPolicy(Protocol):
@@ -9294,6 +9376,70 @@ class NotificationStore(Protocol):
 
         Raises:
             NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+    def bound(self, sight: Sight) -> NotificationStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **What it holds.** A held notification is held where ``sight`` sees its home,
+        decided by :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else
+        (§7:3). No record is recorded as made by an activation, so a sight sees one by
+        its home alone (§7:4), and a record with no home, or one the store cannot read,
+        is held by no sight (§5:3). The standing preferences are a setting and no record
+        of any domain (ADR-0383 §3 puts the home on ``HeldNotification``), so
+        :meth:`preferences` answers alike bound or not.
+
+        **Withholding** (§7:2, §7:5, §8). Save a write's own checks, a bound store answers
+        every member as this store would if it held only the records it holds, and a
+        record it does not hold answers as one never written:
+
+        - :meth:`get` its ``None``; :meth:`held`, :meth:`due` and :meth:`export` only
+          records it holds, the sight applied before the order, the ``limit`` and the
+          ``offset`` (§8:1).
+        - :meth:`dismiss` and :meth:`delete` ``False``, and :meth:`reconsider` ``None``,
+          for a record it does not hold, writing nothing; :meth:`clear` and :meth:`purge`
+          remove, and count, only records it holds.
+        - :meth:`admit` rules against the records it holds: the duplicate lookup reads the
+          records it holds under the key, and the cap counts the actionable records it
+          holds (§8:1, §8:2), so a withheld record neither suppresses an offer nor fills a
+          slot, and no admission drops, displaces or changes a record it does not hold,
+          as the cap never evicts and a ``DROP`` writes nothing. The record it writes
+          carries the ``home`` it is handed, whether or not the sight sees it (§4).
+        - :meth:`set_preferences` writes the setting and re-arms only the records it
+          holds, and answers how many of those it made due: a write through it changes no
+          record it does not hold (§7:5).
+
+        A write's own check that a minted id is not already taken reads every record
+        (§7:11). **What counts writes answers alike bound or not** (§8:5): the spend
+        ledger the budget is read from counts the interruptions recorded, not records,
+        and :attr:`cap` is the store's.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and every read member writes one
+        event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes for the records
+        the read gave back, by their homes; :meth:`preferences`' event counts no record.
+        It carries no record's text and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
         """
         ...
 

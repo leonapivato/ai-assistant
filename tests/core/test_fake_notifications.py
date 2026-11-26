@@ -24,6 +24,7 @@ from notification_contract import (
     NotificationPolicyContract,
     NotificationStoreContract,
     NotificationWriterContract,
+    SightStoreFactory,
     StoreFactory,
     candidate,
 )
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     RecordHome,
+    SightMode,
 )
 from ai_assistant.testing import (
     FakeNotificationPolicy,
@@ -101,6 +103,15 @@ class TestFakeNotificationStoreContract(NotificationStoreContract):
             cap: int = 100,
         ) -> NotificationStore:
             return FakeNotificationStore(now=now, retention=retention, cap=cap)
+
+        return build
+
+    @pytest.fixture
+    def sight_factory(self) -> SightStoreFactory:
+        def build(
+            *, mode: SightMode, now: Callable[[], datetime], cap: int = 100
+        ) -> NotificationStore:
+            return FakeNotificationStore(now=now, cap=cap, sight_mode=mode)
 
         return build
 

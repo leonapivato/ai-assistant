@@ -51,9 +51,10 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, time, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
+import structlog
 
 from ai_assistant.core.types import (
     DROP_CONDITIONS,
@@ -67,10 +68,12 @@ from ai_assistant.core.types import (
     NotificationReach,
     QuietWindow,
     RecordHome,
+    SightMode,
 )
+from sight_equivalence import SIGHTS, ReadCall, assert_answers_alike
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from ai_assistant.core.protocols import (
         NotificationPolicy,
@@ -2085,6 +2088,408 @@ class NotificationStoreContract(ABC):
             candidate(sensitivity=DataTier.SECRET)
 
         assert await store.export() == []
+
+    # --- a store bound to a sight (ADR-0383 §7, §8, §9:3, §11) ---------------------
+
+    @pytest.fixture
+    @abstractmethod
+    def sight_factory(self) -> SightStoreFactory:
+        """Build fresh, empty subjects in a mode, their ids from a counter starting afresh.
+
+        Two subjects given one history mint the same ids; each one's bindings withhold or
+        count as the mode says (ADR-0383 §7:10). The cases of ADR-0383 §7, §8, §9:3 and
+        §11 build the stores they compare with it.
+        """
+
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_store_answers_as_the_same_store_holding_only_what_its_sight_sees(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy, sight_name: str
+    ) -> None:
+        """§9:3's shared obligation, for every read member (§7:2, §8:1, §8:2).
+
+        Two stores take one history; from the second every record the sight does not see
+        is deleted, which refunds no unit of budget and changes no setting. The first,
+        bound to the sight and withholding, answers every call in the battery as the
+        second does: the same records in the same order, every page and offset, what is
+        due, the export, the settings, and "not found" for a record it does not hold.
+        """
+        sight = SIGHTS[sight_name]
+        bound_clock, only_clock = MutableClock(), MutableClock()
+        bound_store = sight_factory(mode=SightMode.WITHHOLD, now=bound_clock)
+        holding_only = sight_factory(mode=SightMode.WITHHOLD, now=only_clock)
+        ids = await _sight_history(bound_store, bound_clock, policy)
+        assert await _sight_history(holding_only, only_clock, policy) == ids
+        for record in await holding_only.export():
+            if not sight.sees(record.home):
+                assert await holding_only.delete(record.id) is True
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery(ids))
+
+    async def test_the_sights_hold_the_records_six_says(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """The obligation above has something to bite on: each sight's held records.
+
+        The owner's work holds every record; a run over the owner's domain the owner's;
+        one over the shared things, and a work for no one, the shared things'; an
+        unidentified sender's work and a producer with no facts, none, since no record is
+        recorded as made by an activation (§6, §7:4).
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        await _sight_history(store, clock, policy)
+        records = await store.export()
+        owners = {one.id for one in records if one.home == RecordHome.owners()}
+        shared = {one.id for one in records if one.home == RecordHome.shared()}
+        assert owners
+        assert shared
+        held = {
+            name: {one.id for one in await store.bound(sight).export()}
+            for name, sight in SIGHTS.items()
+        }
+        assert held == {
+            "owners-work": owners | shared,
+            "unidentified-senders-work": set(),
+            "work-for-no-one": shared,
+            "producer-with-no-facts": set(),
+            "run-over-the-shared-things": shared,
+            "run-over-the-owners-domain": owners,
+        }
+
+    async def test_a_write_naming_a_record_a_bound_store_does_not_hold_is_as_for_one_never_written(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:5, §8:2: ``False`` and ``None``, writing nothing; a sweep reaches the held alone.
+
+        A dismissal, a deletion and a reconsideration naming a record the binding does not
+        hold change nothing; ``clear`` removes and counts only the records it holds, and
+        the rest stand.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        ids = await _sight_history(store, clock, policy)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        before = await store.export()
+        assert await bound.dismiss(ids["shared-held"]) is False
+        assert await bound.delete(ids["shared-held"]) is False
+        assert await bound.reconsider(ids["shared-held"], policy=policy) is None
+        assert await store.export() == before
+        assert await store.reconsider(ids["shared-held"], policy=policy) is not None
+        owners = [one.id for one in before if one.home == RecordHome.owners()]
+        assert await bound.clear() == len(owners)
+        assert {one.id for one in await store.export()} == {
+            one.id for one in before if one.home == RecordHome.shared()
+        }
+
+    async def test_a_bound_stores_purge_reaches_only_what_it_holds(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:2: a purge removes, and counts, only the purgeable records it holds."""
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        gone: dict[RecordHome, str] = {}
+        for home in (RecordHome.owners(), RecordHome.shared()):
+            ruling = await store.admit(
+                candidate(key=f"k-{home.kind}", expires_at=NOW + timedelta(hours=1)),
+                home=home,
+                policy=policy,
+            )
+            assert ruling.notification_id is not None
+            assert await store.dismiss(ruling.notification_id) is True
+            gone[home] = ruling.notification_id
+        clock.advance(timedelta(days=30))
+        assert await store.bound(SIGHTS["run-over-the-shared-things"]).purge() == 1
+        assert await store.get(gone[RecordHome.shared()]) is None
+        assert await store.get(gone[RecordHome.owners()]) is not None
+        assert await store.purge() == 1
+
+    async def test_an_admission_through_a_binding_is_ruled_against_the_records_it_holds(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:2, §8:1, §8:2: the duplicate lookup and the cap read the held records alone.
+
+        A record of another home speaking for the key does not make an offer a duplicate,
+        nor does it fill a slot under the cap, so nothing about it shows through the
+        ruling; and no admission drops, displaces or changes it. Unbound, both rule
+        ``DROP``.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock, cap=1)
+        shared = await store.admit(candidate(key="k1"), home=RecordHome.shared(), policy=policy)
+        assert shared.notification_id is not None
+        before = await store.get(shared.notification_id)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        duplicate = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        assert duplicate.reason is NotificationCondition.DUPLICATE
+        at_cap = await store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy)
+        assert at_cap.reason is NotificationCondition.AT_CAP
+        admitted = await bound.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        assert admitted.kind is NotificationDispositionKind.HOLD
+        assert admitted.notification_id is not None
+        assert await store.get(shared.notification_id) == before
+        record = await bound.get(admitted.notification_id)
+        assert record is not None
+        assert record.home == RecordHome.owners()
+
+    async def test_the_budget_is_spent_alike_bound_or_not(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§8:5: the spend ledger counts interruptions recorded, not records, store-wide.
+
+        A unit an admission of another home spent is spent for a binding too, so a
+        perishable offer through it is held on the budget rather than interrupting.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        await store.set_preferences(
+            NotificationPreferences(
+                interruption_budget=1,
+                reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            )
+        )
+        spent = await store.admit(
+            candidate(key="k1", expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.shared(),
+            policy=policy,
+        )
+        assert spent.kind is NotificationDispositionKind.INTERRUPT
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        held = await bound.admit(
+            candidate(key="k2", expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
+            policy=policy,
+        )
+        assert held.kind is NotificationDispositionKind.HOLD
+        assert held.reason is NotificationCondition.BUDGET
+
+    async def test_a_setting_written_through_a_binding_re_arms_only_what_it_holds(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:5: the setting is the store's; the re-arming changes held records alone.
+
+        Two records held for a quiet window, one of each home; a binding over the
+        owner's domain removes the window, which stands for every later read, and makes
+        due only the owner's record, answering one.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        quiet = NotificationPreferences(
+            quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+        )
+        await store.set_preferences(quiet)
+        held: dict[RecordHome, str] = {}
+        for home in (RecordHome.owners(), RecordHome.shared()):
+            ruling = await store.admit(
+                candidate(key=f"k-{home.kind}", expires_at=NOW + timedelta(days=1)),
+                home=home,
+                policy=policy,
+            )
+            assert ruling.notification_id is not None
+            held[home] = ruling.notification_id
+        shared_before = await store.get(held[RecordHome.shared()])
+        clock.advance(timedelta(minutes=5))
+        open_window = quiet.model_copy(update={"quiet_windows": ()})
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        assert await bound.set_preferences(open_window) == 1
+        assert await store.preferences() == open_window
+        assert await store.get(held[RecordHome.shared()]) == shared_before
+        owners = await store.get(held[RecordHome.owners()])
+        assert owners is not None
+        assert owners.reconsider_at == clock.at
+
+    async def test_a_store_bound_in_the_counting_mode_answers_as_unbound_and_counts(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:10, §11:1 to §11:3: counting changes no answer and writes one event a read.
+
+        Every call in the battery answers through a counting binding as the unbound store
+        does, and no write is refused for the sight. A read's event carries the store,
+        the member, how many records it gave back, how many the sight would have withheld
+        by reason, and the reader and bounds as codes, and nothing else: no id, no text.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.COUNT, now=clock)
+        ids = await _sight_history(store, clock, policy)
+        sight = SIGHTS["unidentified-senders-work"]
+        await assert_answers_alike(store.bound(sight), store, _sight_battery(ids))
+        with structlog.testing.capture_logs() as events:
+            exported = await store.bound(sight).export()
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert counted == [
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "notifications",
+                "member": "export",
+                "given": len(exported),
+                "other_home": 0,
+                "no_home": 0,
+                "sees_nothing": len(exported),
+                "reader": "work",
+                "bounds": ["anyone", "person_owner"],
+            }
+        ]
+        assert await store.bound(sight).dismiss(ids["owners-held"]) is True
+
+    async def test_every_read_member_writes_one_count_event_when_counting(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§11:1: one event for each read, named by its member; the writes write none.
+
+        The settings, which are no record, count none.
+        """
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.COUNT, now=clock)
+        ids = await _sight_history(store, clock, policy)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        everything = await store.export()
+        shared = sum(one.home == RecordHome.shared() for one in everything)
+        due = await store.due()
+        due_shared = sum(one.home == RecordHome.shared() for one in due)
+        calls: list[tuple[str, Callable[[NotificationStore], Awaitable[object]], int, int]] = [
+            ("get", lambda s: s.get(ids["shared-held"]), 1, 1),
+            ("get", lambda s: s.get("ntf-never"), 0, 0),
+            ("held", lambda s: s.held(), len(everything), shared),
+            ("due", lambda s: s.due(), len(due), due_shared),
+            ("export", lambda s: s.export(), len(everything), shared),
+            ("preferences", lambda s: s.preferences(), 0, 0),
+        ]
+        for member, call, given, other_home in calls:
+            with structlog.testing.capture_logs() as events:
+                await call(bound)
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            assert [
+                (event["member"], event["given"], event["other_home"]) for event in counted
+            ] == [(member, given, other_home)], member
+            assert counted[0]["bounds"] == ["domain", "person_owner"]
+        with structlog.testing.capture_logs() as events:
+            await bound.admit(candidate(key="later"), home=RecordHome.owners(), policy=policy)
+            await bound.dismiss(ids["shared-held"])
+            await bound.set_preferences(NotificationPreferences())
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§6:6, §7:1: binding again never widens; two sights that do not meet are refused."""
+        clock = MutableClock()
+        store = sight_factory(mode=SightMode.WITHHOLD, now=clock)
+        await _sight_history(store, clock, policy)
+        owners = SIGHTS["owners-work"]
+        assert await store.bound(owners).bound(SIGHTS["unidentified-senders-work"]).export() == []
+        with pytest.raises(ValueError, match="meet"):
+            store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+    async def test_a_bound_store_reads_what_the_unbound_store_writes_after_binding(
+        self, sight_factory: SightStoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7:1: a binding is over the store's own records and settings, not a copy."""
+        store = sight_factory(mode=SightMode.WITHHOLD, now=MutableClock())
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        later = await store.admit(candidate(key="later"), home=RecordHome.shared(), policy=policy)
+        assert later.notification_id is not None
+        assert await bound.get(later.notification_id) is not None
+        settings = reaching(CLASS, NotificationReach.INTERRUPT)
+        await store.set_preferences(settings)
+        assert await bound.preferences() == settings
+        assert await bound.delete(later.notification_id) is True
+        assert await store.get(later.notification_id) is None
+
+
+async def _sight_history(
+    store: NotificationStore, clock: MutableClock, policy: NotificationPolicy
+) -> dict[str, str]:
+    """Write one history of records of both homes into ``store``, by the unbound doors.
+
+    Records held for a quiet window and so due once it closes, held at a class's reach
+    and due never, one dismissed, a duplicate dropped, one reconsidered into an
+    interruption and one interrupting, so every read member has records of both homes
+    to give back. Returns each record's id by name.
+    """
+    await store.set_preferences(
+        NotificationPreferences(
+            quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+        )
+    )
+    perishes = NOW + timedelta(days=1)
+    offers = [
+        ("owners-due", candidate(key="own-1", expires_at=perishes), RecordHome.owners()),
+        ("shared-held", candidate(key="sh-1", expires_at=perishes), RecordHome.shared()),
+        (
+            "owners-held",
+            candidate(key="own-2", notification_class=OTHER_CLASS),
+            RecordHome.owners(),
+        ),
+        ("shared-due", candidate(key="sh-2", expires_at=perishes), RecordHome.shared()),
+        ("shared-kept", candidate(key="sh-3", notification_class=OTHER_CLASS), RecordHome.shared()),
+    ]
+    ids: dict[str, str] = {}
+    for name, offered, home in offers:
+        ruling = await store.admit(offered, home=home, policy=policy)
+        assert ruling.notification_id is not None, ruling
+        ids[name] = ruling.notification_id
+        clock.advance(timedelta(minutes=1))
+    assert await store.dismiss(ids["shared-kept"]) is True
+    dropped = await store.admit(candidate(key="own-1"), home=RecordHome.owners(), policy=policy)
+    assert dropped.notification_id is None
+    clock.advance(timedelta(hours=1))
+    assert await store.reconsider(ids["shared-due"], policy=policy) is not None
+    late = await store.admit(
+        candidate(key="own-3", expires_at=perishes), home=RecordHome.owners(), policy=policy
+    )
+    assert late.notification_id is not None
+    ids["owners-late"] = late.notification_id
+    return ids
+
+
+def _on(member: str, *args: Any, **kwargs: Any) -> Callable[[NotificationStore], Awaitable[object]]:
+    """A call of ``member`` with these arguments, made on whichever store it is given."""
+
+    def call(store: NotificationStore) -> Awaitable[object]:
+        return cast("Awaitable[object]", getattr(store, member)(*args, **kwargs))
+
+    return call
+
+
+def _sight_battery(ids: dict[str, str]) -> list[ReadCall[NotificationStore]]:
+    """Every read member, with the arguments that reach its pages, order and "not found"."""
+    calls: list[ReadCall[NotificationStore]] = [
+        ReadCall(f"get({record_id})", _on("get", record_id))
+        for record_id in [*ids.values(), "ntf-never"]
+    ]
+    for offset in range(len(ids) + 1):
+        calls += [
+            ReadCall(f"held(1, {offset})", _on("held", limit=1, offset=offset)),
+            ReadCall(f"held(2, {offset})", _on("held", limit=2, offset=offset)),
+            ReadCall(f"due(1, {offset})", _on("due", limit=1, offset=offset)),
+        ]
+    calls += [
+        ReadCall("held()", _on("held")),
+        ReadCall("due()", _on("due")),
+        ReadCall("export()", _on("export")),
+        ReadCall("preferences()", _on("preferences")),
+    ]
+    return calls
+
+
+class SightStoreFactory(Protocol):
+    """Builds a fresh subject in a mode, its ids drawn from a counter starting afresh."""
+
+    def __call__(
+        self, *, mode: SightMode, now: Callable[[], datetime], cap: int = ...
+    ) -> NotificationStore:
+        """Build one store.
+
+        Args:
+            mode: Whether its bindings withhold or only count (ADR-0383 §7:10).
+            now: The clock it reads.
+            cap: The most actionable records it holds.
+
+        Returns:
+            The store.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------

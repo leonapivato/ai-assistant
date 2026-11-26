@@ -70,9 +70,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import structlog
 
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
@@ -80,12 +81,14 @@ from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
     STORY_SUMMARY_CAP_CHARS,
     RecordHome,
+    SightMode,
     StoryActor,
     StoryChange,
     StoryDecision,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
+    StoryHeader,
     StoryLogLine,
     StoryMember,
     StoryMemberKind,
@@ -100,10 +103,14 @@ from ai_assistant.core.types import (
     StorySummaryRefusalReason,
     StorySummaryState,
     StorySummaryVersion,
+    StorySummaryVersionList,
     StorySummaryVersionName,
 )
+from sight_equivalence import SIGHTS, ReadCall, assert_answers_alike
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Collection
+
     from ai_assistant.core.protocols import StoryStore
 
 #: The instant every subject's clock reads.
@@ -2816,3 +2823,487 @@ class StoryStoreContract:
         )
         summary_refused(refused_write, StorySummaryRefusalReason.SUMMARY_MOVED_ON)
         assert await everything(store) == before
+
+    # --- a store bound to a sight (ADR-0383 §7, §8, §9:3, §11) ---------------------
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], StoryStore]:
+        """Override in a subclass: a fresh, empty store in a mode, its ids from a counter.
+
+        Each call is a new store of its own, on the fixed clock the ``store`` fixture uses,
+        whose story ids are drawn from a counter starting afresh, so two stores given one
+        history mint the same ids; its bindings withhold or count as the mode says
+        (ADR-0383 §7:10).
+        """
+        raise NotImplementedError
+
+    @pytest.fixture
+    def remove_stories(self) -> Callable[[StoryStore, Collection[str]], None]:
+        """Override in a subclass: remove stories whole from a store the factory built.
+
+        **A test-only door**, which the Protocol has none of: the stories named go with
+        every member row, note, summary, version and log line of theirs (ADR-0383 §3:2),
+        and nothing else moves, the store's one sequence and every number it issued
+        included, so the store left is *the same store holding only* the rest (§9:3).
+        A member row of a story kept that names a story removed is the kept story's and
+        stays.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_store_answers_as_the_same_store_holding_only_what_its_sight_sees(
+        self,
+        sight_store_factory: Callable[[SightMode], StoryStore],
+        remove_stories: Callable[[StoryStore, Collection[str]], None],
+        sight_name: str,
+    ) -> None:
+        """§9:3's shared obligation, for every read member (§7:2, §8:1, §8:2, §8:5).
+
+        Two stores take one history; from the second every story the sight does not see
+        is removed whole, which leaves every number the rest carry as it is. The first,
+        bound to the sight and withholding, answers every call in the battery as the
+        second does: the same headers, pages walked to their end, notes, versions, kept
+        summaries, lists and reverse look-ups, the position, and "not found" for a story
+        it does not hold.
+        """
+        sight = SIGHTS[sight_name]
+        bound_store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(bound_store)
+        assert await _sight_history(holding_only) == names
+        battery = await _sight_battery(bound_store, names)
+        unheld = [
+            header.story_id
+            for header in await _all_headers(holding_only)
+            if not sight.sees(header.home)
+        ]
+        remove_stories(holding_only, unheld)
+        await assert_answers_alike(bound_store.bound(sight), holding_only, battery)
+
+    async def test_the_sights_hold_the_stories_six_says(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """The obligation above has something to bite on: each sight's held stories.
+
+        The owner's work holds every story; a run over the owner's domain the owner's;
+        one over the shared things, and a work for no one, the shared things'; an
+        unidentified sender's work and a producer with no facts, none, since no story is
+        recorded as made by an activation (§6, §7:4).
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        owners = {names[name] for name in _OWNERS_STORIES}
+        shared = {names[name] for name in _SHARED_STORIES}
+        held = {
+            name: {header.story_id for header in await _all_headers(store.bound(sight))}
+            for name, sight in SIGHTS.items()
+        }
+        assert held == {
+            "owners-work": owners | shared,
+            "unidentified-senders-work": set(),
+            "work-for-no-one": shared,
+            "producer-with-no-facts": set(),
+            "run-over-the-shared-things": shared,
+            "run-over-the-owners-domain": owners,
+        }
+
+    async def test_a_write_naming_a_story_a_bound_store_does_not_hold_is_as_for_one_never_written(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§4:8, §7:5, §8:2: ``unknown_story`` wherever a write names a story not held.
+
+        Written to or named as a member, on every write, and before ``another_home`` in
+        the fixed order; nothing is written. The same writes on stories it holds land.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        owners, shared, other = names["owners-one"], names["shared-one"], names["shared-two"]
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        before = await everything(store)
+        for outcome in (
+            await bound.link(owners, [act("x")], actor=_OWNER),
+            await bound.link(shared, [sub(owners)], actor=_OWNER),
+            await bound.create([sub(owners)], home=RecordHome.shared(), actor=_OWNER),
+            await bound.unlink(owners, [act("a1")], actor=_OWNER),
+            await bound.merge(owners, shared, actor=_OWNER),
+            await bound.merge(shared, owners, actor=_OWNER),
+            await bound.split(owners, [act("a1")], actor=_OWNER),
+            await bound.move(owners, shared, [act("a1")], actor=_OWNER),
+            await bound.move(shared, owners, [act("s1")], actor=_OWNER),
+        ):
+            refused(outcome, StoryRefusalReason.UNKNOWN_STORY)
+            assert outcome.refusal is not None
+            assert outcome.refusal.story_id == owners
+        note = await bound.append_note(owners, "Note.", author=StoryNoteAuthor.OWNER)
+        summary_refused(note, StorySummaryRefusalReason.UNKNOWN_STORY)
+        as_of = await store.position()
+        for written_to, summary in (
+            (owners, draft(line("Line."))),
+            (
+                shared,
+                draft(
+                    line("Line."), flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=owners),)
+                ),
+            ),
+            (
+                shared,
+                draft(
+                    line("Line."),
+                    read_pages=(
+                        StorySummaryVersionName(
+                            story=owners, version=_first_version(before, owners)
+                        ),
+                    ),
+                ),
+            ),
+        ):
+            summary_outcome = await bound.write_summary(written_to, summary, as_of=as_of)
+            summary_refused(summary_outcome, StorySummaryRefusalReason.UNKNOWN_STORY)
+            assert summary_outcome.refusal is not None
+            assert summary_outcome.refusal.story_id == owners
+        assert await everything(store) == before
+        landed = await bound.link(shared, [sub(other)], actor=_OWNER)
+        assert landed.refusal is None, landed
+
+    async def test_another_home_is_answered_only_between_two_stories_a_bound_store_holds(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§4:7, §4:8: the owner's work sees both homes, so it is told ``another_home``."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        owners, shared = names["owners-one"], names["shared-one"]
+        refusal = await store.bound(SIGHTS["owners-work"]).link(owners, [sub(shared)], actor=_OWNER)
+        refused(refusal, StoryRefusalReason.ANOTHER_HOME)
+        assert refusal.refusal is not None
+        assert refusal.refusal.story_id == shared
+        hidden = await store.bound(SIGHTS["run-over-the-owners-domain"]).link(
+            owners, [sub(shared)], actor=_OWNER
+        )
+        refused(hidden, StoryRefusalReason.UNKNOWN_STORY)
+        assert hidden.refusal is not None
+        assert hidden.refusal.story_id == shared
+
+    async def test_a_flag_concerning_a_story_a_bound_store_does_not_hold_is_one_never_raised(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§4:8, §7:5, §8:2: ``unknown_flag``, and no ``decided`` line written anywhere.
+
+        A flag a story it holds raised naming a story it does not hold, and a flag a story
+        it does not hold raised, are each answered as never raised, by ``leave_flag``
+        and by a write given it as ``answers``. Unbound, the first is decided.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        owners, shared, other = names["owners-one"], names["shared-one"], names["shared-two"]
+        naming = await raised(
+            store, shared, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=owners)
+        )
+        owners_flag = await raised(store, owners, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        before = await everything(store)
+        for flag in (naming, owners_flag):
+            refused(await bound.leave_flag(flag, actor=_PASS), StoryRefusalReason.UNKNOWN_FLAG)
+            refused(
+                await bound.link(shared, [sub(other)], actor=_PASS, answers=flag),
+                StoryRefusalReason.UNKNOWN_FLAG,
+            )
+        assert await everything(store) == before
+        decided = await store.leave_flag(naming, actor=_PASS)
+        assert decided.refusal is None, decided
+
+    async def test_a_story_minted_in_a_home_the_sight_does_not_see_is_then_one_it_does_not_hold(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§4:1, §7:4, §7:5: a create mints in the home it is handed, then is not held.
+
+        An unidentified sender's work writes into the owner's domain (§4:4) and reads
+        nothing of it (§6's second case): its second call on the story it made answers
+        as for a story never written.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        bound = store.bound(SIGHTS["unidentified-senders-work"])
+        outcome = await bound.create([act("x")], home=RecordHome.owners(), actor=_OWNER)
+        assert outcome.refusal is None, outcome
+        assert outcome.story_id is not None
+        assert await bound.header(outcome.story_id) is None
+        refused(
+            await bound.link(outcome.story_id, [act("y")], actor=_OWNER),
+            StoryRefusalReason.UNKNOWN_STORY,
+        )
+        header = await store.header(outcome.story_id)
+        assert header is not None
+        assert header.home == RecordHome.owners()
+
+    async def test_a_store_bound_in_the_counting_mode_answers_as_unbound_and_counts(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§7:10, §11:1 to §11:3: counting changes no answer and writes one event a read.
+
+        Every call in the battery answers through a counting binding as the unbound store
+        does, and no write is refused for the sight. A read's event carries the store,
+        the member, how many stories it gave back, how many the sight would have withheld
+        by reason, and the reader and bounds as codes, and nothing else: no id, no text.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        names = await _sight_history(store)
+        sight = SIGHTS["unidentified-senders-work"]
+        battery = await _sight_battery(store, names)
+        await assert_answers_alike(store.bound(sight), store, battery)
+        with structlog.testing.capture_logs() as events:
+            page = await store.bound(sight).stories(limit=MAX_STORY_PAGE)
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert len(page.stories) == len(names)
+        assert counted == [
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "stories",
+                "member": "stories",
+                "given": len(names),
+                "other_home": 0,
+                "no_home": 0,
+                "sees_nothing": len(names),
+                "reader": "work",
+                "bounds": ["anyone", "person_owner"],
+            }
+        ]
+        outcome = await store.bound(SIGHTS["run-over-the-shared-things"]).link(
+            names["owners-one"], [act("x")], actor=_OWNER
+        )
+        assert outcome.refusal is None, outcome
+
+    async def test_every_read_member_writes_one_count_event_when_counting(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§11:1: one event for each read, named by its member, of what it gave back.
+
+        A read of one story counts that story, and a list each header; ``position``,
+        a store-wide figure, counts none. The writes write none.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        names = await _sight_history(store)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        shared = names["shared-one"]
+        version = _first_version(await everything(store), shared)
+        # Each call, the member it counts, how many stories it gave back, and how many
+        # of them are of another home than the owner's domain the run tends.
+        calls: list[tuple[str, Callable[[StoryStore], Awaitable[object]], int, int]] = [
+            ("header", lambda s: s.header(shared), 1, 1),
+            ("view", lambda s: s.view(shared), 1, 1),
+            ("log", lambda s: s.log(shared), 1, 1),
+            ("current_summary", lambda s: s.current_summary(shared), 1, 1),
+            ("notes", lambda s: s.notes(shared), 1, 1),
+            ("summary_versions", lambda s: s.summary_versions(shared), 1, 1),
+            ("summary_at", lambda s: s.summary_at(shared, version), 1, 1),
+            ("stories", lambda s: s.stories(limit=MAX_STORY_PAGE), 6, 3),
+            ("stories_of", lambda s: s.stories_of(act("a1")), 2, 1),
+            ("position", lambda s: s.position(), 0, 0),
+            ("header", lambda s: s.header("story:never"), 0, 0),
+        ]
+        for member, call, given, other_home in calls:
+            with structlog.testing.capture_logs() as events:
+                await call(bound)
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            assert [
+                (event["member"], event["given"], event["other_home"]) for event in counted
+            ] == [(member, given, other_home)], member
+            assert counted[0]["no_home"] == counted[0]["sees_nothing"] == 0
+            assert counted[0]["bounds"] == ["domain", "person_owner"]
+            assert counted[0]["reader"] == "run"
+        with structlog.testing.capture_logs() as events:
+            await bound.link(shared, [act("later")], actor=_OWNER)
+            await bound.append_note(shared, "Later.", author=StoryNoteAuthor.OWNER)
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§6:6, §7:1: binding again never widens; two sights that do not meet are refused."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        owners = SIGHTS["owners-work"]
+        twice = store.bound(owners).bound(SIGHTS["unidentified-senders-work"])
+        assert await _all_headers(twice) == []
+        with pytest.raises(ValueError, match="meet"):
+            store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+    async def test_a_bound_store_reads_what_the_unbound_store_writes_after_binding(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§7:1: a binding is over the store's own records, not a copy of them."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        later = await homed(store, RecordHome.shared(), act("later"))
+        assert await bound.header(later) is not None
+        merged = await homed(store, RecordHome.shared(), act("merged"))
+        assert (await bound.merge(merged, later, actor=_OWNER)).refusal is None
+        header = await store.header(merged)
+        assert header is not None
+        assert header.merged_into == later
+        assert await store.position() == await bound.position()
+
+
+#: The stories :func:`_sight_history` writes, by name, in each home.
+_OWNERS_STORIES = ("owners-one", "owners-two", "owners-split")
+_SHARED_STORIES = ("shared-one", "shared-two", "shared-merged")
+
+
+async def _sight_history(store: StoryStore) -> dict[str, str]:
+    """Write one history of stories of both homes into ``store``, by the unbound doors.
+
+    Members of each kind, an activation in a story of each home, notes, summaries
+    raising flags and replaced, a decided flag, a merge, a split carrying a note and a
+    move, so every read member has records of both homes to give back. Returns each
+    story's id by name.
+    """
+    names: dict[str, str] = {}
+    names["owners-one"] = await homed(store, RecordHome.owners(), act("a1"), act("a2"))
+    names["shared-one"] = await homed(store, RecordHome.shared(), act("s1"), act("a1"))
+    names["owners-two"] = await homed(
+        store, RecordHome.owners(), sub(names["owners-one"]), act("a3")
+    )
+    names["shared-two"] = await homed(store, RecordHome.shared(), act("s2"))
+    names["shared-merged"] = await homed(store, RecordHome.shared(), act("s3"))
+    owners_note = await noted(store, names["owners-one"], "An owner's note.", on="a2")
+    await noted(store, names["shared-one"], "A shared note.", on="s1")
+    read = await state_of(store, names["owners-one"])
+    await written(
+        store,
+        names["owners-one"],
+        draft(
+            line("The owner's matter."),
+            took_in_notes=(owners_note.note_id,),
+            took_in_episodes=("a1",),
+            flags=(StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=names["owners-two"]),),
+        ),
+        as_of=read.as_of,
+    )
+    read = await state_of(store, names["shared-one"])
+    shared_version = await written(
+        store,
+        names["shared-one"],
+        draft(line("The shared matter."), flags=(StoryFlag(kind=StoryFlagKind.TWO_MATTERS),)),
+        as_of=read.as_of,
+    )
+    read = await state_of(store, names["owners-one"])
+    await written(store, names["owners-one"], draft(line("Again.")), as_of=read.as_of)
+    merged = await store.merge(names["shared-merged"], names["shared-two"], actor=_OWNER)
+    assert merged.refusal is None, merged
+    split = await store.split(
+        names["owners-one"],
+        [act("a2")],
+        actor=_OWNER,
+        notes=(owners_note.note_id,),
+    )
+    assert split.story_id is not None, split
+    names["owners-split"] = split.story_id
+    moved = await store.move(names["shared-one"], names["shared-two"], [act("s1")], actor=_OWNER)
+    assert moved.refusal is None, moved
+    decided = await store.leave_flag(
+        StoryFlagName(
+            story=names["shared-one"],
+            version=shared_version.version,
+            flag=StoryFlag(kind=StoryFlagKind.TWO_MATTERS),
+        ),
+        actor=_PASS,
+    )
+    assert decided.refusal is None, decided
+    await noted(store, names["owners-two"], "A later owner's note.", on="a3")
+    return names
+
+
+async def _all_headers(store: StoryStore) -> list[StoryHeader]:
+    """Every story ``store`` lists, newest first, walking its pages one story at a time."""
+    headers: list[StoryHeader] = []
+    cursor: int | None = None
+    while True:
+        page = await store.stories(cursor=cursor, limit=1)
+        headers.extend(page.stories)
+        if page.next_cursor is None:
+            return headers
+        cursor = page.next_cursor
+
+
+def _first_version(state: tuple[Any, ...], story_id: str) -> int:
+    """The first summary version :func:`everything` read off ``story_id``'s version log."""
+    for item in state:
+        if isinstance(item, StorySummaryVersionList) and item.story.story_id == story_id:
+            return item.versions[0].version
+    msg = f"no version log of {story_id!r} was read"
+    raise AssertionError(msg)
+
+
+async def _walked(read: Callable[[int | None], Awaitable[Any]]) -> list[Any]:
+    """Every page a paged read gives, from the first to the one that says none follows."""
+    pages: list[Any] = []
+    cursor: int | None = None
+    while True:
+        page = await read(cursor)
+        pages.append(page)
+        if page is None or page.next_cursor is None:
+            return pages
+        cursor = page.next_cursor
+
+
+def _on(member: str, *args: Any, **kwargs: Any) -> Callable[[StoryStore], Awaitable[object]]:
+    """A call of ``member`` with these arguments, made on whichever store it is given."""
+
+    def call(store: StoryStore) -> Awaitable[object]:
+        return cast("Awaitable[object]", getattr(store, member)(*args, **kwargs))
+
+    return call
+
+
+def _walk(member: str, *args: Any, limit: int) -> Callable[[StoryStore], Awaitable[object]]:
+    """A paged read of ``member`` walked to its end, ``limit`` items a page."""
+
+    def call(store: StoryStore) -> Awaitable[object]:
+        read = getattr(store, member)
+        return _walked(lambda cursor: read(*args, cursor=cursor, limit=limit))
+
+    return call
+
+
+async def _sight_battery(store: StoryStore, names: dict[str, str]) -> list[ReadCall[StoryStore]]:
+    """Every read member, with the arguments that reach its pages, order and "not found".
+
+    Read off ``store`` unbound: each story's paged reads walked one item a page, its
+    current summary, and every kept summary by every version any story wrote; every
+    list walked, one story a page and whole; the reverse look-up of every member; a
+    story never written; and the position.
+    """
+    stories = [*names.values(), "story:never"]
+    versions = sorted(
+        {
+            version.version
+            for story_id in names.values()
+            for version in await versions_of(store, story_id)
+        }
+    )
+    calls: list[ReadCall[StoryStore]] = []
+    for story_id in stories:
+        calls += [
+            ReadCall(f"header({story_id})", _on("header", story_id)),
+            ReadCall(f"view({story_id}) walked", _walk("view", story_id, limit=1)),
+            ReadCall(f"log({story_id}) walked", _walk("log", story_id, limit=2)),
+            ReadCall(f"current_summary({story_id})", _on("current_summary", story_id)),
+            ReadCall(f"notes({story_id}) walked", _walk("notes", story_id, limit=1)),
+            ReadCall(
+                f"summary_versions({story_id}) walked",
+                _walk("summary_versions", story_id, limit=1),
+            ),
+        ]
+        calls += [
+            ReadCall(f"summary_at({story_id}, {version})", _on("summary_at", story_id, version))
+            for version in versions
+        ]
+    members = [act(one) for one in ("a1", "a2", "a3", "s1", "s2", "s3", "x")]
+    members += [sub(story_id) for story_id in stories]
+    calls += [ReadCall(f"stories_of({member.id})", _on("stories_of", member)) for member in members]
+    calls += [
+        ReadCall("stories() walked", _walk("stories", limit=1)),
+        ReadCall("stories(limit=2) walked", _walk("stories", limit=2)),
+        ReadCall("stories(whole)", _on("stories", limit=MAX_STORY_PAGE)),
+        ReadCall("position()", _on("position")),
+    ]
+    return calls

@@ -61,6 +61,19 @@ writes the home it is handed beside the candidate, and every other write leaves 
 was. A home :func:`~ai_assistant.core.types.home_may_be_written` does not allow is a
 ``ValueError`` before the atomic act, so no record and no unit of budget (ADR-0386 §6:2).
 
+**A store bound to a sight** (ADR-0383 §7) is a copy of this one sharing its connection,
+lock, clock and trace emitter by reference, with the sight set. A record is held where its
+two home columns hold a home the sight sees
+(:func:`~ai_assistant.memory._home_columns.seen_sql`, read strictly by
+:func:`~ai_assistant.memory._home_columns.stored_home`, which this module's record decoder
+reads a home by too). Withholding, every read, every write naming a record, and every
+fact an admission is ruled against, the duplicate lookup and the cap's count, reads the
+held records alone, so a record the sight does not see answers as one never written; a
+write's own check that a minted id is fresh reads every record (§7:11), and the spend
+ledger, a store-wide figure that counts writes and no record, answers alike (§8:5).
+Counting, every statement is the unbound one, and each read logs the homes of the records
+it gave back.
+
 **The file carries a label** (``PRAGMA user_version``, :data:`NOTIFICATION_SCHEMA_VERSION`),
 its first, which the change that added the home gave it (ADR-0383 §13). The file every
 earlier build wrote carries none: its table is the one shape this store had before the
@@ -85,6 +98,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import sqlite3
 import threading
@@ -109,9 +123,11 @@ from ai_assistant.core.types import (
     NotificationReach,
     RecordHome,
     RecordHomeKind,
+    SightMode,
     describe_untrusted,
     home_may_be_written,
 )
+from ai_assistant.memory._home_columns import count_homes, seen_sql, stored_home
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.notification_traces import (
     SEAM_ADMIT,
@@ -121,10 +137,14 @@ from ai_assistant.memory.notification_traces import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import NotificationPolicy, TraceSink
+    from ai_assistant.core.types import Sight
+
+#: This store's code in ADR-0383 §11:1's count event.
+STORE_CODE: Final = "notifications"
 
 _OWNER_ONLY = 0o600
 
@@ -489,11 +509,28 @@ def _notification_from(row: Sequence[object]) -> HeldNotification:
             retention=_duration_from(row[8]),
             dismissed_at=_optional_instant_from(row[9], what="dismissal instant"),
             dropped_at=_optional_instant_from(row[10], what="drop instant"),
-            home=RecordHome.model_validate({"kind": row[11], "id": row[12]}),
+            home=_home_from(row[11], row[12]),
         )
     except ValidationError as exc:
         msg = f"a stored notification is corrupt: {exc}"
         raise NotificationStoreError(msg) from exc
+
+
+def _home_from(kind: object, home_id: object) -> RecordHome:
+    """A stored record's home, by the one reading a bound store's query matches too.
+
+    Read by :func:`~ai_assistant.memory._home_columns.stored_home`. A record with no home,
+    or one that reading does not accept, is not read as anyone's: it is a corrupt record
+    (ADR-0383 §5:3).
+
+    Raises:
+        NotificationStoreError: If the columns hold no home that reading accepts.
+    """
+    home = stored_home(kind, home_id)
+    if home is None:
+        msg = "a stored notification is corrupt: its home is missing or not one this store writes"
+        raise NotificationStoreError(msg)
+    return home
 
 
 def _checked_home(home: object) -> RecordHome:
@@ -689,6 +726,7 @@ class SqliteNotificationStore:
         retention: timedelta | None = _DEFAULT_RETENTION,
         cap: int = _DEFAULT_CAP,
         new_id: Callable[[], str] = _new_notification_id,
+        sight_mode: SightMode = SightMode.COUNT,
     ) -> None:
         """Open (or create) the notification store at ``path``.
 
@@ -721,6 +759,9 @@ class SqliteNotificationStore:
             new_id: The record-id source. The store mints every id and no caller
                 supplies one, so this exists for determinism in tests rather than
                 as a capability seam.
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10): fixed here, by the composition root, and read from
+                no setting and no running act.
 
         Raises:
             ValueError: If ``retention`` is set and not strictly positive, or
@@ -735,6 +776,8 @@ class SqliteNotificationStore:
         self._retention = retention
         self._cap = cap
         self._new_id = new_id
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -883,6 +926,43 @@ class SqliteNotificationStore:
         """Close the underlying database connection."""
         self._conn.close()
 
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> SqliteNotificationStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing this store's connection, lock, clock and trace emitter by
+        reference, with the sight set: the meet of the one it was already bound to,
+        where it was (§6:6). It opens nothing, and closing either closes both.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _seen(self) -> tuple[str, list[object]]:
+        """The sight's condition over a record's row, ``1`` where nothing is withheld.
+
+        Unbound, and bound in the counting mode, no row is held back (ADR-0383 §7:10,
+        §11:1); withholding, a row is held where its home is one the sight sees.
+        """
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return "1", []
+        return seen_sql(self._sight)
+
+    def _counted(self, member: str, records: Iterable[HeldNotification]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_homes(
+                self._sight,
+                store=STORE_CODE,
+                member=member,
+                homes=(record.home for record in records),
+            )
+
     # --- internals -----------------------------------------------------------
 
     @property
@@ -1024,20 +1104,24 @@ class SqliteNotificationStore:
 
     def _row(self, conn: sqlite3.Connection, notification_id: str) -> HeldNotification | None:
         """The stored record with ``notification_id``, decoded, or ``None``."""
+        where, params = self._seen()
         rows = self._fetch(
             conn,
             "read a notification",
-            f"SELECT {_COLUMNS} FROM notifications WHERE id = ?",  # noqa: S608 — a module constant, no input
-            (notification_id,),
+            f"SELECT {_COLUMNS} FROM notifications WHERE id = ? AND {where}",  # noqa: S608 — module text; values bound
+            (notification_id, *params),
         )
         return _notification_from(rows[0]) if rows else None
 
     def _all(self, conn: sqlite3.Connection) -> list[HeldNotification]:
         """Every stored record, oldest first (ADR-0078 §7's ordering, via §7)."""
+        where, params = self._seen()
         rows = self._fetch(
             conn,
             "enumerate notifications",
-            f"SELECT {_COLUMNS} FROM notifications ORDER BY admitted_at ASC, id ASC",  # noqa: S608 — a module constant, no input
+            f"SELECT {_COLUMNS} FROM notifications WHERE {where} "  # noqa: S608 — module text; values bound
+            "ORDER BY admitted_at ASC, id ASC",
+            params,
         )
         return [_notification_from(row) for row in rows]
 
@@ -1066,11 +1150,13 @@ class SqliteNotificationStore:
         delete surface", which is the user's own choice and the user's own
         remedy.
         """
+        where, params = self._seen()
         rows = self._fetch(
             conn,
             "enumerate actionable notifications",
-            f"SELECT {_COLUMNS} FROM notifications WHERE {_UNCEASED} "  # noqa: S608 — module constants, no input
+            f"SELECT {_COLUMNS} FROM notifications WHERE {_UNCEASED} AND {where} "  # noqa: S608 — module text; values bound
             f"ORDER BY admitted_at ASC, id ASC",
+            params,
         )
         return [record for record in map(_notification_from, rows) if record.is_actionable_at(now)]
 
@@ -1104,12 +1190,13 @@ class SqliteNotificationStore:
         conforming stores disagreeing about the instant a key stops speaking is
         what keeping the predicate on the type is for.
         """
+        where, params = self._seen()
         rows = self._fetch(
             conn,
             "look up a candidate key",
-            f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module constants, no input
-            f"WHERE candidate_key = ? AND {_UNSILENCED}",
-            (key, _to_micros(now)),
+            f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module text; values bound
+            f"WHERE candidate_key = ? AND {_UNSILENCED} AND {where}",
+            (key, _to_micros(now), *params),
         )
         return any(record.speaks_for_its_key_at(now) for record in map(_notification_from, rows))
 
@@ -1560,17 +1647,20 @@ class SqliteNotificationStore:
         # mid-scan would otherwise shift every subsequent offset.
         now = self._now()
         async with self._lock:
-            return await _run_to_completion(self._due_sync, limit, offset, now)
+            due = await _run_to_completion(self._due_sync, limit, offset, now)
+        self._counted("due", due)
+        return due
 
     def _due_sync(self, limit: int, offset: int, now: datetime) -> list[HeldNotification]:
         with self._transaction("enumerate due notifications", immediate=False) as conn:
+            where, params = self._seen()
             rows = self._fetch(
                 conn,
                 "enumerate due notifications",
-                f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module constants, no input
+                f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — module text; values bound
                 f"WHERE {_UNCEASED} AND reconsider_at IS NOT NULL AND reconsider_at <= ? "
-                f"ORDER BY reconsider_at ASC, id ASC",
-                (_to_micros(now),),
+                f"AND {where} ORDER BY reconsider_at ASC, id ASC",
+                (_to_micros(now), *params),
             )
             # Paging is applied **after** the record's own predicate rather than
             # in SQL, so `offset` counts the rows a caller can actually see.
@@ -1596,16 +1686,21 @@ class SqliteNotificationStore:
         _check_page_bound("limit", limit)
         _check_page_bound("offset", offset)
         async with self._lock:
-            return await _run_to_completion(self._held_sync, limit, offset)
+            held = await _run_to_completion(self._held_sync, limit, offset)
+        self._counted("held", held)
+        return held
 
     def _held_sync(self, limit: int, offset: int) -> list[HeldNotification]:
         with self._transaction("enumerate notifications", immediate=False) as conn:
+            # Withholding, the sight narrows the rows before the order, the limit and
+            # the offset (ADR-0383 §7:2, §8:1).
+            where, params = self._seen()
             rows = self._fetch(
                 conn,
                 "enumerate notifications",
-                f"SELECT {_COLUMNS} FROM notifications "  # noqa: S608 — a module constant, no input
+                f"SELECT {_COLUMNS} FROM notifications WHERE {where} "  # noqa: S608 — module text; values bound
                 f"ORDER BY admitted_at ASC, id ASC LIMIT ? OFFSET ?",
-                (limit, offset),
+                (*params, limit, offset),
             )
             return [_notification_from(row) for row in rows]
 
@@ -1617,7 +1712,9 @@ class SqliteNotificationStore:
                 corrupt.
         """
         async with self._lock:
-            return await _run_to_completion(self._get_sync, notification_id)
+            found = await _run_to_completion(self._get_sync, notification_id)
+        self._counted("get", () if found is None else (found,))
+        return found
 
     def _get_sync(self, notification_id: str) -> HeldNotification | None:
         with self._transaction("read a notification", immediate=False) as conn:
@@ -1665,7 +1762,11 @@ class SqliteNotificationStore:
                 value is corrupt.
         """
         async with self._lock:
-            return await _run_to_completion(self._preferences_sync)
+            preferences = await _run_to_completion(self._preferences_sync)
+        # A standing setting, not a record of any domain: answered alike bound or not,
+        # and its event counts no record (ADR-0383 §3, §11:1).
+        self._counted("preferences", ())
+        return preferences
 
     def _preferences_sync(self) -> NotificationPreferences:
         with self._transaction("read the notification preferences", immediate=False) as conn:
@@ -1740,8 +1841,10 @@ class SqliteNotificationStore:
 
     def _delete_sync(self, notification_id: str) -> bool:
         with self._transaction("delete a notification") as conn:
+            where, params = self._seen()
             deleted = conn.execute(
-                "DELETE FROM notifications WHERE id = ?", (notification_id,)
+                f"DELETE FROM notifications WHERE id = ? AND {where}",  # noqa: S608 — module text; values bound
+                (notification_id, *params),
             ).rowcount
             return deleted > 0
 
@@ -1762,7 +1865,13 @@ class SqliteNotificationStore:
 
     def _clear_sync(self) -> int:
         with self._transaction("clear the notification store") as conn:
-            return int(conn.execute("DELETE FROM notifications").rowcount)
+            where, params = self._seen()
+            return int(
+                conn.execute(
+                    f"DELETE FROM notifications WHERE {where}",  # noqa: S608 — module text; values bound
+                    params,
+                ).rowcount
+            )
 
     async def export(self) -> list[HeldNotification]:
         """Every stored record, for the user's own data export (ADR-0004 §6).
@@ -1776,7 +1885,9 @@ class SqliteNotificationStore:
                 corrupt.
         """
         async with self._lock:
-            return await _run_to_completion(self._export_sync)
+            exported = await _run_to_completion(self._export_sync)
+        self._counted("export", exported)
+        return exported
 
     def _export_sync(self) -> list[HeldNotification]:
         with self._transaction("export the notification store", immediate=False) as conn:
@@ -1811,10 +1922,12 @@ class SqliteNotificationStore:
             # record still speaks for its key are then judged by the record,
             # which is where their one definition lives (`is_purgeable_at`) and
             # where ADR-0215 §4 requires them to stay.
+            where, params = self._seen()
             rows = self._fetch(
                 conn,
                 "purge the notification store",
-                f"SELECT {_COLUMNS} FROM notifications WHERE retention IS NOT NULL",  # noqa: S608 — a module constant, no input
+                f"SELECT {_COLUMNS} FROM notifications WHERE retention IS NOT NULL AND {where}",  # noqa: S608 — module text; values bound
+                params,
             )
             doomed = [
                 record.id for record in map(_notification_from, rows) if record.is_purgeable_at(now)
