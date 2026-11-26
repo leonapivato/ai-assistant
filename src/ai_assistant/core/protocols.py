@@ -253,6 +253,7 @@ if TYPE_CHECKING:
         SpokenAudioFormat,
         SpokenReply,
         StoryActor,
+        StoryExport,
         StoryFlagName,
         StoryHeader,
         StoryLogPage,
@@ -8748,6 +8749,46 @@ class StoryStore(Protocol):
         """
         ...
 
+    async def export(self) -> StoryExport:
+        """Read every story this store holds, whole, for its export (ADR-0385 §6:4, §11).
+
+        **What it carries.** Every story, in the order :meth:`stories` lists them, newest
+        first, a merged story included with its header naming the story it was merged
+        into; and with each story every part of it that takes its home (ADR-0383 §3:2),
+        each exactly as this store's own read of that part gives it back, walked whole:
+        its header as :meth:`header` gives it, its clean view's entries as :meth:`view`
+        does, its change-log lines as :meth:`log` does, the notes it holds as
+        :meth:`notes` does, its version log as :meth:`summary_versions` does, and every
+        summary of one of its versions this store keeps text for, as :meth:`summary_at`
+        gives it by that version. A merged story is carried as those reads leave it: no
+        members, its own log lines, its own versions and kept summaries, and none of the
+        notes the merge carried to the story it was merged into, which that story holds.
+        A story holds no state (ADR-0289 §2), so none is closed and none is left out as
+        closed.
+
+        **What it omits.** Everything store-wide (ADR-0383 §8:5): :meth:`position`, a
+        reading's ``as_of``, and what is pending on a story, which is the tidy-up's working
+        state on the store's sequence rather than a record of the story. It reads and
+        stores nothing new, and no story is changed by it.
+
+        **Through a bound store** (ADR-0383 §7:2, §12:2) it holds only what the sight
+        sees, as this store would if it held only those stories: a story it does not hold
+        is absent with every part of it, and a story with no home, or one this store
+        cannot read, is in no bound store's export (§5:3). Counting, it answers as the
+        unbound store does and writes one count event for the stories it gave back.
+
+        The stories and their parts are read in one consistent reading. The export is
+        whole: it is never truncated, sampled or split (ADR-0385 §6:7).
+
+        Returns:
+            The export; one holding no story for a store that holds none.
+
+        Raises:
+            StoryStoreError: If the store cannot be read, or a stored record it reads
+                is corrupt.
+        """
+        ...
+
     def bound(self, sight: Sight) -> StoryStore:
         """This store, bound to ``sight`` (ADR-0383 §7:1).
 
@@ -8781,7 +8822,8 @@ class StoryStore(Protocol):
         - :meth:`stories` lists, and :meth:`stories_of` gives back, only stories it holds,
           the sight applied before the order, the limit and the cursor: a page of
           ``limit`` is ``limit`` stories it holds, and a cursor's next page passes over a
-          story it does not hold without counting it (§8:1).
+          story it does not hold without counting it (§8:1). :meth:`export` carries only
+          the stories it holds, each whole (ADR-0385 §6:5).
         - A page of a story it holds is that story's whole, as unbound: its member count,
           entries, lines, notes and versions, and the names they carry. That no name it
           gives back is of a story it does not hold (§8:3) rests on the refusals this
@@ -8821,8 +8863,9 @@ class StoryStore(Protocol):
         event to the hub's log alone, carrying
         :class:`~ai_assistant.core.types.SightCount`'s numbers and codes for the stories
         the read gave back, by their homes: one for each story a read of one story gave
-        back a header, a page, a state or a summary of, and one for each header a list
-        gave back; :meth:`position`'s event counts no record. It carries no record's text
+        back a header, a page, a state or a summary of, one for each header a list gave
+        back, and one for each story :meth:`export` gave back; :meth:`position`'s event
+        counts no record. It carries no record's text
         and no identifier.
 
         Args:

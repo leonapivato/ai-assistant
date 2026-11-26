@@ -24945,6 +24945,81 @@ class StorySummaryVersionList(BaseModel):
     next_cursor: int | None = Field(strict=True, ge=0, lt=_STORY_POSITION_BOUND)
 
 
+class ExportedStory(BaseModel):
+    """One story whole, as the story store's export carries it (ADR-0385 §6:4, §11).
+
+    The story and every part of it that takes its home (ADR-0383 §3:2), each exactly as
+    the store's own read of that part gives it back, read whole rather than a page at a
+    time:
+
+    - ``story``: its header, as ``StoryStore.header`` and ``StoryStore.stories`` give
+      it: its id, when it was made, its home, and, once it has been merged, the story it
+      was merged into.
+    - ``members``: its clean view's entries, in link order, as ``StoryStore.view``'s
+      pages give them walked to their end; empty for a merged story, which a merge
+      leaves with none.
+    - ``log``: its change-log lines, in sequence order, as ``StoryStore.log`` gives them.
+    - ``notes``: the notes it holds, in the order they were written, as
+      ``StoryStore.notes`` gives them; a note a merge, a split or a move carried away is
+      the story's that holds it now.
+    - ``versions``: its summary's version log, oldest first, as
+      ``StoryStore.summary_versions`` gives it.
+    - ``summaries``: each summary of one of its versions the store keeps text for, in
+      ascending version, as ``StoryStore.summary_at`` gives it by that version; a version
+      written before the store kept every summary has none (ADR-0347 §5:1). The story's
+      current summary is the one of its highest version.
+
+    **Nothing store-wide** (ADR-0383 §8:5): no position, no reading's ``as_of`` and no
+    count beside the records themselves. What is pending on the story is not carried
+    either: it is where the store's own sequence stood when a note or an episode came
+    to the story, the tidy-up's working state relative to that sequence rather than a
+    record of the story, as ``StoryStore.current_summary`` gives it with that sequence's
+    ``as_of``. The sequence numbers, note identities and version numbers each record
+    carries are carried as the reads give them (§8:5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    story: StoryHeader
+    members: tuple[StoryEntry, ...] = ()
+    log: tuple[StoryLogLine, ...] = ()
+    notes: tuple[StoryNote, ...] = ()
+    versions: tuple[StorySummaryVersion, ...] = ()
+    summaries: tuple[StorySummary, ...] = ()
+
+    @model_validator(mode="after")
+    def _every_part_is_its_storys(self) -> Self:
+        if any(line.story_id != self.story.story_id for line in self.log):
+            msg = "an exported story carries only its own log lines"
+            raise ValueError(msg)
+        written = {version.version for version in self.versions}
+        if any(summary.version not in written for summary in self.summaries):
+            msg = "an exported story carries only the summaries its own versions wrote"
+            raise ValueError(msg)
+        return self
+
+
+class StoryExport(BaseModel):
+    """Every story the story store holds, whole, for its export (ADR-0385 §6:4, §11).
+
+    ``stories`` are in the order ``StoryStore.stories`` lists them, newest first, a
+    merged story included, since it is still a story with its header (ADR-0289 §3).
+    Each is an :class:`ExportedStory`, carrying every part of it that takes its home
+    (ADR-0383 §3:2) and nothing store-wide (§8:5). Through a store bound to a sight it
+    holds only the stories that sight sees, and so only their parts (§7:2, §12:2).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    stories: tuple[ExportedStory, ...] = ()
+
+    @model_validator(mode="after")
+    def _no_story_twice(self) -> Self:
+        ids = [one.story.story_id for one in self.stories]
+        if len(set(ids)) != len(ids):
+            msg = "a story export carries no story twice"
+            raise ValueError(msg)
+        return self
+
+
 class StorySummaryDraft(BaseModel):
     """A new summary, with what the store records beside it (ADR-0303 §4:1).
 
