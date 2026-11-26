@@ -15,8 +15,12 @@ no annotation, so a lambda holds nothing but what its enclosing holder holds. A 
 the top-level class or function of its module that the annotation sits in, so a method, a
 nested function and a closure count toward the class or function that encloses them.
 ``Bound[X]`` (``orchestration.bound_stores.Bound``) is read as bound: it marks a parameter
-handed a store :class:`BoundStores` gave for a sight, and is read as nothing else. A
-``type`` alias is a name for a shape, not a holder, and is not read.
+handed a store :class:`BoundStores` gave for a sight, and is read as nothing else.
+**A store under another name is read as the store**: an import under another name
+(``from … import MemoryStore as Store``) and an alias anywhere in the package (``type
+Store = MemoryStore``, ``Store: TypeAlias = …``, ``Store = MemoryStore``) whose value
+names a store unbound, an alias of an alias included. An alias's own definition is a
+name for a shape, not a holder, and is not read as one.
 
 **Closures** (the inventory's caveat). A closure made under ``orchestration/`` reaches a
 store only through a value its enclosing class or function holds, and that holder's
@@ -36,10 +40,11 @@ import ast
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import ai_assistant
 import ai_assistant.orchestration
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 #: §7:1's six store Protocols, and ``MemoryWriter``.
 STORES: Final = frozenset(
@@ -181,8 +186,8 @@ _LANES: Final = frozenset({"B8b", "B8c", "B8d", "B9", "B10"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
-def _stores_named(annotation: ast.expr) -> Iterator[str]:
-    """Each store Protocol ``annotation`` names unbound, a quoted one's included."""
+def _stores_named(annotation: ast.expr, names: frozenset[str] = STORES) -> Iterator[str]:
+    """Each store ``annotation`` names unbound, by any of ``names``, a quoted one's included."""
     node: ast.expr = annotation
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         try:
@@ -195,13 +200,61 @@ def _stores_named(annotation: ast.expr) -> Iterator[str]:
             isinstance(marked, ast.Attribute) and marked.attr == BOUND_MARK
         ):
             return
-    if isinstance(node, ast.Name) and node.id in STORES:
+    if isinstance(node, ast.Name) and node.id in names:
         yield node.id
-    if isinstance(node, ast.Attribute) and node.attr in STORES:
+    if isinstance(node, ast.Attribute) and node.attr in names:
         yield node.attr
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.expr):
-            yield from _stores_named(child)
+            yield from _stores_named(child, names)
+
+
+def _alias_values(tree: ast.Module) -> Iterator[tuple[str, ast.expr]]:
+    """Each module-level alias ``tree`` defines, by name, with its value.
+
+    A ``type`` statement, an annotated ``TypeAlias`` and a plain assignment of one name.
+    """
+    for top in tree.body:
+        if isinstance(top, ast.TypeAlias) and isinstance(top.name, ast.Name):
+            yield top.name.id, top.value
+        elif (
+            isinstance(top, ast.AnnAssign)
+            and isinstance(top.target, ast.Name)
+            and top.value is not None
+        ):
+            yield top.target.id, top.value
+        elif isinstance(top, ast.Assign) and len(top.targets) == 1:
+            (target,) = top.targets
+            if isinstance(target, ast.Name):
+                yield target.id, top.value
+
+
+def store_aliases(trees: Iterable[ast.Module]) -> frozenset[str]:
+    """Every name an alias anywhere in ``trees`` gives a store naming it unbound.
+
+    Read to a fixed point, so an alias of an alias is one too. By name alone, which can
+    only over-read: a name some module aliases to a store is read as one everywhere.
+    """
+    values = [one for tree in trees for one in _alias_values(tree)]
+    names: frozenset[str] = STORES
+    while True:
+        grown = names | {name for name, value in values if any(_stores_named(value, names))}
+        if grown == names:
+            return names
+        names = grown
+
+
+def _names_here(tree: ast.Module, aliases: frozenset[str]) -> frozenset[str]:
+    """The names a store is held by in one module: its own, every alias of one, and every
+    name one is imported under (``from … import MemoryStore as Store``)."""
+    imported = {
+        one.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for one in node.names
+        if one.asname is not None and one.name in aliases
+    }
+    return aliases | imported
 
 
 def _annotations(node: ast.AST) -> Iterator[ast.expr]:
@@ -230,15 +283,29 @@ def _holder(top: ast.stmt) -> str | None:
     return None
 
 
+def _parsed(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
 def unbound_holders(root: Path = _ROOT) -> dict[str, frozenset[str]]:
     """Every holder under ``root`` that takes or holds a store unbound, with the stores.
 
     Keyed ``<module path>:<top-level name>``, the module path relative to ``root``.
     """
     found: dict[str, frozenset[str]] = {}
-    for path in sorted(root.rglob("*.py")):
-        module = path.relative_to(root).as_posix()
-        for top in ast.parse(path.read_text(encoding="utf-8")).body:
+    modules = {
+        path.relative_to(root).as_posix(): ast.parse(path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob("*.py"))
+    }
+    # Aliases are read across the whole package, so one ``core`` or another subsystem
+    # defines and ``orchestration`` imports is a store's name here too.
+    package = Path(ai_assistant.__file__).parent
+    aliases = store_aliases(
+        (*modules.values(), *(_parsed(path) for path in sorted(package.rglob("*.py"))))
+    )
+    for module, tree in modules.items():
+        names = _names_here(tree, aliases)
+        for top in tree.body:
             name = _holder(top)
             if name is None:
                 continue
@@ -246,7 +313,7 @@ def unbound_holders(root: Path = _ROOT) -> dict[str, frozenset[str]]:
                 store
                 for node in ast.walk(top)
                 for annotation in _annotations(node)
-                for store in _stores_named(annotation)
+                for store in _stores_named(annotation, names)
             )
             if stores:
                 found[f"{module}:{name}"] = stores
@@ -292,8 +359,9 @@ def test_the_stages_this_lane_converted_hold_no_store() -> None:
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:
-    """The scan reads a union, a container, a quoted name, a field, a return and a nested
-    function, and reads ``Bound[...]`` and a ``type`` alias as nothing."""
+    """The scan reads a union, a container, a quoted name, a field, a return, a nested
+    function, a store imported under another name and an alias of one; it reads
+    ``Bound[...]``, and a ``type`` alias's own definition, as nothing."""
     source = """
 type Walk = Callable[[MemoryStore], None]
 class Field:
@@ -310,6 +378,11 @@ class Closes:
         def inner(writer: MemoryWriter) -> None: ...
         return inner
 handed: PersonModelStore
+from ai_assistant.core.protocols import MemoryStore as Store
+type Kept = StoryStore
+Plain = PlanStore
+class Renamed:
+    def __init__(self, memory: Store, stories: Kept, plans: list[Plain]) -> None: ...
 """
     (tmp_path / "held.py").write_text(source, encoding="utf-8")
     assert unbound_holders(tmp_path) == {
@@ -319,4 +392,6 @@ handed: PersonModelStore
         "held.py:gives": frozenset({"NotificationStore"}),
         "held.py:Closes": frozenset({"MemoryWriter"}),
         "held.py:handed": frozenset({"PersonModelStore"}),
+        "held.py:walks": frozenset({"Walk"}),
+        "held.py:Renamed": frozenset({"Store", "Kept", "Plain"}),
     }

@@ -123,7 +123,7 @@ from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import ModelContentFilterError, UnderstandingError
 from ai_assistant.core.prompts import PromptDeclaration
 
-# At runtime, as `Callable` is: `EpisodeWalk`'s value names it (#1706).
+# At runtime, as `Callable` is: `EpisodeWalk`'s value names them (#1706).
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
@@ -155,6 +155,7 @@ from ai_assistant.core.types import (
     parties_are_persons_own,
     relay_mark_counts,
 )
+from ai_assistant.orchestration.bound_stores import Bound
 from ai_assistant.orchestration.channel_kinds import (
     SentInput,
     account_of,
@@ -192,7 +193,7 @@ if TYPE_CHECKING:
         TranscriptMessage,
         UnclearPoint,
     )
-    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
+    from ai_assistant.orchestration.bound_stores import BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.matters import InProgressEntry
     from ai_assistant.orchestration.person_block import PersonBlock
@@ -420,7 +421,9 @@ type EpisodeSelector = Callable[[frozenset[str]], Awaitable[tuple[EpisodicMemory
 #: The same selector's method over a store it is handed rather than one it holds: what the
 #: windows stage runs, over the memory store bound to its pass's sight (ADR-0383 §7:7,
 #: §9:1). :meth:`RecentEpisodes.walk` is the initial one.
-type EpisodeWalk = Callable[[MemoryStore, frozenset[str]], Awaitable[tuple[EpisodicMemory, ...]]]
+type EpisodeWalk = Callable[
+    [Bound[MemoryStore], frozenset[str]], Awaitable[tuple[EpisodicMemory, ...]]
+]
 
 
 class RecentEpisodes:
