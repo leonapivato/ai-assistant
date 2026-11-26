@@ -32,6 +32,7 @@ from observer_support import (
     framing,
     limits,
     placing,
+    said,
     scouted,
 )
 from structured_support import structured
@@ -40,18 +41,27 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     EpisodicMemory,
     InputSender,
+    LabelKind,
     Memory,
     MemoryOperationKind,
     ObservationAttempt,
     ObservationAttemptEnd,
     ObservationRecord,
     ObservationState,
+    PlanningLabel,
     RecordHome,
     Sight,
     SightMode,
     SightReader,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
+    StoryNoteAuthor,
+    StorySummaryDraft,
+    StorySummaryLine,
     SupportHolder,
     Sureness,
+    WorkFor,
 )
 from ai_assistant.orchestration.observer import Observer, RunOutcome
 from ai_assistant.orchestration.observer.prompts import (
@@ -374,3 +384,142 @@ def test_an_observer_with_no_holder_and_no_story_store_is_refused() -> None:
             placement_prompt=default_prompt(OBSERVER_PLACEMENT_PROMPT),
             now=harness.clock,
         )
+
+
+# --- the record the episode was queued with (ADR-0329 §16:2, §16:6) ---------------------
+
+
+async def test_an_episode_processed_after_it_was_queued_is_not_opened_again() -> None:
+    """§16:6's conditional write, kept: the run reads the record through the bound plan
+    store and finds one another writer wrote after the queue was read, so it makes no
+    attempt, writes nothing and stops, and the processed episode stays processed."""
+    harness = Harness()
+    await _seeded(harness)
+    scout, commit = _routes()
+    observer = harness.observer(scout=scout, commit=commit)
+    queued = observer.due
+    done = ObservationRecord(
+        episode=_SUBJECT,
+        home=RecordHome.owners(),
+        state=ObservationState.PROCESSED,
+        attempts=(ObservationAttempt(started_at=AT, end=ObservationAttemptEnd.FINISHED),),
+    )
+
+    async def processed_meanwhile(window: Sequence[EpisodicMemory]) -> list[Due]:
+        queue = await queued(window)
+        await harness.plans.write_observation(done, expected_revision=0)
+        return queue
+
+    observer.due = processed_meanwhile  # type: ignore[method-assign]  # another writer, between
+    with structlog.testing.capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome == RunOutcome()
+    assert (scout.calls, commit.calls) == ([], [])
+    (record,) = await harness.plans.observations([_SUBJECT])
+    assert record.state is ObservationState.PROCESSED
+    assert len(record.attempts) == 1
+    assert {"event": "observer_run", "stage": "record", "result": "not_written"} in [
+        {key: one[key] for key in ("event", "stage", "result") if key in one} for one in logs
+    ]
+
+
+# --- the stories an episode's reading follows (ADR-0383 §7:7, ADR-0346 §2:1) --------------
+
+
+async def _story(harness: Harness, home: RecordHome, summary: str, note: str) -> tuple[str, str]:
+    """A story of ``home`` with a summary and a note planning wrote; their ids."""
+    created = await harness.stories.create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=f"story-{summary[:5]}")],
+        home=home,
+        actor=StoryActor.OWNER,
+    )
+    story_id = created.story_id
+    assert story_id is not None
+    state = await harness.stories.current_summary(story_id)
+    assert state is not None
+    await harness.stories.write_summary(
+        story_id,
+        StorySummaryDraft(lines=(StorySummaryLine(text=summary),), outside=False),
+        as_of=state.as_of,
+    )
+    written = await harness.stories.append_note(
+        story_id, note, author=StoryNoteAuthor.PLANNING, written_during="writer", outside=False
+    )
+    assert written.note is not None
+    return story_id, str(written.note.note_id)
+
+
+async def _no_ones_episode_naming_two_stories(harness: Harness) -> None:
+    """A work for no one, landed in the shared things (ADR-0383 §4:1), whose planning was
+    shown a story and a note of the owner's and a story and a note of the shared things."""
+    owners, owners_note = await _story(
+        harness, RecordHome.owners(), "A trip to Lisbon.", "Flights moved to June."
+    )
+    shared, shared_note = await _story(
+        harness, RecordHome.shared(), "The boiler is serviced in May.", "Call the plumber."
+    )
+    position = await harness.stories.position()
+    held = episode(
+        "one",
+        at=AT - timedelta(minutes=3),
+        text=_PREFERENCE,
+        rounds=(said("r1", "Noted."),),
+        labels=(
+            PlanningLabel(label="S1", kind=LabelKind.STORY, id=owners),
+            PlanningLabel(label="S2", kind=LabelKind.STORY, id=shared),
+            PlanningLabel(label="N1", kind=LabelKind.NOTE, id=owners_note),
+            PlanningLabel(label="N2", kind=LabelKind.NOTE, id=shared_note),
+        ),
+        stories_position=position,
+    )
+    processing = held.processing_record
+    assert processing is not None
+    assert processing.facts is not None
+    for_no_one = processing.facts.model_copy(update={"for_whom": WorkFor.no_one()})
+    await harness.hold(
+        held.model_copy(
+            update={
+                "home": RecordHome.shared(),
+                "processing_record": processing.model_copy(update={"facts": for_no_one}),
+            }
+        ),
+        episode("two", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("three", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+
+
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_stories_and_notes_an_episode_names_are_read_through_its_sight(
+    mode: SightMode,
+) -> None:
+    """§6:7, §7:7: a work for no one's episode, whose input records no sender, is read by
+    the bound for no one alone, which sees the shared things alone. Withholding, the scout
+    is shown the shared story's summary and note and nothing of the owner's; counting, it
+    is shown both, and the story store's reads are each counted as the producer's, the
+    owner's story and note among what it would have withheld."""
+    harness = Harness(sight_mode=mode)
+    await _no_ones_episode_naming_two_stories(harness)
+    scout = FakeModelProvider.scripted(scouted(found(_CLAIM, "P1")))
+    observer = harness.observer(
+        scout=scout, commit=FakeModelProvider.scripted(framing(framed(_CLAIM, "P1")))
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (request,) = _shown(scout)
+    shown = repr(request)
+    for shared in ("The boiler is serviced in May.", "Call the plumber."):
+        assert shared in shown
+    for owners in ("A trip to Lisbon.", "Flights moved to June."):
+        assert (owners in shown) is (mode is SightMode.COUNT)
+    stories = [one for one in _counted(logs) if one["store"] == "stories"]
+    if mode is SightMode.WITHHOLD:
+        assert stories == [], "a withholding store counts nothing"
+        return
+    assert stories
+    assert {one["reader"] for one in stories} == {"producer"}
+    assert {tuple(one["bounds"]) for one in stories} == {("no_one",)}
+    assert sum(one["other_home"] for one in stories) > 0, "the owner's story, withheld"
