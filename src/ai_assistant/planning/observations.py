@@ -103,6 +103,29 @@ def decide_observation_write(episode: str, *, held: int | None, expected: int) -
     raise PlanningError(msg)
 
 
+def decide_observation_home(held: ObservationRecord | None, record: ObservationRecord) -> None:
+    """Refuse a write that would change a held record's home (ADR-0383 §4:6).
+
+    A record written again keeps the home it had: no write changes a record's home. Run
+    inside the store's indivisible step, after the expectation is met and before a
+    revision is issued, so a refused write writes nothing and spends no revision.
+
+    Args:
+        held: The record the store holds for the episode, or ``None`` where it holds none.
+        record: The record to write.
+
+    Raises:
+        PlanningError: If a record is held and ``record`` names another home.
+    """
+    if held is None or held.home == record.home:
+        return
+    msg = (
+        f"the observation record of {record.episode!r} lands in a {held.home.kind} home, "
+        f"and no write changes a record's home (ADR-0383 §4:6); nothing is written"
+    )
+    raise PlanningError(msg)
+
+
 def stamped(record: ObservationRecord, revision: int) -> ObservationRecord:
     """Return ``record`` carrying the revision the store issued for this write.
 
@@ -169,6 +192,7 @@ __all__ = [
     "checked_expected_revision",
     "checked_observation",
     "checked_since",
+    "decide_observation_home",
     "decide_observation_write",
     "requested_episodes",
     "stamped",

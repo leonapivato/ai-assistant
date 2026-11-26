@@ -78,6 +78,7 @@ from ai_assistant.planning.observations import (
     checked_expected_revision,
     checked_observation,
     checked_since,
+    decide_observation_home,
     decide_observation_write,
     requested_episodes,
     stamped,
@@ -306,6 +307,7 @@ class InMemoryPlanStore:
         decide_observation_write(
             written.episode, held=None if held is None else held.revision, expected=expected
         )
+        decide_observation_home(held, written)
         stored = stamped(written, self._issued + 1)
         self._issued = stored.revision
         self._observations[stored.episode] = stored
