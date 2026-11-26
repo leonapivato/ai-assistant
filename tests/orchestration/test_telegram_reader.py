@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import IdentityStore, PlanStore
+    from ai_assistant.core.types import Sight
 
 
 class _Hold(HeldInput):
@@ -168,6 +169,12 @@ class _Line:
         start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT,
         plans: FakePlanStore | None = None,
         identities: IdentityStore | None | Literal["owners"] = "owners",
+        written_bound: Callable[
+            [str, Sequence[str], Sequence[int] | None, PlanStore],
+            Awaitable[Mapping[int, WrittenBy]],
+        ]
+        | None = None,
+        sight: Sight | None = None,
     ) -> None:
         self.fake = client or FakeTelegramBotClient(chat_id=CHAT, first_message_id=900)
         self.intake = intake or FakeTelegramIntakeRecord()
@@ -202,6 +209,9 @@ class _Line:
             start_wait=start_wait,
             cards=self.cards,
         )
+        # ADR-0383 §7:9: the sight each input's window is read by, the owner's work's
+        # unless a case names another.
+        self.sight = sight if sight is not None else sight_of(at=AT)
         self.rests: list[float] = []
         self.inputs: list[TelegramInput] = []
         # Each input's window, read as the engine's activation reads it once admitted.
@@ -241,7 +251,9 @@ class _Line:
                 stories=FakeStoryStore(now=lambda: AT),
                 plans=plans if plans is not None else FakePlanStore(now=lambda: AT),
             ),
-            written=None if written is None else _bound_away(written),
+            written=written_bound
+            if written_bound is not None
+            else (None if written is None else _bound_away(written)),
             hold=lambda place: _Hold(place, self.told),
             sleep=self._rest,
         )
@@ -265,7 +277,7 @@ class _Line:
         await self.reader.take_in(taken, into=marked)
         # As the engine's activation does once its input is marked: the window, by the
         # work's sight (ADR-0383 §7:9).
-        window = (await self.reader.windowed(taken, sight=sight_of(at=AT))).window
+        window = (await self.reader.windowed(taken, sight=self.sight)).window
         assert window is not None
         self.windows.append(window)
         self.marked.append(tuple(marked))
