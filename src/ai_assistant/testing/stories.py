@@ -425,6 +425,19 @@ class FakeStoryStore:
         view._sight = sight if self._sight is None else self._sight.meet(sight)
         return view
 
+    def set_story_home(self, story_id: Identifier, home: RecordHome) -> None:
+        """Give a stored story another home, writing nothing else: **test-only**.
+
+        It stands in for a file written before the store refused a name across homes
+        (ADR-0383 §4:7), such as a flag whose stories span two homes, which no write of
+        the Protocol can make, since no write changes a story's home (§4:6). No
+        production code calls it; it is no member of the Protocol.
+
+        Raises:
+            KeyError: If the fake stores no story ``story_id``.
+        """
+        self._state.stories[story_id].home = home
+
     def _withholds(self) -> bool:
         return self._sight is not None and self._sight_mode is SightMode.WITHHOLD
 

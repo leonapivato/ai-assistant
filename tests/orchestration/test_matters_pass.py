@@ -1322,14 +1322,20 @@ async def test_a_flag_whose_stories_are_of_two_domains_is_decided_by_no_run(
     """§5:3: no completion for it and nothing written for it, by either domain's run.
 
     No ``decided`` or ``not_applied`` line and no flag left, on either story: a record
-    already in error is met, and the pass does not compound it.
+    already in error is met, and the pass does not compound it. The store refuses to
+    record such a flag (ADR-0383 §4:7), so it is one only a file written before that
+    refusal could hold: raised while the two stories share a home, then each given its
+    own through the fake's test-only door.
     """
     stories = _stories()
     memory = await memory_of(episode("a-1"), _of(_SHARED, episode("s-1")))
     mine = await _story_in(stories, _OWNERS, "a-1")
     ours = await _story_in(stories, _SHARED, "s-1")
     raiser, named = (mine, ours) if raised_by == "owners" else (ours, mine)
+    raiser_home, named_home = (_OWNERS, _SHARED) if raised_by == "owners" else (_SHARED, _OWNERS)
+    stories.set_story_home(named, raiser_home)
     await _raise(stories, raiser, StoryFlag(kind=StoryFlagKind.LIKE_ANOTHER, story=named))
+    stories.set_story_home(named, named_home)
     model = FakeModelProvider(
         json.dumps({"decision": "group", "stories": ["S1", "S2"], "under": None})
     )
