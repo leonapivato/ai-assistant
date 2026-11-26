@@ -400,6 +400,7 @@ async def _acting_stage(now: Clock) -> None:
         timeout=timedelta(seconds=5),
         now=now,
     ).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=AuthorizedRound(
             activation_id="act-1",

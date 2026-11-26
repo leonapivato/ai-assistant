@@ -26,8 +26,10 @@ from ai_assistant.core.types import (
     ActivationEffectClaim,
     Identifier,
     QuestionPart,
+    RecordHome,
     ToolOutcome,
     encodable_text,
+    home_may_be_written,
 )
 
 if TYPE_CHECKING:
@@ -55,13 +57,38 @@ def checked_effect_id(effect_id: object) -> str:
         raise PlanningError(msg) from exc
 
 
+def refuse_unwritable_home(home: RecordHome, *, record: str) -> None:
+    """Refuse a record whose home no write may carry (ADR-0383 §4:7, ADR-0386 §6).
+
+    Every member that writes an effect or an observation record calls it before any
+    other check of the store's step and before any I/O, so the refusal writes nothing,
+    as ADR-0306 §6:2 refuses a claim. Which homes a write may carry is
+    :func:`~ai_assistant.core.types.home_may_be_written`'s alone (ADR-0383 §2:3). The
+    message names the record and the home's kind, and never its identifier.
+
+    Args:
+        home: The home the record carries, already validated with it.
+        record: What the record is, for the message.
+
+    Raises:
+        PlanningError: If ``home`` is one no write may carry.
+    """
+    if not home_may_be_written(home):
+        msg = (
+            f"{record} lands in a {home.kind} home no write may carry (ADR-0383 §2:3); "
+            f"nothing is written"
+        )
+        raise PlanningError(msg)
+
+
 def revalidated_claim(effect: object) -> ActivationEffect:
     """Return the store's own copy of a record about to be claimed, or refuse it.
 
     Rebuilt through validation, so a caller that mutates its record after the call
     cannot change what the store holds, and a record corrupted past its frozen guard
     is refused here rather than written. A claimed record carries no outcome, no
-    reason and no position (ADR-0306 §5:4).
+    reason and no position (ADR-0306 §5:4), and a home a write may carry (ADR-0386
+    §6). Every member that writes an effect record takes it through here first.
 
     Args:
         effect: What the caller passed.
@@ -70,8 +97,8 @@ def revalidated_claim(effect: object) -> ActivationEffect:
         The validated, detached record.
 
     Raises:
-        PlanningError: If the value is not a valid ``ActivationEffect``, or it
-            carries an outcome, a reason or a position.
+        PlanningError: If the value is not a valid ``ActivationEffect``, it carries an
+            outcome, a reason or a position, or its home is one no write may carry.
     """
     if not isinstance(effect, ActivationEffect):
         msg = f"a claim writes an ActivationEffect, and {type(effect).__name__} is not one"
@@ -87,6 +114,7 @@ def revalidated_claim(effect: object) -> ActivationEffect:
             f"outcome, reason or position (ADR-0306 §5:4)"
         )
         raise PlanningError(msg)
+    refuse_unwritable_home(record.home, record=f"activation effect {record.id}")
     return record
 
 

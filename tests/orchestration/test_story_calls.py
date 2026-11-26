@@ -430,12 +430,14 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
         AuthorizedRound(
             _ACTIVATION, "round:1", (AuthorizedCall(_call(START_STORY, notes, decision="d1")),)
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
     second = await acting.act(
         AuthorizedRound(
             _ACTIVATION, "round:2", (AuthorizedCall(_call(START_STORY, notes, decision="d2")),)
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
 
@@ -456,6 +458,7 @@ async def test_a_start_repeated_identically_is_refused_as_already_done() -> None
                 ),
             ),
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
     assert [one.outcome for one in third.calls] == [ActedOutcome.DONE]
@@ -526,6 +529,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
                 "round:1",
                 (AuthorizedCall(_call(START_STORY, arguments, decision="d1")),),
             ),
+            home=RecordHome.owners(),
             held=HeldResults(),
         )
     (claimed,) = await plans.activation_effects([_ACTIVATION])
@@ -534,6 +538,7 @@ async def test_a_start_that_made_its_story_is_never_reported_not_done(
         AuthorizedRound(
             _ACTIVATION, "round:2", (AuthorizedCall(_call(START_STORY, arguments, decision="d2")),)
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
 
@@ -563,7 +568,9 @@ async def test_a_note_is_planning_s_written_during_this_activation_and_marked_by
     )
 
     acted = await acting.act(
-        AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(call),)), held=HeldResults()
+        AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(call),)),
+        home=RecordHome.owners(),
+        held=HeldResults(),
     )
 
     assert [one.outcome for one in acted.calls] == [ActedOutcome.DONE]
@@ -975,6 +982,7 @@ async def test_each_reorganising_call_runs_through_the_own_records_seam(
 
     acted = await acting.act(
         AuthorizedRound(_ACTIVATION, "round:1", (AuthorizedCall(_call(tool, arguments)),)),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
 
@@ -1254,12 +1262,14 @@ async def test_a_group_repeated_identically_is_refused_as_already_done() -> None
         AuthorizedRound(
             _ACTIVATION, "round:1", (AuthorizedCall(_call(GROUP_STORY, arguments, decision="d1")),)
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
     second = await acting.act(
         AuthorizedRound(
             _ACTIVATION, "round:2", (AuthorizedCall(_call(GROUP_STORY, arguments, decision="d2")),)
         ),
+        home=RecordHome.owners(),
         held=HeldResults(),
     )
 

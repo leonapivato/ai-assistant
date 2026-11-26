@@ -14,6 +14,7 @@ from test_acting import _approved, _Approving, _authorized, _now, _over, _round
 from ai_assistant.core.types import (
     ActionRequest,
     PermissionDecision,
+    RecordHome,
     ToolCall,
     ToolOutcome,
 )
@@ -32,7 +33,9 @@ async def test_a_call_its_runner_refuses_is_not_done_with_the_runners_reason() -
     plans = FakePlanStore(now=_now)
 
     acted = await _over(plans, _Approving(NotDone(reason=_REASON))).act(
-        held=HeldResults(), authorized=_round(_authorized("remember", effect="e1"))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_authorized("remember", effect="e1")),
     )
 
     (one,) = acted.calls
@@ -67,7 +70,9 @@ async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() ->
     stage.add_own_records({"pin_memory": added})
     remember = _approved("remember", decision="d2", effect="e2", part=2)
 
-    acted = await stage.act(held=HeldResults(), authorized=_round(_pin(), remember))
+    acted = await stage.act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_pin(), remember)
+    )
 
     pinned, remembered = acted.calls
     assert (pinned.outcome, pinned.reason) == (ActedOutcome.NOT_DONE, _REASON)

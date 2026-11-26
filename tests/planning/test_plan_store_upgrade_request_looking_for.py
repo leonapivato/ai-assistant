@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalWriteAnswer,
+    RecordHome,
     RequestedCall,
     TicketState,
 )
@@ -126,7 +127,7 @@ async def test_every_request_reads_back_as_the_previous_release_wrote_it(legacy:
     assert requests["q-before-pin"].call.wording == "Robin is vegetarian."
     assert by_token == requests["q-before-pin"]
     assert [one.id for one in pushed] == ["q-before-search"]
-    assert export.schema_version == 31
+    assert export.schema_version == 32
 
 
 async def test_each_stored_request_serialises_to_the_bytes_the_file_holds(legacy: Path) -> None:
@@ -138,7 +139,7 @@ async def test_each_stored_request_serialises_to_the_bytes_the_file_holds(legacy
         store.close()
 
     assert [one.model_dump_json() for one in read] == _stored_requests(legacy)
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 async def test_the_stored_email_runs_as_the_send_email_it_translates_to(legacy: Path) -> None:
@@ -163,6 +164,7 @@ async def test_the_stored_email_runs_as_the_send_email_it_translates_to(legacy: 
 
 def _asking(request: ApprovalRequest) -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=f"ask-{request.id}",
         activation_id=request.activation_id,
         round=request.round,
@@ -211,5 +213,5 @@ async def test_the_opened_file_holds_a_kept_looking_for_across_a_reopen(legacy: 
 
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-search"]
     assert export.approval_requests[-1].call.looking_for == "When does it open on Sunday?"
-    assert export.schema_version == 31
-    assert _label(legacy) == "21"
+    assert export.schema_version == 32
+    assert _label(legacy) == "22"

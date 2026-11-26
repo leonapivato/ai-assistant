@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from record_homes import decoded_tables, homeless_tables
 from request_tappers import decoded, untapped
 
 from ai_assistant.core.types import (
@@ -43,6 +44,7 @@ from ai_assistant.core.types import (
     ApprovalRequest,
     ApprovalRequestState,
     ApprovalWriteAnswer,
+    RecordHome,
     RequestedCall,
     TicketState,
 )
@@ -140,6 +142,7 @@ def _worded_pin(held: ApprovalRequest) -> ApprovalRequest:
 
 def _asking(request: ApprovalRequest) -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=f"ask-{request.id}",
         activation_id=request.activation_id,
         round=request.round,
@@ -169,8 +172,9 @@ async def test_the_head_opens_it_moving_its_label_and_its_answers_tappers_alone(
 ) -> None:
     """ADR-0326 §4's note: the wording's upgrade is empty, and no other row moves.
 
-    The label moves past 19 and 20 (ADR-0368 §6:3, ADR-0377 §4:3), and each answer gains
-    the request's person at no recorded level, and nothing else.
+    The label moves past 19, 20 and 21 (ADR-0368 §6:3, ADR-0377 §4:3, ADR-0383 §5:1), each
+    answer gains the request's person at no recorded level, each effect record the owner's
+    domain as its home, and nothing else.
     """
     before = _dump(legacy)
 
@@ -180,12 +184,11 @@ async def test_the_head_opens_it_moving_its_label_and_its_answers_tappers_alone(
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
     after = _dump(legacy)
-    assert {**after, "meta": before["meta"], "approval_requests": []} == {
-        **before,
-        "approval_requests": [],
-    }
+    assert homeless_tables({**after, "meta": before["meta"], "approval_requests": []}) == (
+        decoded_tables({**before, "approval_requests": []})
+    )
     assert untapped(after["approval_requests"]) == decoded(before["approval_requests"])
 
 
@@ -263,5 +266,5 @@ async def test_the_opened_file_holds_a_worded_request_across_a_reopen(legacy: Pa
     assert [one.id for one in export.approval_requests] == [*_REQUESTS, "q-after-pin"]
     assert export.approval_requests[-1] == request
     assert export.approval_requests[-1].call.wording == "Robin takes green tea."
-    assert export.schema_version == 31
-    assert _label(legacy) == "21"
+    assert export.schema_version == 32
+    assert _label(legacy) == "22"

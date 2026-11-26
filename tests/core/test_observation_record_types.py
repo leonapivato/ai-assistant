@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionPart,
+    RecordHome,
     RememberCallPart,
     RoundMessagePart,
 )
@@ -70,6 +71,17 @@ def _attempt(*calls: datetime, end: ObservationAttemptEnd | None = None) -> Obse
 
 
 # --- a finding ---------------------------------------------------------------------
+
+
+def test_an_observation_record_carries_its_home_as_a_required_field() -> None:
+    """ADR-0383 §5:4, ADR-0386 §5:2: no record can leave its home out, and it dumps with it."""
+    with pytest.raises(ValidationError, match="home"):
+        ObservationRecord(episode="activation:a", state=ObservationState.SKIPPED)  # type: ignore[call-arg]  # the missing home is the point
+    record = ObservationRecord(
+        episode="activation:a", home=RecordHome.shared(), state=ObservationState.SKIPPED
+    )
+    assert record.model_dump(mode="json")["home"] == {"kind": "shared", "id": None}
+    assert ObservationRecord.model_validate_json(record.model_dump_json()) == record
 
 
 @pytest.mark.parametrize(
@@ -188,6 +200,7 @@ def test_a_partial_track_record_entry_belongs_to_a_reliance_finding_on_its_memor
 def test_a_stuck_episode_keeps_what_its_failed_commits_wrote() -> None:
     """Set aside, a pending finding's partial writes stay on the record (§16:5)."""
     record = ObservationRecord(
+        home=RecordHome.owners(),
         episode=_EPISODE,
         state=ObservationState.STUCK,
         attempts=(_attempt(_AT, end=ObservationAttemptEnd.FAILED),),
@@ -286,6 +299,7 @@ def test_a_finding_comes_from_the_episode_whose_record_holds_it() -> None:
     """§8:3: each finding names the one episode it comes from, and is recorded there."""
     with pytest.raises(ValidationError, match="comes from the episode"):
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.WAITING,
             findings=(_finding(episode="activation:other"),),
@@ -296,7 +310,10 @@ def test_a_record_names_each_finding_once() -> None:
     """§16:4: a retry finds a finding by its id, so the id is unique on the record."""
     with pytest.raises(ValidationError, match="each finding once"):
         ObservationRecord(
-            episode=_EPISODE, state=ObservationState.WAITING, findings=(_finding(), _finding())
+            home=RecordHome.owners(),
+            episode=_EPISODE,
+            state=ObservationState.WAITING,
+            findings=(_finding(), _finding()),
         )
 
 
@@ -305,16 +322,23 @@ def test_a_processed_episodes_findings_each_have_an_outcome() -> None:
     done = _finding(outcome=_written())
 
     assert ObservationRecord(
-        episode=_EPISODE, state=ObservationState.PROCESSED, findings=(done,)
+        home=RecordHome.owners(),
+        episode=_EPISODE,
+        state=ObservationState.PROCESSED,
+        findings=(done,),
     ).findings == (done,)
     with pytest.raises(ValidationError, match="each have an outcome"):
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.PROCESSED,
             findings=(done, _finding(id="f2")),
         )
     waiting = ObservationRecord(
-        episode=_EPISODE, state=ObservationState.WAITING, findings=(done, _finding(id="f2"))
+        home=RecordHome.owners(),
+        episode=_EPISODE,
+        state=ObservationState.WAITING,
+        findings=(done, _finding(id="f2")),
     )
     assert [one.outcome is None for one in waiting.findings] == [False, True]
 
@@ -323,6 +347,7 @@ def test_a_skipped_episode_has_no_finding_and_no_model_call() -> None:
     """§16:7: skipped by rule, with no model call."""
     assert (
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.SKIPPED,
             attempts=(_attempt(end=ObservationAttemptEnd.FINISHED),),
@@ -331,12 +356,18 @@ def test_a_skipped_episode_has_no_finding_and_no_model_call() -> None:
     )
     with pytest.raises(ValidationError, match="no model call"):
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.SKIPPED,
             attempts=(_attempt(_AT, end=ObservationAttemptEnd.FINISHED),),
         )
     with pytest.raises(ValidationError, match="no finding"):
-        ObservationRecord(episode=_EPISODE, state=ObservationState.SKIPPED, findings=(_finding(),))
+        ObservationRecord(
+            home=RecordHome.owners(),
+            episode=_EPISODE,
+            state=ObservationState.SKIPPED,
+            findings=(_finding(),),
+        )
 
 
 def test_only_the_last_attempt_may_run_and_only_while_the_episode_waits() -> None:
@@ -345,24 +376,34 @@ def test_only_the_last_attempt_may_run_and_only_while_the_episode_waits() -> Non
 
     assert (
         ObservationRecord(
-            episode=_EPISODE, state=ObservationState.WAITING, attempts=open_last
+            home=RecordHome.owners(),
+            episode=_EPISODE,
+            state=ObservationState.WAITING,
+            attempts=open_last,
         ).attempts
         == open_last
     )
     with pytest.raises(ValidationError, match="last attempt"):
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.WAITING,
             attempts=(_attempt(_AT), _attempt(_AT, end=ObservationAttemptEnd.FAILED)),
         )
     with pytest.raises(ValidationError, match="leaves its episode waiting"):
-        ObservationRecord(episode=_EPISODE, state=ObservationState.STUCK, attempts=open_last)
+        ObservationRecord(
+            home=RecordHome.owners(),
+            episode=_EPISODE,
+            state=ObservationState.STUCK,
+            attempts=open_last,
+        )
 
 
 def test_attempts_are_in_the_order_they_started() -> None:
     later = _AT + timedelta(minutes=1)
     with pytest.raises(ValidationError, match="order they started"):
         ObservationRecord(
+            home=RecordHome.owners(),
             episode=_EPISODE,
             state=ObservationState.WAITING,
             attempts=(
@@ -378,26 +419,36 @@ def test_attempts_are_in_the_order_they_started() -> None:
 def test_only_a_waiting_episode_has_a_next_attempt(state: ObservationState) -> None:
     """§16:4: the backoff is a waiting episode's."""
     with pytest.raises(ValidationError, match="next attempt"):
-        ObservationRecord(episode=_EPISODE, state=state, next_attempt_at=_AT)
+        ObservationRecord(
+            home=RecordHome.owners(), episode=_EPISODE, state=state, next_attempt_at=_AT
+        )
 
 
 def test_the_queue_takes_a_waiting_episode_once_its_backoff_has_passed() -> None:
     """§16:2: due, not settled, and may be attempted now."""
     backing_off = ObservationRecord(
-        episode=_EPISODE, state=ObservationState.WAITING, next_attempt_at=_AT
+        home=RecordHome.owners(),
+        episode=_EPISODE,
+        state=ObservationState.WAITING,
+        next_attempt_at=_AT,
     )
 
     assert not backing_off.attemptable(_AT - timedelta(seconds=1))
     assert backing_off.attemptable(_AT)
-    assert ObservationRecord(episode=_EPISODE, state=ObservationState.WAITING).attemptable(_AT)
+    assert ObservationRecord(
+        home=RecordHome.owners(), episode=_EPISODE, state=ObservationState.WAITING
+    ).attemptable(_AT)
     for state in (ObservationState.PROCESSED, ObservationState.SKIPPED, ObservationState.STUCK):
-        assert not ObservationRecord(episode=_EPISODE, state=state).attemptable(_AT)
+        assert not ObservationRecord(
+            home=RecordHome.owners(), episode=_EPISODE, state=state
+        ).attemptable(_AT)
 
 
 def test_the_budget_counts_every_attempts_calls_from_an_instant() -> None:
     """§16:9: the calls each attempt made, at or after the instant asked about."""
     later = _AT + timedelta(hours=1)
     record = ObservationRecord(
+        home=RecordHome.owners(),
         episode=_EPISODE,
         state=ObservationState.STUCK,
         attempts=(
@@ -411,12 +462,18 @@ def test_the_budget_counts_every_attempts_calls_from_an_instant() -> None:
     assert record.call_count(later) == 1
     assert record.call_count(later + timedelta(microseconds=1)) == 0
     assert record.last_call_at == later
-    assert ObservationRecord(episode=_EPISODE, state=ObservationState.WAITING).last_call_at is None
+    assert (
+        ObservationRecord(
+            home=RecordHome.owners(), episode=_EPISODE, state=ObservationState.WAITING
+        ).last_call_at
+        is None
+    )
 
 
 def test_a_record_round_trips_through_json() -> None:
     """A store keeps the record as its JSON dump, so the dump must read back equal."""
     record = ObservationRecord(
+        home=RecordHome.owners(),
         episode=_EPISODE,
         state=ObservationState.PROCESSED,
         attempts=(_attempt(_AT, end=ObservationAttemptEnd.FINISHED),),
@@ -431,6 +488,7 @@ def test_a_record_round_trips_through_json() -> None:
         revision=7,
     )
     waiting = ObservationRecord(
+        home=RecordHome.owners(),
         episode=_EPISODE,
         state=ObservationState.WAITING,
         attempts=(_attempt(_AT, end=ObservationAttemptEnd.FAILED),),
@@ -447,4 +505,6 @@ def test_a_record_round_trips_through_json() -> None:
 
 def test_a_revision_is_never_negative() -> None:
     with pytest.raises(ValidationError):
-        ObservationRecord(episode=_EPISODE, state=ObservationState.WAITING, revision=-1)
+        ObservationRecord(
+            home=RecordHome.owners(), episode=_EPISODE, state=ObservationState.WAITING, revision=-1
+        )

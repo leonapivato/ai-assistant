@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from record_homes import decoded_tables, homeless_tables
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
@@ -30,6 +31,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     DueNow,
     QuestionPart,
+    RecordHome,
     ScheduledTaskAuthor,
     Sureness,
     TaskSpawn,
@@ -109,8 +111,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
-    assert export.schema_version == 31
+    assert _label(legacy) == "22"
+    assert export.schema_version == 32
     assert export.stopped_activations == ("act-before-stopped",)
     effects = {one.id: one for one in export.activation_effects}
     assert list(effects) == ["effect-before-call", "effect-before-message", "effect-before-part"]
@@ -120,13 +122,14 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert export.observations == observations
     assert [one.episode for one in observations] == ["activation:act-before-1"]
     assert export.scheduled_tasks == ()
-    # The steps move the label and add the one empty table, and rewrite no row.
+    # The steps move the label and add the one empty table, and rewrite no row but to
+    # write each effect's and observation's home (ADR-0383 §5:1).
     after = _dump(legacy)
     assert set(after) == {*_TABLES_BEFORE, "scheduled_tasks", "approval_requests"}
     assert after["scheduled_tasks"] == []
-    assert {table: after[table] for table in before if table != "meta"} == {
-        table: rows for table, rows in before.items() if table != "meta"
-    }
+    assert homeless_tables({table: after[table] for table in before if table != "meta"}) == (
+        decoded_tables({table: rows for table, rows in before.items() if table != "meta"})
+    )
 
 
 async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carried(
@@ -146,6 +149,7 @@ async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carrie
         set_at=_NOW,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="spawn-after",
         activation_id="act-after",
         round="r1",
@@ -178,7 +182,7 @@ async def test_the_upgraded_file_holds_a_scheduled_task_and_keeps_what_it_carrie
         assert [one.id for one in spent] == ["effect-before-part"]
     finally:
         reopened.close()
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

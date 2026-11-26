@@ -1268,6 +1268,7 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
         await store.record_stop("act-upgrade-stopped")
         await store.claim_activation_effect(
             ActivationEffect(
+                home=RecordHome.owners(),
                 id="effect-upgrade-1",
                 activation_id="act-upgrade-1",
                 round="r1",
@@ -1281,6 +1282,7 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
         await store.finish_activation_effect("effect-upgrade-1", ToolOutcome.SUCCEEDED)
         await store.claim_activation_effect(
             ActivationEffect(
+                home=RecordHome.owners(),
                 id="effect-upgrade-2",
                 activation_id="act-upgrade-1",
                 round="r1",
@@ -1292,6 +1294,7 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
         # ADR-0329 §16: an episode the observer attempted, which waits for a retry.
         await store.write_observation(
             ObservationRecord(
+                home=RecordHome.owners(),
                 episode="activation:act-upgrade-1",
                 state=ObservationState.WAITING,
                 attempts=(
@@ -1376,6 +1379,7 @@ async def _spawned(store: SqlitePlanStore, spawn: TaskSpawn, digest: str, moment
     written = await store.write_scheduled_task(
         spawn,
         ActivationEffect(
+            home=RecordHome.owners(),
             id=f"effect-{spawn.id}",
             activation_id=_SPAWNER,
             round="r1",
@@ -1514,6 +1518,7 @@ async def _write_approval_requests(store: SqlitePlanStore, moment: Moment) -> No
         written = await store.write_approval_request(
             request,
             ActivationEffect(
+                home=RecordHome.owners(),
                 id=f"effect-{request_id}",
                 activation_id="act-upgrade-asking",
                 round="r1",
@@ -1550,6 +1555,7 @@ async def _write_approval_requests(store: SqlitePlanStore, moment: Moment) -> No
         is ApprovalOutcomePush.PUSHED,
         await store.claim_ticket_call(
             ActivationEffect(
+                home=RecordHome.owners(),
                 id="effect-upgrade-ticket",
                 activation_id="act-upgrade-approval",
                 round="r1",
@@ -1739,6 +1745,29 @@ def _with_setter(task: Json) -> Json:
         "setting_level": (Sureness.NORMAL if persons else Sureness.NONE).value,
         "setting_connection": None,
     }
+
+
+def _plans_home_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0383 §5:1 reads back after it (ADR-0386 §5).
+
+    The upgrade from label 21 writes the owner's domain into every effect record and every
+    observation record, and into nothing else: no task, request or stop record gains a
+    home. Said here rather than left to the comparison letting the head read back more,
+    so the head is held to the owner's domain on each and to no other home.
+    """
+    home = to_json(RecordHome.owners())
+    carried = {
+        key: {**value, "home": home}
+        if key.startswith("effect/") and isinstance(value, dict)
+        else value
+        for key, value in records.items()
+    }
+    observations = carried.get("observations")
+    if isinstance(observations, list):
+        carried["observations"] = [
+            {**one, "home": home} if isinstance(one, dict) else one for one in observations
+        ]
+    return carried
 
 
 # --- conversations.db -----------------------------------------------------------------
@@ -2470,7 +2499,7 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=7,
+        shape=8,
         carries={
             1: _plans_observations_carry,
             2: _plans_finding_carry,
@@ -2478,6 +2507,7 @@ STORES: Final[tuple[Store, ...]] = (
             4: _plans_cascade_carry,
             5: _plans_setter_carry,
             6: _plans_tapper_carry,
+            7: _plans_home_carry,
         },
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),

@@ -70,6 +70,7 @@ from ai_assistant.core.types import (
     DueOnRule,
     EpisodicMemory,
     OccurrenceState,
+    RecordHome,
     RuleDay,
     ScheduledTaskAuthor,
     Sureness,
@@ -1269,11 +1270,14 @@ def _command_effect(command: str, at: datetime) -> ActivationEffect:
     """The effect record a Task Manager's replace is claimed under (§10:2).
 
     A call's effect names the round that proposed it (ADR-0307 §10); the command's is
-    its own, named for it.
+    its own, named for it. The command is the owner's own act and no work's (§10:5), so
+    the record takes the owner's domain (ADR-0383 §4:5), never one a model or the
+    replaced task names.
     """
     return ActivationEffect(
         id=f"effect:{uuid.uuid4().hex}",
         activation_id=command,
+        home=RecordHome.owners(),
         round=f"command:{command}",
         capability=SPAWN_CAPABILITY,
         values_digest="0" * 64,

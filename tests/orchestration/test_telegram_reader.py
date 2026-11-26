@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     RecordedCall,
     RecordedDelivery,
     RecordedInputMessage,
+    RecordHome,
     RequestedCall,
     SupportHolder,
     Sureness,
@@ -1412,6 +1413,7 @@ async def _card_on_the_line(line: _Line, plans: FakePlanStore) -> ApprovalReques
         expires_at=AT + timedelta(hours=24),
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask",
         activation_id="act-ask",
         round="round:1",
@@ -1649,6 +1651,7 @@ async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
             expires_at=AT + timedelta(hours=24),
         )
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=f"effect:{n}",
             activation_id="act-ask",
             round="round:1",
@@ -1728,6 +1731,7 @@ async def test_after_a_start_the_window_shows_each_card_by_its_entry() -> None:
             expires_at=AT + timedelta(hours=24),
         )
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=f"effect:{n}",
             activation_id="act-ask",
             round="round:1",

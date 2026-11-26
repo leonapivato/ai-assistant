@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     RecordedDelivery,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -120,6 +121,7 @@ def _call() -> ToolCall:
 
 def _effect() -> ActivationEffect:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask",
         activation_id="act-ask",
         round="round:ask",

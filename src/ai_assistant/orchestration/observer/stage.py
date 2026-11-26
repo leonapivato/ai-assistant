@@ -63,6 +63,12 @@ input carries no message, its rounds record no candidate, and its digests hold n
 evidence item. An episode with no processing record carries no recorded trigger from
 which a support's origin could be set (ADR-0328 §4:2), so it is skipped too.
 
+**Its record takes the home of the episode it observed** (ADR-0383 §4:2, ADR-0386 §5:2),
+read off the episode itself, never one made again from its facts; a record written again
+keeps the home it had (§4:6). An episode whose first read fails, with no record held,
+leaves no home at hand, so nothing is recorded of that attempt: the episode stays due
+and is read again by the next run, with no backoff and no count toward stuck.
+
 **It logs stage and code-owned reasons only** (§15:7): counts, states and the names of
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
 data.
@@ -187,6 +193,7 @@ if TYPE_CHECKING:
         Message,
         ObservationFinding,
         PersonModelWrite,
+        RecordHome,
     )
     from ai_assistant.orchestration.observer.framing import Framing
     from ai_assistant.orchestration.observer.person import PersonFields
@@ -537,8 +544,16 @@ class Observer:
         try:
             episode = await self._memory.get(episode_id)
         except MemoryStoreError as exc:
+            if held is None:
+                # ADR-0383 §4:2: the record takes the observed episode's home, never one
+                # made again, and with the episode unread and no record held there is
+                # none at hand. Nothing is written; the episode stays due for the next run.
+                _log.info(
+                    "observer_attempt", stage="attempt", result="unrecorded", reason=_reason(exc)
+                )
+                return None
             # A read that fails is the attempt's failure, recorded and backed off (§16:4).
-            return await self._failed(await self._open(episode_id, held, started), exc)
+            return await self._failed(await self._open(episode_id, held, started, held.home), exc)
         if not isinstance(episode, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
         if _nothing_to_read(episode) and (
@@ -547,6 +562,7 @@ class Observer:
             # §16:7, after any earlier attempt that failed before reading anything.
             skipped = ObservationRecord(
                 episode=episode_id,
+                home=episode.home if held is None else held.home,
                 state=ObservationState.SKIPPED,
                 attempts=(
                     *(() if held is None else _closed(held.attempts)),
@@ -561,7 +577,7 @@ class Observer:
                 skipped=True,
             )
             return ObservationState.SKIPPED
-        attempt = await self._open(episode_id, held, started)
+        attempt = await self._open(episode_id, held, started, episode.home)
         attempt.diagnosed = Diagnosed.of(episode, started)
         try:
             await self._processed(episode, attempt)
@@ -593,12 +609,21 @@ class Observer:
             del self._unsaved[key]
 
     async def _open(
-        self, episode_id: str, held: ObservationRecord | None, started: datetime
+        self,
+        episode_id: str,
+        held: ObservationRecord | None,
+        started: datetime,
+        home: RecordHome,
     ) -> _Attempt:
-        """Start an attempt: the episode waits, its attempt open, recorded (§16:1)."""
+        """Start an attempt: the episode waits, its attempt open, recorded (§16:1).
+
+        ``home`` is the observed episode's (ADR-0383 §4:2), which a first record takes; a
+        record held keeps its own (§4:6).
+        """
         attempts = () if held is None else _closed(held.attempts)
         record = ObservationRecord(
             episode=episode_id,
+            home=home if held is None else held.home,
             state=ObservationState.WAITING,
             attempts=(*attempts, ObservationAttempt(started_at=started)),
             findings=() if held is None else held.findings,
@@ -1322,6 +1347,7 @@ def _with_attempt(
     current = ObservationAttempt(started_at=attempt.started_at, calls=tuple(attempt.calls), end=end)
     return ObservationRecord(
         episode=attempt.record.episode,
+        home=attempt.record.home,
         state=state,
         attempts=(*attempt.record.attempts[:-1], current),
         findings=findings,

@@ -2227,6 +2227,7 @@ async def _ended_failing(harness: Harness, completer: FakeToolCallingCompleter) 
 
 async def _claimed(harness: Harness, effect_id: str, capability: str, outcome: ToolOutcome) -> None:
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=_ACTIVATION,
         round="round:1",
@@ -2401,7 +2402,12 @@ async def test_the_writers_read_keeps_only_a_message_done_in_the_conversation() 
 
     def message(effect_id: str, place: str = "conversation:c1") -> ActivationEffect:
         return ActivationEffect(
-            id=effect_id, activation_id=_ACTIVATION, round="round:1", place=place, claimed_at=AT
+            home=RecordHome.owners(),
+            id=effect_id,
+            activation_id=_ACTIVATION,
+            round="round:1",
+            place=place,
+            claimed_at=AT,
         )
 
     await claimed(message("e1"), ToolOutcome.SUCCEEDED, position=2)
@@ -2442,6 +2448,7 @@ async def test_the_writers_read_marks_no_message_a_question_even_from_a_round_th
             )
         )
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=f"e-{activation_id}",
             activation_id=activation_id,
             round="round:1",
@@ -2531,6 +2538,7 @@ async def _story_harness(
         phases=_phases(completer, stories=stories),
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:past",
         activation_id="past",
         round="round:past",
@@ -3361,6 +3369,7 @@ async def test_the_story_standing_command_lists_what_was_done() -> None:
     assert trip is not None
     for effect_id, outcome in (("e1", ToolOutcome.SUCCEEDED), ("e2", ToolOutcome.FAILED)):
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=effect_id,
             activation_id="past",
             round="round:past",

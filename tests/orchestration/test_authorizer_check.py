@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PlanningRound,
     ProposedCall,
+    RecordHome,
     RequestedCall,
     RiskLevel,
     Sureness,
@@ -1169,6 +1170,7 @@ async def _answered(plans: FakePlanStore, tap: ApprovalTap) -> ApprovalRequest:
         expires_at=_AT + timedelta(hours=24),
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask",
         activation_id="act-asker",
         round="round:ask",

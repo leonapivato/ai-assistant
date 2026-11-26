@@ -255,7 +255,7 @@ def test_the_plan_stores_cascade_carry_is_what_its_upgrade_does(
 
     carried = plans.carries[4](base)
 
-    assert plans.shape == 7
+    assert plans.shape == 8
     assert carried == head
     assert upgrade_check.compare_records("plans", carried, head) == []
     assert upgrade_check.compare_records("plans", base, head) != []
@@ -874,7 +874,7 @@ def test_the_plan_stores_setter_carry_is_what_its_upgrade_does(tmp_path: Path) -
     carried = plans.carries[5](base)
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 7
+    assert plans.shape == 8
     assert upgrade_check.compare_records("plans", carried, head) == []
     # The head may read back more than the base did, so the carry is what holds it to
     # these values: carried to another level, the head reads back other than it says.
@@ -928,7 +928,7 @@ def test_the_plan_stores_tapper_carry_is_what_its_upgrade_does(tmp_path: Path) -
     carried = plans.carries[6](base)
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 7
+    assert plans.shape == 8
     assert upgrade_check.compare_records("plans", carried, head) == []
     # The head may read back more than the base did, so the carry is what holds it to
     # these values: carried to a recorded level, the head reads back other than it says.
@@ -957,6 +957,72 @@ def test_the_plan_stores_tapper_carry_is_what_its_upgrade_does(tmp_path: Path) -
         "approval/q-before-pending": None,
         "approval/q-before-expired": None,
     }
+
+
+@pytest.mark.integration
+def test_the_plan_stores_home_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0383 §5:1: the carry from shape 7 says what the head's upgrade past 21 reads back.
+
+    Taken over the file the previous release wrote with effect and observation records in
+    it (``tests/planning/legacy``). The base's read-back is each record as that release
+    exported it, which is the stored blob; carried to shape 8, every effect and every
+    observation record gains the owner's domain as its home, no task or request gains
+    one, and every record of it is read back by this build after the upgrade, the carry's
+    home held to what the head actually reads.
+    """
+    import shutil  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "planning" / "legacy"
+    shutil.copyfile(legacy / "plans-before-adr-0383.db", tmp_path / "plans.db")
+    with sqlite3.connect(tmp_path / "plans.db") as conn:
+        base: Records = {
+            "stopped": [
+                str(one)
+                for (one,) in conn.execute(
+                    "SELECT activation_id FROM stopped_activations ORDER BY activation_id"
+                )
+            ],
+            **{
+                f"effect/{effect_id}": json.loads(data)
+                for effect_id, data in conn.execute("SELECT id, data FROM activation_effects")
+            },
+            "observations": [
+                json.loads(data)
+                for (data,) in conn.execute("SELECT data FROM observations ORDER BY episode_id")
+            ],
+            **{
+                f"task/{task_id}": json.loads(data)
+                for task_id, data in conn.execute("SELECT id, data FROM scheduled_tasks")
+            },
+            **{
+                f"approval/{request_id}": json.loads(data)
+                for request_id, data in conn.execute("SELECT id, data FROM approval_requests")
+            },
+        }
+    (plans,) = [one for one in STORES if one.name == "plans"]
+
+    carried = plans.carries[7](base)
+    head = asyncio.run(plans.read(tmp_path))
+
+    assert plans.shape == 8
+    assert upgrade_check.compare_records("plans", carried, head) == []
+    # The head may read back more than the base did, so the carry is what holds it to
+    # the owner's domain: carried to the shared things, the head reads back other.
+    effect = carried["effect/effect-before-done"]
+    assert isinstance(effect, dict)
+    shared_home: Json = {"kind": "shared"}
+    shared: Records = {**carried, "effect/effect-before-done": {**effect, "home": shared_home}}
+    assert upgrade_check.compare_records("plans", shared, head) != []
+    owners: Json = {"kind": "person", "id": "person:owner"}
+    observations = carried["observations"]
+    assert isinstance(observations, list)
+    homes = [
+        value.get("home")
+        for key, value in carried.items()
+        if key.startswith(("effect/", "task/", "approval/")) and isinstance(value, dict)
+    ] + [one.get("home") for one in observations if isinstance(one, dict)]
+    assert homes.count(owners) == 9 + 4
+    assert homes.count(None) == 2
 
 
 @pytest.mark.integration
@@ -991,7 +1057,7 @@ def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     carried = plans.carries[2](plans.carries[1](base))
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 7
+    assert plans.shape == 8
     assert carried["observations"] == []
     assert upgrade_check.compare_records("plans", carried, head) == []
 

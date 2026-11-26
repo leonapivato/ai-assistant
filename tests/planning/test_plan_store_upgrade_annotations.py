@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from record_homes import OWNERS_JSON, decoded_tables, homeless_tables
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
@@ -142,20 +143,22 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
-    assert export.schema_version == 31
+    assert _label(legacy) == "22"
+    assert export.schema_version == 32
     assert export.stopped_activations == ("act-before-stopped",)
     assert [one.id for one in export.activation_effects] == ["effect-before-remember"]
     assert export.observations == read
     for record in read:
-        assert record.model_dump(mode="json") == _with_nothing_new(blobs[record.episode])
+        assert record.model_dump(mode="json") == _with_nothing_new(blobs[record.episode]) | {
+            "home": OWNERS_JSON
+        }
         assert record.declines == ()
         assert all(one.annotations is None for one in record.findings)
-    # No row is rewritten: the step moves the label and nothing else.
+    # No row is rewritten but for the home the step past 21 writes (ADR-0383 §5:1).
     after = _dump(legacy)
-    assert {table: after[table] for table in before if table != "meta"} == {
-        table: rows for table, rows in before.items() if table != "meta"
-    }
+    assert homeless_tables({table: after[table] for table in before if table != "meta"}) == (
+        decoded_tables({table: rows for table, rows in before.items() if table != "meta"})
+    )
 
 
 async def test_the_upgraded_file_takes_annotations_and_declines_and_keeps_them(
@@ -193,7 +196,7 @@ async def test_the_upgraded_file_takes_annotations_and_declines_and_keeps_them(
         assert stored.declines[0].reason == "Trivia."
     finally:
         reopened.close()
-    assert _label(legacy) == "21"
+    assert _label(legacy) == "22"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

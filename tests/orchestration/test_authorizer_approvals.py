@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PlanningRound,
     ProposedCall,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -241,6 +242,7 @@ async def _approved(
         expires_at=_AT + _DAY,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask",
         activation_id=_ASKER,
         round="round:ask",
@@ -387,6 +389,7 @@ async def test_a_direct_call_a_pending_request_holds_waits_on_the_card() -> None
         expires_at=_AT + _DAY,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask-2",
         activation_id=_ASKER,
         round="round:ask",
@@ -462,6 +465,7 @@ async def test_a_pending_request_from_before_the_renames_still_holds_its_call() 
         expires_at=_AT + _DAY,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:ask-2",
         activation_id=_ASKER,
         round="round:ask",

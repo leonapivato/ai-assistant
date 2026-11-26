@@ -816,6 +816,33 @@ class PlaceTarget:
         return place_of(self.channel)
 
 
+def _work_home() -> RecordHome:
+    """The home the running work's records take: whom the work is for gives it.
+
+    Read off the work's state as it stands (``ActivationState.home``, ADR-0383 §4:1), as
+    its episode's and its stories' are: its messages, and the effect records its calls
+    and messages are claimed under (ADR-0386 §4:2, §5:1).
+
+    Raises:
+        RuntimeError: If no work is running, so a record has no home to carry.
+    """
+    state = active_state()
+    if state is None:
+        msg = "no work is running, so a record has no home to be written in"
+        raise RuntimeError(msg)
+    return state.home
+
+
+def _running_home() -> RecordHome | None:
+    """The running work's home, or ``None`` where no work is running (ADR-0383 §4:1).
+
+    What acting is handed for the records a round's calls are claimed under: a round
+    none of whose calls gets a record needs none.
+    """
+    state = active_state()
+    return None if state is None else state.home
+
+
 @dataclass(frozen=True, slots=True)
 class _ConversationWriter:
     """The hub chat's writer, as a :class:`PlaceWriter` for one conversation.
@@ -848,11 +875,7 @@ class _ConversationWriter:
         Raises:
             RuntimeError: If no work is running, so the message has no home to carry.
         """
-        state = active_state()
-        if state is None:
-            msg = "no work is running, so a message has no home to be written in"
-            raise RuntimeError(msg)
-        return state.home
+        return _work_home()
 
     def _message(self, text: str) -> NewMessage:
         cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
@@ -6186,7 +6209,9 @@ class PhasePath:
             self._tools.holding(working.supplied, working.attributions),
         ):
             if self._look_ups is None:
-                acted = await self._acting.act(authorized, held=working.held, on_acted=acted_one)
+                acted = await self._acting.act(
+                    authorized, held=working.held, home=_running_home(), on_acted=acted_one
+                )
                 self._peers(working, acted, caller)
                 return acted
             with self._look_ups.scope(
@@ -6198,7 +6223,9 @@ class PhasePath:
             ) as scope:
                 ran: ActedRound | None = None
                 try:
-                    ran = await self._acting.act(authorized, held=working.held, on_acted=acted_one)
+                    ran = await self._acting.act(
+                        authorized, held=working.held, home=_running_home(), on_acted=acted_one
+                    )
                 finally:
                     # Every view a story read read, and every record an episode look-up
                     # read, was obtained, whatever became of the round's other calls
@@ -6438,16 +6465,23 @@ class PhasePath:
         if self._closing():
             _log.info("phase_tidy_up_not_started", stage="acting", reason="closing")
             return
-        self._spawn(self._tidy(working, authorized_round(replace(decided, allowed=tidies))))
+        self._spawn(
+            self._tidy(
+                working, authorized_round(replace(decided, allowed=tidies)), home=_running_home()
+            )
+        )
 
-    async def _tidy(self, working: PhaseWorking, tidies: AuthorizedRound) -> None:
+    async def _tidy(
+        self, working: PhaseWorking, tidies: AuthorizedRound, *, home: RecordHome | None
+    ) -> None:
         """Run the tidy-ups through acting, logging rather than raising what escapes.
 
         Nobody awaits this coroutine, so an unexpected error is logged here by its class
         alone, never its message, which could carry a story's words (ADR-0275 §8).
+        ``home`` is the work's, read when the tidy-ups start (ADR-0383 §4:1).
         """
         try:
-            await self._acting.act(tidies, held=working.held)
+            await self._acting.act(tidies, held=working.held, home=home)
         except Exception as exc:
             _log.error("phase_tidy_up_crashed", stage="acting", error=type(exc).__name__)
 
@@ -6720,10 +6754,20 @@ class PhasePath:
         effect = ActivationEffect(
             id=effect_id,
             activation_id=working.activation_id,
+            home=_work_home(),
             round=round_id,
             place=target.place,
             claimed_at=self._now(),
         )
+        if not home_may_be_written(effect.home):
+            # ADR-0383 §2:3, ADR-0386 §6: the claim refuses this home before anything is
+            # written, so it is known that nothing was claimed or sent: not done, never
+            # unknown, and the place's writer is not reached.
+            _log.info("phase_message_unwritten", stage="acting", reason="home_refused")
+            refused = Delivery(ToolOutcome.FAILED, reason=_GONE)
+            if attempted is not None:
+                attempted.append(_Attempt(words=fitted.text, went=target.channel, delivery=refused))
+            return refused, fitted.text, target.channel
         try:
             await self._plans.claim_activation_effect(effect, match=None)
         except ClaimStopped:

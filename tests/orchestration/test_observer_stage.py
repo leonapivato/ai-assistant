@@ -55,7 +55,9 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     MemoryWriterName,
+    ObservationAttempt,
     ObservationAttemptEnd,
+    ObservationRecord,
     ObservationState,
     ObservationWrite,
     ObserverStep,
@@ -1020,8 +1022,84 @@ async def test_a_retry_resumes_after_the_memories_already_written() -> None:
     assert record.state is ObservationState.PROCESSED
 
 
-async def test_a_failing_read_of_the_episode_is_an_attempt_and_later_episodes_proceed() -> None:
-    """§16:4-§16:5: the first read is inside the attempt."""
+async def test_a_failing_read_of_an_episode_attempted_before_is_an_attempt() -> None:
+    """§16:4-§16:5: the read is inside the attempt, and later episodes proceed.
+
+    The episode has a record from an earlier attempt, so the failed one is recorded on it
+    and backed off, and the record keeps the home it had (ADR-0383 §4:6).
+    """
+    harness = Harness()
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=4)),
+        episode("two", at=AT - timedelta(minutes=3), text=""),
+        episode("three", at=AT - timedelta(minutes=2)),
+        episode("four", at=AT - timedelta(minutes=1)),
+    )
+    earlier = await harness.plans.write_observation(
+        ObservationRecord(
+            episode="activation:one",
+            home=RecordHome.shared(),
+            state=ObservationState.WAITING,
+            attempts=(
+                ObservationAttempt(
+                    started_at=AT - timedelta(hours=1), end=ObservationAttemptEnd.FAILED
+                ),
+            ),
+        ),
+        expected_revision=0,
+    )
+    get = harness.memory.get
+
+    async def failing(record_id: str) -> object:
+        if record_id == "activation:one":
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get(record_id)
+
+    harness.memory.get = failing  # type: ignore[method-assign,assignment]  # one unreadable row
+    observer = harness.observer()
+
+    outcome = await observer.run()
+
+    assert (outcome.waiting, outcome.skipped) == (1, 1)
+    one, two = await harness.plans.observations(["activation:one", "activation:two"])
+    assert [attempt.end for attempt in one.attempts] == [ObservationAttemptEnd.FAILED] * 2
+    assert one.next_attempt_at == AT + timedelta(minutes=2)
+    assert one.home == earlier.home
+    assert two.state is ObservationState.SKIPPED
+
+
+async def test_each_record_takes_the_home_of_the_episode_it_observed() -> None:
+    """ADR-0383 §4:2, ADR-0386 §5:2: the episode's own home, read off the episode, never one
+    made again from its facts: one in the shared things and one in the owner's domain."""
+    harness = Harness()
+    await harness.hold(
+        episode("shared", at=AT - timedelta(minutes=4), text="").model_copy(
+            update={"home": RecordHome.shared()}
+        ),
+        episode("owners", at=AT - timedelta(minutes=3), text=""),
+        episode("two", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("three", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+    observer = harness.observer()
+
+    outcome = await observer.run()
+
+    assert outcome.skipped == 2
+    homes = {one.episode: one.home for one in (await harness.plans.export()).observations}
+    assert homes == {
+        "activation:shared": RecordHome.shared(),
+        "activation:owners": RecordHome.owners(),
+    }
+
+
+async def test_a_failing_first_read_records_nothing_and_later_episodes_proceed() -> None:
+    """ADR-0383 §4:2: an episode never attempted whose read fails leaves no home at hand.
+
+    The record would take the episode's home, never one made again, so nothing is
+    recorded of the attempt: the episode stays due for the next run, with no backoff, and
+    later episodes proceed (§16:5).
+    """
     harness = Harness()
     await harness.hold(
         episode("one", at=AT - timedelta(minutes=4)),
@@ -1042,15 +1120,19 @@ async def test_a_failing_read_of_the_episode_is_an_attempt_and_later_episodes_pr
 
     outcome = await observer.run()
 
-    assert (outcome.waiting, outcome.skipped) == (1, 1)
-    one, two = await harness.plans.observations(["activation:one", "activation:two"])
-    assert one.attempts[-1].end is ObservationAttemptEnd.FAILED
-    assert one.next_attempt_at == AT + timedelta(minutes=1)
+    assert (outcome.waiting, outcome.skipped) == (0, 1)
+    (two,) = await harness.plans.observations(["activation:one", "activation:two"])
+    assert two.episode == "activation:two"
     assert two.state is ObservationState.SKIPPED
+    assert "activation:one" in [one for one, _ in await observer.due(())]
 
 
 async def test_an_episode_with_nothing_to_read_is_skipped_after_a_failed_read() -> None:
-    """§16:4, §16:7: a read outage first, then the skip rule, never a crash."""
+    """§16:4, §16:7: a read outage first, then the skip rule, never a crash.
+
+    The outage is on the episode's first read, so nothing is recorded of it (ADR-0383
+    §4:2), and the next run's read finds nothing to read and skips it.
+    """
     harness = Harness()
     bare = EpisodicMemory(
         home=RecordHome.owners(),
@@ -1074,18 +1156,17 @@ async def test_an_episode_with_nothing_to_read_is_skipped_after_a_failed_read() 
     observer = harness.observer()
 
     first = await observer.run()
+    assert await harness.plans.observations(["harness:bare"]) == ()
     down = False
     harness.clock.advance(timedelta(minutes=1))
     second = await observer.run()
 
-    assert first.waiting == 1
+    assert first.waiting == 0
     assert second.skipped == 1
     (record,) = await harness.plans.observations(["harness:bare"])
     assert record.state is ObservationState.SKIPPED
-    assert [one.end for one in record.attempts] == [
-        ObservationAttemptEnd.FAILED,
-        ObservationAttemptEnd.FINISHED,
-    ]
+    assert record.home == bare.home
+    assert [one.end for one in record.attempts] == [ObservationAttemptEnd.FINISHED]
 
 
 async def test_an_outcome_whose_record_failed_to_be_written_is_not_committed_again() -> None:

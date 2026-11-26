@@ -971,6 +971,7 @@ async def _ticket(  # noqa: PLR0913 — the call, and how its tap answered and w
         expires_at=AT + timedelta(hours=24),
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=f"effect:{activation()}",
         activation_id=asking,
         round="round:ask",

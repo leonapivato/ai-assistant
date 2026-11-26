@@ -3427,6 +3427,15 @@ class PlanStore(Protocol):
     computes no instant** (§9:5): the rule's arithmetic is its callers' one function,
     and the store writes what they computed.
 
+    **Each effect record and each observation record carries its home** (ADR-0383 §3,
+    ADR-0386 §5): a required field of the record a member takes whole, so no member gains
+    an argument for it, kept by the store as both its kind and its identifier and given
+    back on every read of the record. Every member that writes either record refuses one
+    whose home :func:`~ai_assistant.core.types.home_may_be_written` does not allow with
+    ``PlanningError``, before any other step and writing nothing (ADR-0386 §6), and no
+    member changes a held record's home (ADR-0383 §4:6). A scheduled task's and an
+    approval request's ``person`` is its home, and a stop record carries none (§3).
+
     **The stop record lives here and in no other store** (ADR-0297 §1, §2, §6):
     :meth:`record_stop` writes a record naming one activation, and an effect claim
     naming that activation is then refused with
@@ -3525,8 +3534,9 @@ class PlanStore(Protocol):
             PlanningError: If the store already holds a record under the id, the
                 record carries an outcome, a reason or a position, or a ticket or a
                 request (ADR-0361: :meth:`claim_ticket_call` and
-                :meth:`write_approval_request` claim those), ``match`` names an id with
-                no UTF-8 encoding, or the backend fails. Nothing is written.
+                :meth:`write_approval_request` claim those), its home is one no write
+                may carry (ADR-0386 §6), ``match`` names an id with no UTF-8 encoding,
+                or the backend fails. Nothing is written.
         """
         ...
 
@@ -3542,7 +3552,8 @@ class PlanStore(Protocol):
         """Write a claimed effect's outcome, once (ADR-0306 §5:5, §6:4).
 
         Writes the outcome, the reason where it is not done, and, for a message done,
-        the position the medium returned for it, in one step.
+        the position the medium returned for it, in one step. The record's home stays
+        as it was (ADR-0383 §4:6).
 
         Args:
             effect_id: The record to finish.
@@ -3633,9 +3644,10 @@ class PlanStore(Protocol):
             The record as stored, carrying its new revision.
 
         Raises:
-            PlanningError: If ``record`` is not a valid ``ObservationRecord``,
-                ``expected_revision`` is not a non-negative integer, the held record
-                does not match it, or the backend fails. Nothing is written.
+            PlanningError: If ``record`` is not a valid ``ObservationRecord``, its home
+                is one no write may carry (ADR-0386 §6), ``expected_revision`` is not a
+                non-negative integer, the held record does not match it, or the backend
+                fails. Nothing is written.
         """
         ...
 
@@ -3777,9 +3789,10 @@ class PlanStore(Protocol):
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
             PlanningError: If the spawn or the effect is not valid, the effect is not a
-                call, carries an outcome or a request, or runs under a ticket whose call
-                is another capability's, a limit is not a positive integer, the store
-                already holds the effect's id or the task's, or the backend fails.
+                call, carries an outcome or a request, its home is one no write may
+                carry (ADR-0386 §6), or it runs under a ticket whose call is another
+                capability's, a limit is not a positive integer, the store already holds
+                the effect's id or the task's, or the backend fails.
                 Nothing is written. A spawn of a rule carrying no first instant, and a
                 spawn of any other when carrying one, is not valid: each is the
                 caller's error, and no ``TaskRefusal`` (ADR-0340 §9:3).
@@ -4017,7 +4030,8 @@ class PlanStore(Protocol):
         place confirmed from its medium's own record whether it was sent: ``delivered``
         writes it done, with the position the medium recorded it at; otherwise it is
         written not done. **Every other change to an outcome already written is
-        refused**, as :meth:`finish_activation_effect` refuses it (ADR-0306 §6:4).
+        refused**, as :meth:`finish_activation_effect` refuses it (ADR-0306 §6:4). The
+        record's home stays as it was (ADR-0383 §4:6).
 
         Args:
             effect_id: The message's record.
@@ -4098,8 +4112,9 @@ class PlanStore(Protocol):
         Raises:
             ClaimStopped: If the store holds a stop record for the asking activation.
             PlanningError: If the request is not valid or not fresh, the effect is not a
-                call naming the request from its activation and round or carries an
-                outcome, an id is already held, or the backend fails. Nothing is written.
+                call naming the request from its activation and round, carries an
+                outcome or a home no write may carry (ADR-0386 §6), an id is already
+                held, or the backend fails. Nothing is written.
         """
         ...
 
@@ -4288,8 +4303,9 @@ class PlanStore(Protocol):
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
             PlanningError: If the effect is not a valid call naming a ticket, carries an
-                outcome, its id is held, its capability is not the one the ticket's call
-                holds, or the backend fails. Nothing is written.
+                outcome or a home no write may carry (ADR-0386 §6), its id is held, its
+                capability is not the one the ticket's call holds, or the backend fails.
+                Nothing is written.
         """
         ...
 

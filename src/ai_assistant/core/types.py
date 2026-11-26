@@ -11900,8 +11900,18 @@ class ObservationRecord(BaseModel):
     writer read (``PlanStore.write_observation``). A clear erases it, and the episode
     is then processed again, additively (§16:9, §12:7).
 
+    **It carries its home** (ADR-0383 §3, ADR-0386 §5:2): the domain it landed in, a
+    required field of the record ``write_observation`` takes whole, so that member gains
+    no argument for it. The observer writes it after the episode's work has ended, so it
+    takes the home of the episode it observed (ADR-0383 §4:2), never one made again from
+    the episode's facts, and a record written again keeps the home it had (§4:6). No model
+    sets it. A home :func:`home_may_be_written` does not allow is refused with
+    ``PlanningError``, nothing written (ADR-0386 §6).
+
     Attributes:
         episode: The episode's id, exactly as the memory store holds it.
+        home: The domain the record landed in (ADR-0383 §2:2, §3): the observed
+            episode's home.
         state: Where it stands (§16:1).
         attempts: Its attempts, in the order they started.
         next_attempt_at: When a waiting episode may next be attempted, after a
@@ -11920,6 +11930,13 @@ class ObservationRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     episode: NonBlankEncodableText
+    home: RecordHome = Field(
+        description=(
+            "The domain the record landed in (ADR-0383 §2:2, §3; ADR-0386 §5:2): the home "
+            "of the episode it observed (§4:2), never changed by a later write (§4:6). "
+            "Required, so no write can leave it out (§5:4)."
+        ),
+    )
     state: ObservationState
     attempts: tuple[ObservationAttempt, ...] = ()
     next_attempt_at: UtcInstant | None = None
@@ -12820,7 +12837,15 @@ class ScheduledDue(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 31 because a request's answer gained who tapped and how sure**
+    **``schema_version`` is 32 because each effect record and each observation record
+    gained its home** (ADR-0383 §3, ADR-0386 §5): ``home`` on every ``ActivationEffect``
+    and every ``ObservationRecord``, the plan store's upgrade writing the owner's domain
+    into every one stored before it (ADR-0383 §5:1). No member is added, since it rides
+    inside ``activation_effects`` and ``observations``, but a reader of 31 refuses it as
+    extra, so the label moves. The closure rule is extended by nothing: a home names a
+    domain, which is not a record the document carries.
+
+    **It was 31 because a request's answer gained who tapped and how sure**
     (ADR-0377 §4:1, §8): ``person`` and ``level`` on each ``ApprovalTap``, the plan
     store's upgrade writing, on every answer stored before them, the request's person and
     no level (§4:3). No member is added, since they ride inside ``approval_requests``, but
@@ -12945,12 +12970,12 @@ class PlanExport(BaseModel):
     # Its approval requests hold the person's call arguments (ADR-0145 §8).
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    schema_version: Literal[31] = Field(
-        default=31,
+    schema_version: Literal[32] = Field(
+        default=32,
         description=(
-            "Shape of this export, pinned to exactly 31 (ADR-0039 §10, ADR-0377 §4:1): an "
+            "Shape of this export, pinned to exactly 32 (ADR-0039 §10, ADR-0386 §5): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[31]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[32]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -19347,10 +19372,21 @@ class ActivationEffect(BaseModel):
     message it claims, and only the *couldn't finish* message names none (ADR-0307
     §10).
 
+    **It carries its home** (ADR-0383 §3, ADR-0386 §5:1): the domain it landed in, a
+    required field of the record every member that writes one takes whole, so no member
+    gains an argument for it. Code sets it by ADR-0383 §4, never a model (§4:6): a work's
+    effect takes the home whom the work is for gives (§4:1), and an owner's own act
+    outside any work the owner's domain (§4:5). Finishing it and confirming a message's
+    delivery leave it as it was (§4:6). A home
+    :func:`home_may_be_written` does not allow is refused by every member that writes
+    one, with ``PlanningError`` and nothing written (ADR-0386 §6).
+
     Attributes:
         id: The record's id, minted before the ruling and named by the deciding
             decision's ``effect``.
         activation_id: The activation that made the effect.
+        home: The domain the record landed in (ADR-0383 §2:2, §3), set by code when it
+            is claimed and never changed by a later write.
         round: The planning round whose call or message this claims; ``None`` only on
             the *couldn't finish* message.
         capability: For a call, the capability called.
@@ -19378,6 +19414,13 @@ class ActivationEffect(BaseModel):
 
     id: DurableIdentifier
     activation_id: DurableIdentifier
+    home: RecordHome = Field(
+        description=(
+            "The domain the record landed in (ADR-0383 §2:2, §3; ADR-0386 §5:1), set by "
+            "code when it is claimed (§4) and never changed by a later write (§4:6). "
+            "Required, so no write can leave it out (§5:4)."
+        ),
+    )
     round: DurableIdentifier | None = None
     capability: VisibleIdentifier | None = None
     values_digest: Sha256Hex | None = None

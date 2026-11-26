@@ -155,6 +155,7 @@ def _episode(record: EpisodeProcessingRecord, *, external: bool = False) -> Epis
 
 def _call(id_: str, outcome: ToolOutcome | None, *, round_: str = "r1", **extra: Any) -> Any:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=id_,
         activation_id=_ACTIVATION,
         round=round_,
@@ -170,6 +171,7 @@ def _call(id_: str, outcome: ToolOutcome | None, *, round_: str = "r1", **extra:
 
 def _message(id_: str, outcome: ToolOutcome | None, *, round_: str | None = "r1") -> Any:
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=id_,
         activation_id=_ACTIVATION,
         round=round_,

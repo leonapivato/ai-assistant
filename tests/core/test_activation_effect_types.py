@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     PlanExport,
+    RecordHome,
     Reversibility,
     RiskLevel,
     ToolCost,
@@ -153,6 +154,7 @@ def _call(**overrides: Any) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "id": "e1",
         "activation_id": "act-1",
+        "home": RecordHome.owners(),
         "round": "r1",
         "capability": "book_stay",
         "values_digest": "a" * 64,
@@ -167,12 +169,23 @@ def _message(**overrides: Any) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "id": "m1",
         "activation_id": "act-1",
+        "home": RecordHome.owners(),
         "round": "r1",
         "place": "c-1",
         "claimed_at": _AT,
     }
     fields.update(overrides)
     return fields
+
+
+def test_an_effect_carries_its_home_as_a_required_field() -> None:
+    """ADR-0383 §5:4, ADR-0386 §5:1: no record can leave its home out, and it dumps with it."""
+    fields = {key: value for key, value in _call().items() if key != "home"}
+    with pytest.raises(ValidationError, match="home"):
+        ActivationEffect(**fields)
+    shared = ActivationEffect(**_call(home=RecordHome.shared()))
+    assert shared.model_dump(mode="json")["home"] == {"kind": "shared", "id": None}
+    assert ActivationEffect.model_validate_json(shared.model_dump_json()) == shared
 
 
 def test_a_call_and_a_message_are_each_whole() -> None:

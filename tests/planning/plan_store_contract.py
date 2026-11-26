@@ -68,6 +68,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     QuestionPart,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -122,6 +123,7 @@ def _effect(
 ) -> ActivationEffect:
     """A call's effect record as acting claims it (ADR-0306 §6), with no outcome."""
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=activation,
         round="r1",
@@ -153,7 +155,12 @@ def _spending(
 def _message(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
     """A message's effect record as claimed, with no outcome and no position."""
     return ActivationEffect(
-        id=effect_id, activation_id=activation, round="r1", place="c-1", claimed_at=_WHEN
+        home=RecordHome.owners(),
+        id=effect_id,
+        activation_id=activation,
+        round="r1",
+        place="c-1",
+        claimed_at=_WHEN,
     )
 
 
@@ -176,6 +183,7 @@ def _observation(
     )
     done = state is not ObservationState.WAITING
     return ObservationRecord(
+        home=RecordHome.owners(),
         episode=episode,
         state=state,
         attempts=(
@@ -1499,7 +1507,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 31
+        assert export.schema_version == 32
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -2128,7 +2136,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 31
+        assert export.schema_version == 32
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2333,7 +2341,9 @@ class PlanStoreContract:
             expected_revision=0,
         )
         await store.write_observation(
-            ObservationRecord(episode="activation:c", state=ObservationState.SKIPPED),
+            ObservationRecord(
+                home=RecordHome.owners(), episode="activation:c", state=ObservationState.SKIPPED
+            ),
             expected_revision=0,
         )
 
@@ -2375,7 +2385,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 31
+        assert export.schema_version == 32
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -3166,7 +3176,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 31
+        assert exported.schema_version == 32
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
         assert removed == 4
         cleared = await store.export()
@@ -3566,7 +3576,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 31
+        assert exported.schema_version == 32
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()
@@ -4341,7 +4351,7 @@ class PlanStoreContract:
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 31
+        assert exported.schema_version == 32
         assert exported.approval_requests == held
         # Two requests and their two effect records.
         assert removed == 4
@@ -4409,6 +4419,172 @@ class PlanStoreContract:
         assert answer.request == first
         (held,) = (await store.export()).approval_requests
         assert held.call.wording == "Robin is vegetarian."
+
+    # --- ADR-0383 §3, ADR-0386 §5-§6: each effect's and observation's home ---------
+
+    async def test_an_effect_keeps_the_home_it_was_claimed_with_on_every_read(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0386 §5:1: given back by every read, and kept by a finish and a confirmation.
+
+        A call claimed in the shared things, a message in the owner's domain and a call
+        spending a part in the shared things each read back with the home they were
+        claimed with, from the read by activation, the read by part and the export; and a
+        finish and a place's confirmation change no home (ADR-0383 §4:6).
+        """
+        shared = RecordHome.shared()
+        await store.claim_activation_effect(
+            _effect("e1").model_copy(update={"home": shared}), match=None
+        )
+        await store.claim_activation_effect(_message("m1"), match=None)
+        spent = _spending("e2").model_copy(update={"home": shared})
+        await store.claim_activation_effect(spent, match=None)
+        await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+        await store.confirm_message_effect("m1", delivered=True, position=4)
+
+        by_activation = await store.activation_effects(["act-1", "act-2"])
+        by_part = await store.part_effects([QuestionPart(round="q-round", part=1)])
+        exported = await store.export()
+
+        homes = {one.id: one.home for one in by_activation}
+        assert homes == {"e1": shared, "m1": RecordHome.owners(), "e2": shared}
+        assert [(one.id, one.home) for one in by_part] == [("e2", shared)]
+        assert {one.id: one.home for one in exported.activation_effects} == homes
+
+    async def test_a_spawns_and_a_requests_and_a_tickets_effect_keep_their_homes(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0386 §5:1: the record each of the three other writing members takes whole."""
+        shared = RecordHome.shared()
+        written = await store.write_scheduled_task(
+            _spawn("t1"),
+            _spawn_effect("e-spawn").model_copy(update={"home": shared}),
+            match=None,
+            chain_limit=_CHAIN_LIMIT,
+            pending_limit=_PENDING_LIMIT,
+        )
+        assert written.answer is TaskWriteAnswer.WRITTEN, written
+        request = _request("q1")
+        asked = await store.write_approval_request(
+            request, _asking(request).model_copy(update={"home": shared}), match=None
+        )
+        assert asked.answer is ApprovalWriteAnswer.WRITTEN, asked
+        await _approved(store, "q2")
+        claimed = await store.claim_ticket_call(
+            _spending_ticket("e-ticket", "q2").model_copy(update={"home": shared}), match=None
+        )
+        assert claimed is TicketClaim.CLAIMED
+
+        homes = {one.id: one.home for one in (await store.export()).activation_effects}
+
+        assert homes == {
+            "e-spawn": shared,
+            "ask-q1": shared,
+            "ask-q2": RecordHome.owners(),
+            "e-ticket": shared,
+        }
+
+    async def test_an_observation_keeps_the_home_it_was_written_with(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0386 §5:2: given back by the read, the write's answer and the export."""
+        shared = RecordHome.shared()
+        first = await store.write_observation(
+            _observation(state=ObservationState.WAITING).model_copy(update={"home": shared}),
+            expected_revision=0,
+        )
+        again = await store.write_observation(
+            _observation().model_copy(update={"home": shared}),
+            expected_revision=first.revision,
+        )
+        other = await store.write_observation(_observation("activation:act-2"), expected_revision=0)
+
+        read = await store.observations(["activation:act-1", "activation:act-2"])
+
+        assert (first.home, again.home, other.home) == (shared, shared, RecordHome.owners())
+        assert [(one.episode, one.home) for one in read] == [
+            ("activation:act-1", shared),
+            ("activation:act-2", RecordHome.owners()),
+        ]
+        assert (await store.export()).observations == read
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.person("person:sam"), RecordHome.group("group:household")],
+        ids=["another-persons", "a-groups"],
+    )
+    async def test_every_member_that_writes_an_effect_refuses_a_home_no_write_may_carry(
+        self, store: PlanStore, home: RecordHome
+    ) -> None:
+        """ADR-0386 §6, ADR-0383 §2:3: ``PlanningError``, and nothing written.
+
+        Each of the four members that write an effect record refuses it, as a claim of
+        a held id is refused (ADR-0306 §6:2): no effect, task or request is written, and
+        the ticket a refused call would spend stays held.
+        """
+        await _approved(store, "q-held")
+        before = await store.export()
+        request = _request("q-new")
+
+        with pytest.raises(PlanningError):
+            await store.claim_activation_effect(
+                _effect("e1").model_copy(update={"home": home}), match=None
+            )
+        with pytest.raises(PlanningError):
+            await store.write_scheduled_task(
+                _spawn("t1"),
+                _spawn_effect("e-spawn").model_copy(update={"home": home}),
+                match=None,
+                chain_limit=_CHAIN_LIMIT,
+                pending_limit=_PENDING_LIMIT,
+            )
+        with pytest.raises(PlanningError):
+            await store.write_approval_request(
+                request, _asking(request).model_copy(update={"home": home}), match=None
+            )
+        with pytest.raises(PlanningError):
+            await store.claim_ticket_call(
+                _spending_ticket("e-ticket", "q-held").model_copy(update={"home": home}),
+                match=None,
+            )
+
+        after = await store.export()
+        assert after.model_copy(update={"exported_at": before.exported_at}) == before
+        assert (await _request_held(store, "q-held")).ticket is TicketState.HELD
+
+    async def test_a_home_no_write_may_carry_is_refused_before_the_stop_is_read(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0386 §6: the refusal comes before any other step, the stop's included."""
+        await store.record_stop("act-1")
+
+        with pytest.raises(PlanningError) as refused:
+            await store.claim_activation_effect(
+                _effect("e1").model_copy(update={"home": RecordHome.person("person:sam")}),
+                match=None,
+            )
+
+        assert not isinstance(refused.value, ClaimStopped)
+        assert await store.activation_effects(["act-1"]) == ()
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.person("person:sam"), RecordHome.group("group:household")],
+        ids=["another-persons", "a-groups"],
+    )
+    async def test_write_observation_refuses_a_home_no_write_may_carry(
+        self, store: PlanStore, home: RecordHome
+    ) -> None:
+        """ADR-0386 §6: ``PlanningError``, and nothing written."""
+        with pytest.raises(PlanningError):
+            await store.write_observation(
+                _observation().model_copy(update={"home": home}), expected_revision=0
+            )
+        held = await store.write_observation(_observation("activation:act-2"), expected_revision=0)
+
+        assert await store.observations(["activation:act-1"]) == ()
+        assert (await store.export()).observations == (held,)
+        assert await store.observer_calls_since(_WHEN) == held.call_count()
 
     # --- cancellation (ADR-0060) -------------------------------------------
 

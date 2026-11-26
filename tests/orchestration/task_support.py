@@ -21,6 +21,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ProcessingReason,
     ProcessingStatus,
+    RecordHome,
     ScheduledTaskAuthor,
     Sureness,
     TaskSpawn,
@@ -70,6 +71,7 @@ def activation() -> str:
 def spawn_effect(parent: str, *, at: datetime = AT) -> ActivationEffect:
     """The effect record a spawn made by ``parent`` is claimed under (ADR-0350 §3:3)."""
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=f"effect:{uuid.uuid4().hex}",
         activation_id=parent,
         round="round:1",
@@ -137,6 +139,7 @@ async def message(
 ) -> ActivationEffect:
     """A message ``activation_id`` claimed into ``place``, finished with ``outcome``."""
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=f"effect:{uuid.uuid4().hex}",
         activation_id=activation_id,
         round="round:1",

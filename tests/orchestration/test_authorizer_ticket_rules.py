@@ -249,6 +249,7 @@ class _Hub:
             expires_at=_AT + timedelta(hours=24),
         )
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id="effect:ask",
             activation_id=_ASKING,
             round="round:ask",
@@ -494,6 +495,7 @@ async def _earlier(hub: _Hub, outcome: ToolOutcome | None) -> None:
     """A booking this activation made earlier, with ``outcome``."""
     request = ActionRequest(tool=_BOOK, parameters={"q": "table for two at 8"})
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:earlier",
         activation_id=_HOLDER,
         round="round:earlier",
@@ -653,6 +655,7 @@ async def test_an_unknown_effect_recorded_under_an_old_name_still_needs_you() ->
     hub = _Hub(sends, policy=FakeActionPolicy(confirm_at=None))
     request = ActionRequest(tool=sends, parameters={"q": "the invoice to Maren"})
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="effect:earlier",
         activation_id=_HOLDER,
         round="round:earlier",
@@ -711,7 +714,9 @@ async def test_a_ticket_from_before_the_renames_is_claimed_and_runs() -> None:
         timeout=timedelta(seconds=5),
         now=_now,
     )
-    acted = await acting_stage.act(authorized_round(decided), held=HeldResults())
+    acted = await acting_stage.act(
+        authorized_round(decided), home=RecordHome.owners(), held=HeldResults()
+    )
 
     (one,) = acted.calls
     assert one.outcome is acting.ActedOutcome.DONE, one.reason

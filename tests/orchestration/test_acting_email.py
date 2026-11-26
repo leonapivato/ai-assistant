@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     ProposedCall,
     RecordedCall,
+    RecordHome,
     ToolCall,
 )
 from ai_assistant.orchestration.acting import (
@@ -64,12 +65,17 @@ async def test_an_accidental_repeat_is_refused_and_a_deliberate_one_runs() -> No
     plans = FakePlanStore(now=lambda: _AT)
     invoker = _Invoker()
     earlier = AuthorizedRound(activation_id="act-0", round_id="r0", calls=(_email("d0", "e0"),))
-    await _stage(plans, invoker).act(held=HeldResults(), authorized=earlier)
+    await _stage(plans, invoker).act(
+        home=RecordHome.owners(), held=HeldResults(), authorized=earlier
+    )
 
     refused = await _stage(plans, invoker).act(
-        held=HeldResults(), authorized=_round(_email("d1", "e1"), stories=("act-0",))
+        home=RecordHome.owners(),
+        held=HeldResults(),
+        authorized=_round(_email("d1", "e1"), stories=("act-0",)),
     )
     repeated = await _stage(plans, invoker).act(
+        home=RecordHome.owners(),
         held=HeldResults(),
         authorized=_round(_email("d2", "e2", deliberate_repeat=True), stories=("act-0",)),
     )

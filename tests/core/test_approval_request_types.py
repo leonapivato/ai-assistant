@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PlanExport,
     QuestionPart,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -321,6 +322,7 @@ def _effect(**overrides: Any) -> ActivationEffect:
     fields: dict[str, Any] = {
         "id": "e1",
         "activation_id": "act-1",
+        "home": RecordHome.owners(),
         "round": "r1",
         "capability": "book_stay",
         "values_digest": "a" * 64,
@@ -340,7 +342,14 @@ def test_an_effect_carries_one_key_at_most() -> None:
     with pytest.raises(ValidationError, match="one key at most"):
         _effect(ticket="q1", part=QuestionPart(round="r1", part=1))
     with pytest.raises(ValidationError, match="message"):
-        ActivationEffect(id="m1", activation_id="a", place="c-1", claimed_at=_AT, ticket="q1")
+        ActivationEffect(
+            home=RecordHome.owners(),
+            id="m1",
+            activation_id="a",
+            place="c-1",
+            claimed_at=_AT,
+            ticket="q1",
+        )
 
 
 def test_an_effect_with_no_ticket_or_request_dumps_as_it_did() -> None:

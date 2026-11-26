@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     PermissionLineKind,
     PermissionOutcome,
     PermissionRuling,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -208,6 +209,7 @@ class _Rig:
             effect=f"effect:{n}",
         )
         effect = ActivationEffect(
+            home=RecordHome.owners(),
             id=f"effect:{n}",
             activation_id="act-ask",
             round="round:ask",

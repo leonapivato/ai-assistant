@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from record_homes import decoded_tables, homeless_tables
 from task_setters import decoded, unset
 
 from ai_assistant.core.errors import PlanningError
@@ -43,6 +44,7 @@ from ai_assistant.core.types import (
     DueNow,
     OccurrencePush,
     OccurrenceState,
+    RecordHome,
     RulePush,
     ScheduledTaskAuthor,
     Sureness,
@@ -135,8 +137,8 @@ async def test_every_task_is_upgraded_to_record_who_set_it(legacy: Path) -> None
     finally:
         store.close()
 
-    assert _label(legacy) == "21"
-    assert export.schema_version == 31
+    assert _label(legacy) == "22"
+    assert export.schema_version == 32
     tasks = {one.id: one for one in export.scheduled_tasks}
     assert list(tasks) == _TASKS
     assert {
@@ -159,9 +161,10 @@ async def test_every_other_record_and_field_is_carried_as_it_stands(legacy: Path
     after = _dump(legacy)
     assert set(after) == _TABLES
     untouched = _TABLES - {"meta", "scheduled_tasks"}
-    assert {table: after[table] for table in untouched} == {
-        table: before[table] for table in untouched
-    }
+    # The step past 21 writes each effect's and observation's home (ADR-0383 §5:1).
+    assert homeless_tables({table: after[table] for table in untouched}) == decoded_tables(
+        {table: before[table] for table in untouched}
+    )
     assert unset(after["scheduled_tasks"]) == decoded(before["scheduled_tasks"])
     states = {
         one[0]: [step["state"] for step in one[-1]["occurrences"]]
@@ -237,6 +240,7 @@ async def test_a_task_written_after_the_upgrade_records_what_its_spawn_states(
         set_at=_NOW,
     )
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id="spawn-t-after",
         activation_id="act-after",
         round="r1",

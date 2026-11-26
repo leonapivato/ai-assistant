@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     ProposedCall,
     QuestionPart,
+    RecordHome,
     ToolOutcome,
 )
 from ai_assistant.orchestration.authorizer import values_digest
@@ -65,6 +66,7 @@ async def _claimed(
     part: QuestionPart | None = None,
 ) -> None:
     effect = ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=_ACTIVATION,
         round=_ROUND,
@@ -182,7 +184,8 @@ async def test_only_an_episode_the_observer_has_not_settled_is_pending(
     plans = FakePlanStore(now=lambda: _AT)
     await _claimed(plans, _digest(**_arguments()), ToolOutcome.SUCCEEDED)
     await plans.write_observation(
-        ObservationRecord(episode=_EPISODE, state=state), expected_revision=0
+        ObservationRecord(home=RecordHome.owners(), episode=_EPISODE, state=state),
+        expected_revision=0,
     )
 
     found = await pending_candidates(

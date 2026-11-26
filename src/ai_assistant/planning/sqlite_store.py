@@ -16,6 +16,16 @@ data rights over all three. The goal, plan, execution, attempt, question, eviden
 goal-effect tables retired with the old path (ADR-0309 §5), and so did their
 migrations: a file written before ADR-0309 §6:1's deploy is refused. A file the store
 has written since is upgraded in place when it opens (ADR-0326 §4, §5:1).
+
+**Each effect record and each observation record carries its home** (ADR-0383 §3,
+ADR-0386 §5), in its blob and as both its kind and its identifier in two columns of its
+own row (``home_kind``, ``home_id``), so a read can be narrowed by it inside this store's
+own query; every read reconciles the two with the blob. A finish and a confirmation
+rewrite the blob from the record held, so the home stays as it was (ADR-0383 §4:6). A
+home :func:`~ai_assistant.core.types.home_may_be_written` does not allow is refused with
+``PlanningError`` before any I/O, by every member that writes either record (ADR-0386
+§6). Scheduled tasks and approval requests read their ``person`` as their home and gain
+none, and a stop record carries none (ADR-0383 §3).
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ from ai_assistant.core.types import (
     ApprovalWriteAnswer,
     ObservationRecord,
     PlanExport,
+    RecordHome,
     ScheduledTask,
     ScheduledTaskAuthor,
     ScheduledTaskWrite,
@@ -289,13 +300,37 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: request's person's, since ADR-0361 §4:8 carried out a tap from no one else, at no
 #: recorded level (ADR-0377 §4:3). A build reading 20 refuses the fields as extra, so it
 #: must refuse a file at 21 (ADR-0326 §5:3).
-_SCHEMA_VERSION = 21
+#:
+#: **Version 22 is ADR-0383 §3's and ADR-0386 §5's**: each effect record and each
+#: observation record carries its home, in its blob and in two columns of its row,
+#: ``home_kind`` and ``home_id``, which the open adds to a file that lacks them. **A
+#: version 21 file is upgraded in place** (ADR-0326 §4:1) by writing the owner's domain
+#: into every effect and every observation record it holds, blob and columns
+#: (:meth:`SqlitePlanStore._record_homes`), whatever the works that wrote them were for
+#: (ADR-0383 §5:1). No task, request or stop record changes. A build reading 21 refuses
+#: the field as extra, so it must refuse a file at 22 (ADR-0326 §5:3).
+_SCHEMA_VERSION = 22
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18, 19, 20)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
+
+#: The last label whose effect and observation records carry no home: a file at it or
+#: below has the home columns added and the owner's domain written into every such
+#: record by the open (ADR-0383 §5:1).
+_LAST_HOMELESS_LABEL = 21
+
+#: ADR-0383 §2:2's two columns, a home's kind and its identifier, on the
+#: ``activation_effects`` and the ``observations`` table (ADR-0386 §5). Nullable, as
+#: SQLite adds a column only so; a row whose columns do not name the home its blob holds
+#: is refused as damage on every read.
+_HOME_COLUMNS: Final = ("home_kind TEXT", "home_id TEXT")
+
+#: The tables whose records carry a home, and nothing else this store keeps (ADR-0383
+#: §3: a task's and a request's ``person`` is theirs, and a stop record carries none).
+_HOMED_TABLES: Final = ("activation_effects", "observations")
 
 #: The last label whose requests' answers record no tapper: a file at it or below has
 #: each answered request's blob given one by the open (ADR-0377 §4:1, §4:3).
@@ -348,17 +383,20 @@ _RECORD_SCHEMA = (
     # decision, neither of which this store holds. `part_round` and `part_number` are the
     # question part a call under an approval spends (ADR-0321 §4:9), NULL on every other
     # record, because the claim and `part_effects` select on them across activations.
+    # `home_kind` and `home_id` are its home (ADR-0383 §2:2, ADR-0386 §5:1), last so that a
+    # file the upgrade past 21 gave them holds them in the same place.
     "CREATE TABLE IF NOT EXISTS activation_effects("
     "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
-    "data TEXT NOT NULL, part_round TEXT, part_number INTEGER)",
+    "data TEXT NOT NULL, part_round TEXT, part_number INTEGER, home_kind TEXT, home_id TEXT)",
     # ADR-0329 §16's observation records, one per episode. The record is the blob;
     # `revision` is promoted because the conditional write compares it, and
     # `last_call_us` — the latest model call the record holds, in microseconds since the
     # epoch, NULL where it made none — because the budget's count selects on it rather
-    # than decoding every record. Both are reconciled with the blob on every read.
+    # than decoding every record. Both are reconciled with the blob on every read, and so
+    # are `home_kind` and `home_id`, its home (ADR-0386 §5:2), last for the reason above.
     "CREATE TABLE IF NOT EXISTS observations("
     "episode_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, last_call_us INTEGER, "
-    "data TEXT NOT NULL)",
+    "data TEXT NOT NULL, home_kind TEXT, home_id TEXT)",
     # ADR-0350 §12:3's scheduled tasks. The record is the blob; `person` and `parent` are
     # promoted because they name whom the task is for and what spawned it, and
     # `written_seq` because every read answers in the order the tasks were written. Each
@@ -390,7 +428,7 @@ _RECORD_SCHEMA = (
 #: compatible and must not be refused.
 #: The columns every read of an effect record selects, in the order
 #: :func:`_checked_activation_effect` reconciles them with the record.
-_EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number"
+_EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number, home_kind, home_id"
 
 #: The rows carrying any of ``{keys}``'s question parts, in claim order: matched by the
 #: promoted columns **or** by the record itself, so a row whose columns an outside
@@ -417,12 +455,16 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "data": ("TEXT", True),
         "part_round": ("TEXT", False),
         "part_number": ("INTEGER", False),
+        "home_kind": ("TEXT", False),
+        "home_id": ("TEXT", False),
     },
     "observations": {
         "episode_id": ("TEXT", False),
         "revision": ("INTEGER", True),
         "last_call_us": ("INTEGER", False),
         "data": ("TEXT", True),
+        "home_kind": ("TEXT", False),
+        "home_id": ("TEXT", False),
     },
     "scheduled_tasks": {
         "id": ("TEXT", False),
@@ -449,7 +491,7 @@ _REQUEST_COLUMNS = "id, person, data"
 
 #: The columns every read of an observation record selects, in the order
 #: :func:`_checked_observation` reconciles them with the record.
-_OBSERVATION_COLUMNS = "episode_id, revision, last_call_us, data"
+_OBSERVATION_COLUMNS = "episode_id, revision, last_call_us, data, home_kind, home_id"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -654,6 +696,8 @@ class SqlitePlanStore:
                 held = self._verify_or_init_meta(conn)
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
+                if held is not None and held <= _LAST_HOMELESS_LABEL:
+                    _add_home_columns(conn)
                 self._verify_record_tables(conn)
                 if held is not None:
                     self._rewrite_upgraded(conn, held)
@@ -694,6 +738,10 @@ class SqlitePlanStore:
         # them, in this transaction.
         if held <= _LAST_CASCADE_LABEL:
             self._retire_cascades(conn)
+        # ADR-0383 §5:1: the upgrade past 21 writes the owner's domain into every effect
+        # and every observation record.
+        if held <= _LAST_HOMELESS_LABEL:
+            self._record_homes(conn)
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -841,6 +889,12 @@ class SqlitePlanStore:
         sure. The step moves the label here, and :meth:`_record_tappers` rewrites each
         answered request's blob once the record tables are verified, in this same
         transaction.
+
+        **21 → 22** (ADR-0383 §5:1, ADR-0386 §5): each effect record and each observation
+        record carries its home. The step moves the label here; the open adds the two home
+        columns to both tables before it verifies them, and :meth:`_record_homes` writes
+        the owner's domain into every such record once they are verified, in this same
+        transaction.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
@@ -877,6 +931,47 @@ class SqlitePlanStore:
                 "UPDATE approval_requests SET data = ? WHERE id = ?",
                 (_encoded_record("approval request", request_id, record), request_id),
             )
+
+    def _record_homes(self, conn: sqlite3.Connection) -> None:
+        """Write the owner's domain into every record a file stored before its home (§5:1).
+
+        Run in the open's transaction, after the record tables are verified, for a file
+        the open upgraded from :data:`_LAST_HOMELESS_LABEL` or below, and before anything
+        reads a record as this build's. Every effect record and every observation record
+        the file holds gains ``home``, the owner's domain, in its blob and in its two
+        columns, whatever the works that wrote them were for: nothing asks the owner
+        anything (ADR-0383 §5:1). Every other byte's value is kept (ADR-0326 §4:4), and no
+        task, request or stop record changes (ADR-0383 §3).
+
+        The rewrite is of the stored JSON, not through this build's model, so a later
+        step's own change to a record meets the blob this step leaves. A row that is not a
+        record as an earlier release wrote one is refused as damage (ADR-0326 §5:1), and
+        the open, with every step it took, is rolled back (§4:3).
+
+        Raises:
+            PlanningError: If a stored record is not a JSON object, or already carries a
+                home.
+        """
+        owners = RecordHome.owners()
+        home = owners.model_dump(mode="json")
+        for table, key, what in (
+            ("activation_effects", "id", "activation effect"),
+            ("observations", "episode_id", "observation record"),
+        ):
+            rows = conn.execute(f"SELECT {key}, data FROM {table}").fetchall()  # noqa: S608 — constants only
+            for row_key, data in rows:
+                record = _homeless_record(what, row_key, data)
+                record["home"] = home
+                conn.execute(
+                    f"UPDATE {table} SET data = ?, home_kind = ?, home_id = ? "  # noqa: S608 — constants only
+                    f"WHERE {key} = ?",
+                    (
+                        _encoded_record(what, row_key, record),
+                        owners.kind.value,
+                        owners.id,
+                        row_key,
+                    ),
+                )
 
     def _record_task_setters(self, conn: sqlite3.Connection) -> None:
         """Give every task a file stored before ADR-0368 §6:3 who set it (§6:1, §6:4).
@@ -1519,11 +1614,18 @@ class SqlitePlanStore:
                 (_OBSERVATION_ISSUER, str(stored.revision)),
             )
             conn.execute(
-                "INSERT INTO observations(episode_id, revision, last_call_us, data) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET "
-                "revision = excluded.revision, last_call_us = excluded.last_call_us, "
-                "data = excluded.data",
-                (stored.episode, stored.revision, _last_call_us(stored), stored.model_dump_json()),
+                "INSERT INTO observations(episode_id, revision, last_call_us, data, "
+                "home_kind, home_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(episode_id) DO "
+                "UPDATE SET revision = excluded.revision, last_call_us = excluded.last_call_us, "
+                "data = excluded.data, home_kind = excluded.home_kind, home_id = excluded.home_id",
+                (
+                    stored.episode,
+                    stored.revision,
+                    _last_call_us(stored),
+                    stored.model_dump_json(),
+                    stored.home.kind.value,
+                    stored.home.id,
+                ),
             )
         return stored
 
@@ -2466,17 +2568,63 @@ def _insert_effect(conn: sqlite3.Connection, record: ActivationEffect) -> None:
     part = record.part
     conn.execute(
         "INSERT INTO activation_effects(id, activation_id, claimed_seq, data, "
-        "part_round, part_number) "
+        "part_round, part_number, home_kind, home_id) "
         "VALUES (?, ?, (SELECT COALESCE(MAX(claimed_seq), 0) + 1 "
-        "FROM activation_effects), ?, ?, ?)",
+        "FROM activation_effects), ?, ?, ?, ?, ?)",
         (
             record.id,
             record.activation_id,
             record.model_dump_json(),
             None if part is None else part.round,
             None if part is None else part.part,
+            record.home.kind.value,
+            record.home.id,
         ),
     )
+
+
+def _add_home_columns(conn: sqlite3.Connection) -> None:
+    """Add :data:`_HOME_COLUMNS` to each table of :data:`_HOMED_TABLES` that lacks them.
+
+    Run in the open's transaction for a file upgraded from :data:`_LAST_HOMELESS_LABEL`
+    or below, after the record tables are created and before they are verified, so a
+    table written before the home gains its two columns, empty until
+    :meth:`SqlitePlanStore._record_homes` fills them. A table the open has just created
+    already holds them.
+    """
+    for table in _HOMED_TABLES:
+        present = {str(row[1]).lower() for row in conn.execute(f"PRAGMA table_info('{table}')")}
+        for column in _HOME_COLUMNS:
+            if column.split(" ")[0] not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+
+
+def _homeless_record(what: str, key: object, data: object) -> dict[str, Any]:
+    """One stored effect's or observation's blob, as a release before its home wrote it.
+
+    Args:
+        what: What the record is, for the message.
+        key: The row's promoted id, for the message.
+        data: The row's blob.
+
+    Returns:
+        The blob as a JSON object.
+
+    Raises:
+        PlanningError: If it is not a JSON object, or already carries a home.
+    """
+    try:
+        record = json.loads(str(data))
+    except ValueError as exc:
+        msg = f"the plan store holds {what} {key!r} as no JSON object: {exc}"
+        raise PlanningError(msg) from exc
+    if not isinstance(record, dict) or "home" in record:
+        msg = (
+            f"the plan store holds {what} {key!r} in no shape a release before label "
+            f"{_LAST_HOMELESS_LABEL + 1} wrote; the store is damaged (ADR-0326 §5:1)"
+        )
+        raise PlanningError(msg)
+    return record
 
 
 def _checked_task(path: str, row: Sequence[Any]) -> ScheduledTask:
@@ -2681,7 +2829,7 @@ def _checked_observation(path: str, row: Sequence[Any]) -> ObservationRecord:
 
     Args:
         path: The store's path, for the message.
-        row: ``(episode_id, revision, last_call_us, data)``.
+        row: ``(episode_id, revision, last_call_us, data, home_kind, home_id)``.
 
     Returns:
         The reconciled record.
@@ -2694,8 +2842,14 @@ def _checked_observation(path: str, row: Sequence[Any]) -> ObservationRecord:
     except ValidationError as exc:
         msg = f"the plan store holds an observation record that no longer validates: {exc}"
         raise PlanningError(msg) from exc
-    promoted = (row[0], row[1], row[2])
-    held = (record.episode, record.revision, _last_call_us(record))
+    promoted = (row[0], row[1], row[2], row[4], row[5])
+    held = (
+        record.episode,
+        record.revision,
+        _last_call_us(record),
+        record.home.kind.value,
+        record.home.id,
+    )
     if promoted != held:
         msg = (
             f"the plan store at {path!r} holds an observation record indexed at {promoted} "
@@ -2810,13 +2964,13 @@ def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:
 def _checked_activation_effect(path: str, row: Sequence[Any]) -> ActivationEffect:
     """Decode one effect record and refuse a blob that disagrees with its columns.
 
-    The id, the activation and the question part are promoted, and the backstop, the
-    spend and the reads select on them, so each is reconciled with the record a
-    tampered file could answer with.
+    The id, the activation, the question part and the home are promoted, and the
+    backstop, the spend and the reads select on the first three, so each is reconciled
+    with the record a tampered file could answer with.
 
     Args:
         path: The store's path, for the message.
-        row: ``(id, activation_id, data, part_round, part_number)``.
+        row: ``(id, activation_id, data, part_round, part_number, home_kind, home_id)``.
 
     Returns:
         The reconciled record.
@@ -2829,13 +2983,15 @@ def _checked_activation_effect(path: str, row: Sequence[Any]) -> ActivationEffec
     except ValidationError as exc:
         msg = f"the plan store holds an activation effect that no longer validates: {exc}"
         raise PlanningError(msg) from exc
-    promoted = (str(row[0]), str(row[1]), row[3], row[4])
+    promoted = (str(row[0]), str(row[1]), row[3], row[4], row[5], row[6])
     part = record.part
     held = (
         record.id,
         record.activation_id,
         None if part is None else part.round,
         None if part is None else part.part,
+        record.home.kind.value,
+        record.home.id,
     )
     if promoted != held:
         msg = (

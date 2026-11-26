@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     OccurrencePush,
     OccurrenceState,
     QuestionPart,
+    RecordHome,
     ScheduledTaskAuthor,
     Sureness,
     TaskSpawn,
@@ -553,7 +554,8 @@ async def test_a_row_two_slices_of_a_read_by_part_find_is_answered_once(
         raw.execute(
             "CREATE TABLE activation_effects("
             "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
-            "data TEXT NOT NULL, part_round TEXT COLLATE NOCASE, part_number INTEGER)"
+            "data TEXT NOT NULL, part_round TEXT COLLATE NOCASE, part_number INTEGER, "
+            "home_kind TEXT, home_id TEXT)"
         )
         raw.execute("DROP TABLE held")
     lower = QuestionPart(round="q-round", part=1)
@@ -687,23 +689,24 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_21_and_holds_only_its_five_tables(
+async def test_a_fresh_file_is_labelled_version_22_and_holds_only_its_five_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0377 §4:1).
+    """The absolute figure's home, and the shape it labels (ADR-0383 §3, ADR-0386 §5).
 
-    Version 21 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    Version 22 is the store ADR-0309 §5 leaves, its effect records carrying the question
     part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 and ADR-0346
     add, the Task Scheduler's scheduled tasks ADR-0350 adds, less the cascade records
     ADR-0352 retires, and the approval requests ADR-0361 adds: five record tables beside
     ``meta``, and no table of the old path; each task records who set it (ADR-0368 §6:3),
-    and each answer who tapped and how sure (ADR-0377 §4:1).
+    each answer who tapped and how sure (ADR-0377 §4:1), and each effect and observation
+    record its home, in its blob and its row's two columns (ADR-0386 §5).
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 21
-    assert _meta(path, "schema_version") == "21"
+    assert sqlite_store._SCHEMA_VERSION == 22
+    assert _meta(path, "schema_version") == "22"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
@@ -993,7 +996,8 @@ def _hand_built_table(path: Path, table: str, body: str) -> None:
         pytest.param(
             "activation_effects",
             "id TEXT, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
-            "data TEXT NOT NULL, part_round TEXT, part_number INTEGER",
+            "data TEXT NOT NULL, part_round TEXT, part_number INTEGER, home_kind TEXT, "
+            "home_id TEXT",
             "no PRIMARY KEY",
             id="effects-without-a-primary-key-admit-a-second-record-of-one-id",
         ),
@@ -1001,7 +1005,7 @@ def _hand_built_table(path: Path, table: str, body: str) -> None:
             "activation_effects",
             "id TEXT PRIMARY KEY COLLATE NOCASE, activation_id TEXT NOT NULL, "
             "claimed_seq INTEGER NOT NULL, data TEXT NOT NULL, part_round TEXT, "
-            "part_number INTEGER",
+            "part_number INTEGER, home_kind TEXT, home_id TEXT",
             "NOCASE-collated id PRIMARY KEY",
             id="case-insensitive-primary-key-folds-distinct-ids",
         ),
@@ -1027,9 +1031,24 @@ def _hand_built_table(path: Path, table: str, body: str) -> None:
         ),
         pytest.param(
             "observations",
-            "episode_id TEXT, revision INTEGER NOT NULL, last_call_us INTEGER, data TEXT NOT NULL",
+            "episode_id TEXT, revision INTEGER NOT NULL, last_call_us INTEGER, data TEXT NOT NULL, "
+            "home_kind TEXT, home_id TEXT",
             "no PRIMARY KEY",
             id="observations-without-a-key-admit-two-records-of-one-episode",
+        ),
+        pytest.param(
+            "activation_effects",
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+            "data TEXT NOT NULL, part_round TEXT, part_number INTEGER, home_kind TEXT",
+            "home_id column is absent",
+            id="an-effects-table-without-its-home-cannot-be-narrowed-by-it",
+        ),
+        pytest.param(
+            "observations",
+            "episode_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, last_call_us INTEGER, "
+            "data TEXT NOT NULL, home_kind INTEGER, home_id TEXT",
+            "home_kind column has INTEGER affinity",
+            id="a-home-kind-not-text-compares-a-kind-as-a-number",
         ),
     ],
 )
@@ -1069,7 +1088,7 @@ async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) 
         raw.execute(
             "CREATE TABLE ACTIVATION_EFFECTS(ID TEXT PRIMARY KEY, ACTIVATION_ID TEXT NOT NULL, "
             "CLAIMED_SEQ INTEGER NOT NULL, DATA TEXT NOT NULL, PART_ROUND TEXT, "
-            "PART_NUMBER INTEGER)"
+            "PART_NUMBER INTEGER, HOME_KIND TEXT, HOME_ID TEXT)"
         )
         raw.commit()
     finally:
@@ -1523,6 +1542,7 @@ async def test_a_stop_table_without_its_key_is_refused_at_open(tmp_path: Path) -
 def _acted(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
     """A call's effect record as acting claims it, with no outcome."""
     return ActivationEffect(
+        home=RecordHome.owners(),
         id=effect_id,
         activation_id=activation,
         round="r1",
@@ -1650,6 +1670,7 @@ async def test_a_spent_part_survives_a_restart(tmp_path: Path) -> None:
 def _observed(episode: str = "activation:act-1", *, at: datetime = _AT) -> ObservationRecord:
     """A waiting record whose one attempt made a scout call at ``at`` and then failed."""
     return ObservationRecord(
+        home=RecordHome.owners(),
         episode=episode,
         state=ObservationState.WAITING,
         attempts=(
@@ -1732,6 +1753,109 @@ async def test_an_observation_whose_columns_disagree_with_its_record_is_refused(
             await store.observations(["activation:act-1", "activation:other"])
     finally:
         store.close()
+
+
+# --- each effect's and observation's home (ADR-0383 §2:2, ADR-0386 §5) -------------
+
+
+def _homes(path: Path) -> dict[str, tuple[Any, Any]]:
+    """Each effect's and observation's two home columns, by its key, read out of band."""
+    with sqlite3.connect(path) as conn:
+        return {
+            str(key): (kind, home_id)
+            for query in (
+                "SELECT id, home_kind, home_id FROM activation_effects",
+                "SELECT episode_id, home_kind, home_id FROM observations",
+            )
+            for key, kind, home_id in conn.execute(query)
+        }
+
+
+async def test_each_record_keeps_its_home_as_its_kind_and_its_identifier(
+    tmp_path: Path,
+) -> None:
+    """§2:2: the home is in two columns of the row, where the store's own query can
+    narrow by it, and a finish leaves them as they were (§4:6)."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.claim_activation_effect(
+            _acted("e2").model_copy(update={"home": RecordHome.shared()}), match=None
+        )
+        await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
+        first = await store.write_observation(
+            _observed().model_copy(update={"home": RecordHome.shared()}), expected_revision=0
+        )
+        await store.write_observation(_observed(), expected_revision=first.revision)
+    finally:
+        store.close()
+
+    assert _homes(path) == {
+        "e1": ("person", "person:owner"),
+        "e2": ("shared", None),
+        "activation:act-1": ("person", "person:owner"),
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE activation_effects SET home_kind = 'shared', home_id = NULL",
+        "UPDATE activation_effects SET home_id = 'person:sam'",
+        "UPDATE activation_effects SET home_kind = NULL, home_id = NULL",
+        "UPDATE observations SET home_kind = 'group'",
+        "UPDATE observations SET home_kind = NULL, home_id = NULL",
+    ],
+    ids=[
+        "an-effect-indexed-shared",
+        "an-effect-indexed-anothers",
+        "an-effects-home-erased",
+        "an-observation-indexed-a-groups",
+        "an-observations-home-erased",
+    ],
+)
+async def test_a_record_whose_home_columns_disagree_with_it_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """A home column an outside writer changed is corruption, refused on every read that
+    decodes the record, since a later lane narrows reads by those columns."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.write_observation(_observed(), expected_revision=0)
+        with sqlite3.connect(path) as conn:
+            conn.execute(tamper)
+        with pytest.raises(PlanningError, match="the store is corrupt"):
+            await store.export()
+    finally:
+        store.close()
+
+
+async def test_a_refused_home_writes_nothing_to_the_file(tmp_path: Path) -> None:
+    """ADR-0386 §6: refused before any I/O, so no row and no issued revision moves."""
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+    with sqlite3.connect(path) as conn:
+        before = conn.execute("SELECT * FROM meta ORDER BY key").fetchall()
+    sams = RecordHome.person("person:sam")
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="no write may carry"):
+            await store.claim_activation_effect(
+                _acted("e1").model_copy(update={"home": sams}), match=None
+            )
+        with pytest.raises(PlanningError, match="no write may carry"):
+            await store.write_observation(
+                _observed().model_copy(update={"home": sams}), expected_revision=0
+            )
+    finally:
+        store.close()
+
+    assert _homes(path) == {}
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT * FROM meta ORDER BY key").fetchall() == before
 
 
 async def test_the_budget_decodes_only_the_records_with_a_call_since(tmp_path: Path) -> None:
