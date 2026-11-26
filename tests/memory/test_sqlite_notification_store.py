@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import (
@@ -270,7 +271,9 @@ async def test_the_longest_persistable_retention_round_trips(tmp_path: Path) -> 
         retention=_MAX_RETENTION,
     )
     try:
-        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        ruling = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
         assert ruling.notification_id is not None
 
         record = await store.get(ruling.notification_id)
@@ -309,7 +312,9 @@ async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
         retention=_MAX_RETENTION,
     )
     try:
-        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        ruling = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
         assert ruling.notification_id is not None
         assert await store.dismiss(ruling.notification_id) is True
         held = await store.get(ruling.notification_id)
@@ -340,7 +345,9 @@ async def test_a_record_survives_a_reopen(tmp_path: Path) -> None:
     """Durability is the whole point of this backend over the fake."""
     path = tmp_path / "notifications.db"
     first = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
-    ruling = await first.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+    ruling = await first.admit(
+        candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
     first.close()
     assert ruling.notification_id is not None
 
@@ -373,14 +380,16 @@ async def test_a_spent_unit_of_budget_survives_a_reopen(tmp_path: Path) -> None:
             interruption_budget=1,
         )
     )
-    assert (await first.admit(_perishable("k1"), policy=policy)).kind is (
+    assert (await first.admit(_perishable("k1"), home=RecordHome.owners(), policy=policy)).kind is (
         NotificationDispositionKind.INTERRUPT
     )
     first.close()
 
     second = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     try:
-        second_ruling = await second.admit(_perishable("k2"), policy=policy)
+        second_ruling = await second.admit(
+            _perishable("k2"), home=RecordHome.owners(), policy=policy
+        )
     finally:
         second.close()
 
@@ -402,12 +411,16 @@ async def test_a_spend_outside_the_window_is_swept_from_the_ledger(
     policy = DefaultNotificationPolicy()
     try:
         await store.set_preferences(_interrupting())
-        await store.admit(_perishable("k1"), policy=policy)
+        await store.admit(_perishable("k1"), home=RecordHome.owners(), policy=policy)
         clock.advance(timedelta(days=2))
 
         # Still perishable at the advanced clock, so this ruling spends a unit
         # while the first one's has fallen out of the rolling window.
-        await store.admit(candidate(key="k2", expires_at=NOW + timedelta(days=5)), policy=policy)
+        await store.admit(
+            candidate(key="k2", expires_at=NOW + timedelta(days=5)),
+            home=RecordHome.owners(),
+            policy=policy,
+        )
 
         rows = store._conn.execute("SELECT COUNT(*) FROM notification_interruptions").fetchone()
     finally:
@@ -453,10 +466,10 @@ async def test_a_budget_window_at_the_edge_of_the_range_still_rules(
                 budget_window=window,
             )
         )
-        first = await store.admit(_perishable("k1"), policy=policy)
+        first = await store.admit(_perishable("k1"), home=RecordHome.owners(), policy=policy)
         assert first.kind is NotificationDispositionKind.INTERRUPT
 
-        second = await store.admit(_perishable("k2"), policy=policy)
+        second = await store.admit(_perishable("k2"), home=RecordHome.owners(), policy=policy)
 
         assert second.kind is NotificationDispositionKind.HOLD
         assert second.reason is NotificationCondition.BUDGET
@@ -476,7 +489,9 @@ async def test_the_preferences_survive_a_clear(tmp_path: Path) -> None:
     )
     try:
         await store.set_preferences(_interrupting())
-        await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
 
         assert await store.clear() == 1
 
@@ -495,7 +510,9 @@ async def test_a_corrupt_row_is_reported_as_this_stores_error(tmp_path: Path) ->
         traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
     )
     try:
-        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        ruling = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
         assert ruling.notification_id is not None
         store._conn.execute(
             "UPDATE notifications SET kind = 'shouted' WHERE id = ?", (ruling.notification_id,)
@@ -513,7 +530,9 @@ async def test_a_corrupt_failed_set_is_reported_as_this_stores_error(tmp_path: P
         traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
     )
     try:
-        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        ruling = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
         assert ruling.notification_id is not None
         store._conn.execute(
             "UPDATE notifications SET failed = '{' WHERE id = ?", (ruling.notification_id,)
@@ -586,9 +605,13 @@ async def test_a_bad_clock_reaching_a_ruling_rolls_back_and_leaves_the_store_usa
     )
     try:
         with pytest.raises(NotificationStoreError):
-            await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+            await store.admit(
+                candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+            )
 
-        recovered = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        recovered = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
 
         assert recovered.notification_id is not None
         assert len(await store.export()) == 1
@@ -614,10 +637,10 @@ async def test_an_id_source_returning_a_present_id_raises_and_commits_nothing(
     policy = DefaultNotificationPolicy()
     try:
         await store.set_preferences(_interrupting())
-        await store.admit(_perishable("k1"), policy=policy)
+        await store.admit(_perishable("k1"), home=RecordHome.owners(), policy=policy)
 
         with pytest.raises(NotificationStoreError, match="already holds"):
-            await store.admit(_perishable("k2"), policy=policy)
+            await store.admit(_perishable("k2"), home=RecordHome.owners(), policy=policy)
 
         assert len(await store.export()) == 1
         # The failed admission left no unit behind it either: the ledger still
@@ -638,7 +661,9 @@ async def test_a_blank_id_source_raises_before_anything_is_written(tmp_path: Pat
     )
     try:
         with pytest.raises(NotificationStoreError, match="not an identifier"):
-            await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+            await store.admit(
+                candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+            )
 
         assert await store.export() == []
     finally:
@@ -668,7 +693,7 @@ async def test_the_ruling_runs_inside_one_write_transaction(tmp_path: Path) -> N
             return await inner.rule(subject, **facts)
 
     try:
-        await store.admit(candidate(key="k1"), policy=Observing())  # type: ignore[arg-type]
+        await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=Observing())  # type: ignore[arg-type]
     finally:
         store.close()
 
@@ -695,11 +720,13 @@ async def test_a_policy_that_raises_leaves_the_store_untouched(tmp_path: Path) -
 
     try:
         with pytest.raises(RuntimeError, match="no"):
-            await store.admit(candidate(key="k1"), policy=Exploding())  # type: ignore[arg-type]
+            await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=Exploding())  # type: ignore[arg-type]
 
         assert await store.export() == []
         assert (
-            await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+            await store.admit(
+                candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+            )
         ).notification_id is not None
     finally:
         store.close()
@@ -743,7 +770,9 @@ async def test_a_cancellation_landing_on_the_begin_leaves_no_transaction_open(
     store._begin_sync = blocking  # type: ignore[method-assign]
     try:
         parked = asyncio.create_task(
-            store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+            store.admit(
+                candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+            )
         )
         await suspension.reached()
         parked.cancel()
@@ -752,7 +781,9 @@ async def test_a_cancellation_landing_on_the_begin_leaves_no_transaction_open(
             await parked
 
         assert store._conn.in_transaction is False
-        recovered = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        recovered = await store.admit(
+            candidate(key="k1"), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
 
         assert recovered.notification_id is not None
         assert len(await store.export()) == 1
@@ -842,8 +873,8 @@ async def test_two_concurrent_offers_serialise_on_this_backend(tmp_path: Path) -
     policy = DefaultNotificationPolicy()
     try:
         rulings = await asyncio.gather(
-            store.admit(candidate(key="k1"), policy=policy),
-            store.admit(candidate(key="k2"), policy=policy),
+            store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy),
+            store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy),
         )
 
         kinds = [ruling.kind for ruling in rulings]
@@ -875,7 +906,9 @@ async def test_a_quiet_window_is_read_in_the_configured_zone(tmp_path: Path) -> 
         )
 
         ruling = await store.admit(
-            _perishable("k1"), policy=DefaultNotificationPolicy(timezone="Pacific/Kiritimati")
+            _perishable("k1"),
+            home=RecordHome.owners(),
+            policy=DefaultNotificationPolicy(timezone="Pacific/Kiritimati"),
         )
 
         assert ruling.kind is NotificationDispositionKind.HOLD
@@ -932,6 +965,7 @@ async def test_a_window_ending_inside_a_spring_gap_resolves_to_the_transition(
 
         ruling = await store.admit(
             candidate(key="k1", noticed_at=inside, expires_at=inside + timedelta(days=1)),
+            home=RecordHome.owners(),
             policy=DefaultNotificationPolicy(timezone="America/New_York"),
         )
 
@@ -1057,7 +1091,9 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
         # The older record, admitted and dismissed the way ADR-0130 §8 left the key
         # free. Its declared expiry is moved out below, to the `late` horizon.
         early = NOW + timedelta(hours=1)
-        older = await store.admit(candidate(key="k1", expires_at=early), policy=policy)
+        older = await store.admit(
+            candidate(key="k1", expires_at=early), home=RecordHome.owners(), policy=policy
+        )
         assert older.notification_id is not None
         assert await store.dismiss(older.notification_id) is True
 
@@ -1067,6 +1103,7 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
         clock.at = early
         younger = await store.admit(
             candidate(key="k1", expires_at=early + timedelta(hours=1), noticed_at=early),
+            home=RecordHome.owners(),
             policy=policy,
         )
         assert younger.notification_id is not None
@@ -1086,6 +1123,7 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
 
         offered = await store.admit(
             candidate(key="k1", expires_at=late + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
 

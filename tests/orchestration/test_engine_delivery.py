@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
 )
 from ai_assistant.orchestration.engine import _DEFAULT_MAX_NOTIFICATION_BUDGET, Engine
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
@@ -990,6 +991,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
         subject = _candidate()
         ruled = await store.admit(
             subject.model_copy(update={"expires_at": NOW + timedelta(hours=2)}),
+            home=RecordHome.owners(),
             policy=FakeNotificationPolicy(),
         )
         assert ruled.notification_id is not None
@@ -1021,7 +1023,9 @@ class TestForgettingWithdrawsBeforeItDeletes:
             )
         )
         subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
-        ruled = await store.admit(subject, policy=FakeNotificationPolicy())
+        ruled = await store.admit(
+            subject, home=RecordHome.owners(), policy=FakeNotificationPolicy()
+        )
         assert ruled.notification_id is not None
         outbox = FakeNotificationOutbox(records=store, now=lambda: NOW)
         await outbox.offer(subject)
@@ -1066,7 +1070,9 @@ class TestReconsiderationHandsOffAtOnce:
         """
         store = _records()
         subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
-        ruled = await store.admit(subject, policy=FakeNotificationPolicy())
+        ruled = await store.admit(
+            subject, home=RecordHome.owners(), policy=FakeNotificationPolicy()
+        )
         assert ruled.kind is not None
         outbox = RecordingOutbox()
         engine = _wired(
@@ -1095,7 +1101,7 @@ class TestReconsiderationHandsOffAtOnce:
         """
         store = _records()
         subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
-        await store.admit(subject, policy=FakeNotificationPolicy())
+        await store.admit(subject, home=RecordHome.owners(), policy=FakeNotificationPolicy())
         outbox = RecordingOutbox()
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
@@ -1186,7 +1192,9 @@ class TestTheFakeEngineDisposesLikeTheRealOne:
         subject = _candidate().model_copy(
             update={"expires_at": datetime.now(UTC) + timedelta(hours=2)}
         )
-        ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
+        ruled = await engine.notification_store.admit(
+            subject, home=RecordHome.owners(), policy=FakeNotificationPolicy()
+        )
         assert ruled.notification_id is not None
         await engine.notification_outbox.offer(subject)
 
@@ -1205,7 +1213,9 @@ class TestTheFakeEngineDisposesLikeTheRealOne:
         subject = _candidate().model_copy(
             update={"expires_at": datetime.now(UTC) + timedelta(hours=2)}
         )
-        ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
+        ruled = await engine.notification_store.admit(
+            subject, home=RecordHome.owners(), policy=FakeNotificationPolicy()
+        )
         assert ruled.notification_id is not None
         await engine.notification_outbox.offer(subject)
 

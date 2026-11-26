@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     NotificationCandidate,
     NotificationCondition,
     NotificationDispositionKind,
+    RecordHome,
 )
 from ai_assistant.testing import FakeNotificationPolicy, FakeNotificationStore
 
@@ -117,14 +118,18 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
 
     # The older record, admitted and dismissed the way ADR-0130 §8 left the key free.
     early = _NOW + timedelta(hours=1)
-    older = await store.admit(_candidate(expires_at=early, noticed_at=_NOW), policy=policy)
+    older = await store.admit(
+        _candidate(expires_at=early, noticed_at=_NOW), home=RecordHome.owners(), policy=policy
+    )
     assert older.notification_id is not None
     assert await store.dismiss(older.notification_id) is True
 
     # The younger record, admitted for the same key once the older stopped speaking.
     clock.at = early
     younger = await store.admit(
-        _candidate(expires_at=early + timedelta(hours=1), noticed_at=early), policy=policy
+        _candidate(expires_at=early + timedelta(hours=1), noticed_at=early),
+        home=RecordHome.owners(),
+        policy=policy,
     )
     assert younger.notification_id is not None
     assert younger.kind is not NotificationDispositionKind.DROP
@@ -146,7 +151,9 @@ async def test_a_legacy_overlap_suppresses_through_the_more_recently_admitted_re
     assert held[older.notification_id].speaks_for_its_key_at(clock.at) is True
 
     offered = await store.admit(
-        _candidate(expires_at=late + timedelta(hours=1), noticed_at=clock.at), policy=policy
+        _candidate(expires_at=late + timedelta(hours=1), noticed_at=clock.at),
+        home=RecordHome.owners(),
+        policy=policy,
     )
 
     # A lookup narrowed to the most recently admitted record would admit this.

@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
     TraceKind,
     TraceLabel,
     TraceOutcome,
@@ -183,7 +184,7 @@ async def test_an_admission_records_one_trace_at_its_own_seam(
     """§3: one crossing of ``admit``, one ``NOTIFICATION`` trace, one seam label."""
     store = make_store()
 
-    await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     trace = _only(sink)
     assert trace.kind is TraceKind.NOTIFICATION
@@ -202,7 +203,7 @@ async def test_a_ruling_carries_all_three_disposition_keys(
     """
     store = make_store()
 
-    await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     metrics = _only(sink).metrics
     assert {key: metrics[key] for key in DISPOSITION_METRICS.values()} == {
@@ -225,7 +226,9 @@ async def test_a_ruling_that_dropped_carries_the_drop_conditions_and_no_interrup
     store = make_store()
     await store.set_preferences(reaching("calendar", NotificationReach.OFF))
 
-    ruling = await store.admit(_perishable(), policy=DefaultNotificationPolicy())
+    ruling = await store.admit(
+        _perishable(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
 
     assert ruling.kind is NotificationDispositionKind.DROP
     trace = _only(sink)
@@ -250,7 +253,9 @@ async def test_a_hold_carries_a_zero_for_each_condition_that_failed_and_a_one_fo
     store = make_store()
 
     # No expiry and the default reach: two conditions fail, two hold.
-    ruling = await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    ruling = await store.admit(
+        candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
 
     assert ruling.failed == (
         NotificationCondition.PERISHABLE,
@@ -270,7 +275,9 @@ async def test_an_interrupt_carries_a_one_for_every_interrupt_condition(
     store = make_store()
     await store.set_preferences(_interrupting())
 
-    ruling = await store.admit(_perishable(), policy=DefaultNotificationPolicy())
+    ruling = await store.admit(
+        _perishable(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
 
     assert ruling.kind is NotificationDispositionKind.INTERRUPT
     trace = _only(sink)
@@ -293,7 +300,7 @@ async def test_a_candidate_declaring_no_expiry_carries_zero_for_both_expiry_cond
     """
     store = make_store()
 
-    await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     trace = _only(sink)
     assert _condition(trace, NotificationCondition.EXPIRED) == 0
@@ -313,7 +320,9 @@ async def test_an_expired_candidate_carries_the_expired_condition(
     store = make_store(now=MutableClock(NOW + timedelta(hours=2)))
 
     ruling = await store.admit(
-        candidate(expires_at=NOW + timedelta(hours=1)), policy=DefaultNotificationPolicy()
+        candidate(expires_at=NOW + timedelta(hours=1)),
+        home=RecordHome.owners(),
+        policy=DefaultNotificationPolicy(),
     )
 
     assert ruling.reason is NotificationCondition.EXPIRED
@@ -333,9 +342,9 @@ async def test_the_duplicate_and_at_cap_conditions_are_the_booleans_the_store_ha
     store = make_store(cap=1)
     policy = DefaultNotificationPolicy()
 
-    await store.admit(candidate(key="k1"), policy=policy)
-    await store.admit(candidate(key="k1"), policy=policy)
-    await store.admit(candidate(key="k2"), policy=policy)
+    await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+    await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+    await store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy)
 
     held, duplicate, at_cap = sink.recorded
     assert _condition(held, NotificationCondition.DUPLICATE) == 0
@@ -351,7 +360,9 @@ async def _held_behind_a_quiet_window(
 ) -> NotificationDisposition:
     """Admit a candidate that would interrupt but for the window covering ``NOW``."""
     await store.set_preferences(_interrupting(quiet=True))
-    ruling = await store.admit(_perishable(), policy=DefaultNotificationPolicy())
+    ruling = await store.admit(
+        _perishable(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
     assert ruling.kind is NotificationDispositionKind.HOLD
     assert ruling.reason is NotificationCondition.QUIET_WINDOW
     clock.advance(timedelta(hours=1))  # past the window's 13:00 end
@@ -456,7 +467,9 @@ async def test_the_instant_is_the_ruling_and_never_the_emission(
     readings = iter([NOW, NOW + timedelta(hours=1)])
 
     store = make_store(now=lambda: next(readings))
-    ruling = await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    ruling = await store.admit(
+        candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+    )
 
     assert ruling.ruled_at == NOW
     assert _only(sink).occurred_at == NOW
@@ -480,7 +493,7 @@ async def test_a_crossing_that_raised_carries_its_fault_and_none_of_the_metric_k
 
     store = make_store()
     with pytest.raises(RuntimeError):
-        await store.admit(candidate(), policy=_RaisingPolicy())
+        await store.admit(candidate(), home=RecordHome.owners(), policy=_RaisingPolicy())
 
     trace = _only(sink)
     assert trace.outcome is TraceOutcome.FAULT
@@ -510,7 +523,7 @@ async def test_a_refusal_is_classified_by_the_package_s_own_tuple(
 
     store = make_store()
     with pytest.raises(UnresolvedEvidenceError):
-        await store.admit(candidate(), policy=_RefusingPolicy())
+        await store.admit(candidate(), home=RecordHome.owners(), policy=_RefusingPolicy())
 
     trace = _only(sink)
     assert trace.outcome is TraceOutcome.REFUSED
@@ -538,7 +551,9 @@ async def test_a_disposition_the_transaction_rolled_back_carries_no_metric_key(
 
     store._write = raising  # type: ignore[method-assign]
     with pytest.raises(NotificationStoreError):
-        await store.admit(_perishable(), policy=DefaultNotificationPolicy())
+        await store.admit(
+            _perishable(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
 
     trace = _only(sink)
     assert trace.outcome is TraceOutcome.FAULT
@@ -650,7 +665,7 @@ async def test_a_crossing_that_obtained_no_reading_emits_nothing_and_is_logged(
     store = make_store(now=naive if mode == "refused-reading" else raising)
 
     with structlog.testing.capture_logs() as captured, pytest.raises(expected):
-        await store.admit(candidate(), policy=DefaultNotificationPolicy())
+        await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     assert sink.recorded == ()
     assert [record["event"] for record in captured] == [traces.TRACE_NOT_RECORDED]
@@ -732,7 +747,9 @@ async def test_a_cancellation_writes_neither_a_trace_nor_a_lost_trace_record(
 
     store = make_store()
     with structlog.testing.capture_logs() as captured:
-        parked = asyncio.create_task(store.admit(candidate(), policy=_ParkingPolicy()))
+        parked = asyncio.create_task(
+            store.admit(candidate(), home=RecordHome.owners(), policy=_ParkingPolicy())
+        )
         await reached.wait()
         parked.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -763,7 +780,9 @@ async def test_a_sink_that_raises_costs_the_trace_and_never_the_ruling(
     )
     try:
         with structlog.testing.capture_logs() as captured:
-            ruling = await store.admit(candidate(), policy=DefaultNotificationPolicy())
+            ruling = await store.admit(
+                candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+            )
 
         assert ruling.kind is NotificationDispositionKind.HOLD
         assert len(await store.held()) == 1
@@ -799,7 +818,9 @@ async def test_a_reading_that_raises_costs_the_trace_and_never_the_ruling(
     store = make_store()
 
     with structlog.testing.capture_logs() as captured:
-        ruling = await store.admit(candidate(), policy=DefaultNotificationPolicy())
+        ruling = await store.admit(
+            candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy()
+        )
 
     assert ruling.kind is NotificationDispositionKind.HOLD
     assert len(await store.held()) == 1
@@ -814,7 +835,7 @@ async def test_the_correlation_is_carried_where_there_is_one(
     store = make_store()
 
     with correlated_operation() as correlation:
-        await store.admit(candidate(), policy=DefaultNotificationPolicy())
+        await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     assert _only(sink).refs[TraceRef.CORRELATION] == correlation
 
@@ -843,7 +864,7 @@ async def test_a_ruling_outside_an_operation_omits_the_reference_rather_than_inv
     """
     store = make_store()
 
-    await store.admit(candidate(), policy=DefaultNotificationPolicy())
+    await store.admit(candidate(), home=RecordHome.owners(), policy=DefaultNotificationPolicy())
 
     assert _only(sink).refs == {}
 
@@ -861,6 +882,7 @@ async def test_nothing_about_the_notification_travels(
 
     ruling = await store.admit(
         candidate(key="a-candidate-key", notification_class="calendar"),
+        home=RecordHome.owners(),
         policy=DefaultNotificationPolicy(),
     )
 

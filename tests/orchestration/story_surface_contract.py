@@ -146,6 +146,22 @@ class StorySurfaceContract:
         """Override: an implementation at ``STORY_LIMIT`` over a seedable memory store."""
         raise NotImplementedError
 
+    async def test_a_story_the_owner_creates_or_splits_off_is_in_the_owners_domain(
+        self, story_surface: StorySurfaceSubject
+    ) -> None:
+        """ADR-0383 §4:5, ADR-0386 §2:3: the owner's act outside a work, and a split's
+        new story takes the home of the story it is split from."""
+        subject = story_surface
+        await _seeded(subject, "a1", "a2")
+        story_id = await _created(subject, act("a1"), act("a2"))
+        split = await subject.engine.split_story(story_id, [act("a2")])
+        assert split.story_id is not None
+        made = await subject.engine.story(story_id)
+        split_off = await subject.engine.story(split.story_id)
+        assert made is not None
+        assert split_off is not None
+        assert made.story.home == split_off.story.home == RecordHome.owners()
+
     async def test_a_created_story_resolves_its_members(
         self, story_surface: StorySurfaceSubject
     ) -> None:

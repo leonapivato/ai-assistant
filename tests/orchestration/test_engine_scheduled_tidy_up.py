@@ -19,7 +19,7 @@ from test_engine import Harness
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.protocols import AssistantEngine
-from ai_assistant.core.types import StoryActor, StoryNoteAuthor
+from ai_assistant.core.types import RecordHome, StoryActor, StoryNoteAuthor
 from ai_assistant.orchestration.story_tidy_up import (
     STORY_TIDY_UP_PROMPT,
     ScheduledTidyUp,
@@ -64,7 +64,9 @@ def _scheduled(
 async def test_it_runs_the_scheduled_tidy_up_and_answers_its_report() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"))
-    created = await stories.create([activation("a-1")], actor=StoryActor.UNDERSTANDING)
+    created = await stories.create(
+        [activation("a-1")], home=RecordHome.owners(), actor=StoryActor.UNDERSTANDING
+    )
     trip = created.story_id
     assert trip is not None
     await stories.append_note(trip, "Riverside.", author=StoryNoteAuthor.OWNER)

@@ -138,6 +138,7 @@ from ai_assistant.core.types import (
     RecordedInputMessage,
     RecordedMessageDevices,
     RecordedTextInput,
+    RecordHome,
     ReplyCapability,
     SpokenAudioFormat,
     SpokenRendering,
@@ -3485,7 +3486,8 @@ class Engine:
         if members and (refusal := await unknown_activation(self._memory, members)):
             return StoryOutcome(refusal=refusal)
         if story_id is None:
-            return await stories.create(members, actor=StoryActor.OWNER)
+            # The owner's own act outside a work: the owner's domain (ADR-0383 §4:5).
+            return await stories.create(members, home=RecordHome.owners(), actor=StoryActor.OWNER)
         return await stories.link(story_id, members, actor=StoryActor.OWNER)
 
     async def unlink_story(
@@ -9014,14 +9016,15 @@ class Engine:
         understanding = working.understanding
         assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
         state = active_state()
-        activation_id = None if state is None else state.activation_id
-        if activation_id is None:
+        if state is None or state.activation_id is None:
             decision = StoryLinksDecision(outcome=StageOutcome.DONE)
         else:
             try:
                 async with asyncio.timeout_at(working.deadline):
                     decision = await self._story_links.record(
-                        understanding.story_links, activation_id=activation_id
+                        understanding.story_links,
+                        activation_id=state.activation_id,
+                        home=state.home,
                     )
             except TimeoutError:
                 late = _story_links_expired(working)

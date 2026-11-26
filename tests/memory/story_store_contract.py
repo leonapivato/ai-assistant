@@ -48,6 +48,13 @@ sequence versions and reads' ``as_of`` lie on, at or above every version written
 before it and below every version written after. A refused write moves neither, since
 the whole observable state the refusals compare holds both.
 
+And ADR-0386 §2 with ADR-0383 §§3-4: each story carries its home, which ``create``
+writes as it is handed, a split's new story takes from the story it was split from, and
+no write changes, a merge included; every read that gives back a header gives it, a
+note, a summary, a version and a log line carrying none of their own; and a home
+``home_may_be_written`` does not allow refused with ``ValueError`` before any check or
+write (ADR-0386 §6:2), an empty create's included.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -65,6 +72,7 @@ from ai_assistant.core.types import (
     STORY_ID_PREFIX,
     STORY_NOTE_MAX_CHARS,
     STORY_SUMMARY_CAP_CHARS,
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -109,7 +117,7 @@ def sub(story_id: str) -> StoryMember:
 
 async def made(store: StoryStore, *members: StoryMember) -> str:
     """Create a story holding ``members`` and return its id, failing on a refusal."""
-    outcome = await store.create(members, actor=_OWNER)
+    outcome = await store.create(members, home=RecordHome.owners(), actor=_OWNER)
     assert outcome.refusal is None, outcome
     assert outcome.story_id is not None
     return outcome.story_id
@@ -268,7 +276,7 @@ async def linked_by_understanding(store: StoryStore, story_id: str | None, activ
     """Link ``activation`` as understanding does, into ``story_id`` or a story it starts."""
     stamp: dict[str, Any] = {"actor": StoryActor.UNDERSTANDING, "trigger": activation}
     if story_id is None:
-        outcome = await store.create([act(activation)], **stamp)
+        outcome = await store.create([act(activation)], home=RecordHome.owners(), **stamp)
     else:
         outcome = await store.link(story_id, [act(activation)], **stamp)
     assert outcome.story_id is not None, outcome
@@ -283,11 +291,87 @@ class StoryStoreContract:
         """Override in a subclass: an empty store whose clock reads ``STORY_AT``."""
         raise NotImplementedError
 
+    # --- a story's home (ADR-0386 §2, ADR-0383 §§3-4) --------------------------
+
+    @pytest.mark.parametrize(
+        "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "shared"]
+    )
+    async def test_create_writes_the_home_it_is_handed_and_every_header_read_gives_it(
+        self, store: StoryStore, home: RecordHome
+    ) -> None:
+        """ADR-0386 §2:1, §2:2: the header every read gives back carries it."""
+        outcome = await store.create([act("a1")], home=home, actor=_OWNER)
+        assert outcome.story_id is not None
+        story_id = outcome.story_id
+        await noted(store, story_id, "A note.")
+        header = await store.header(story_id)
+        assert header is not None
+        assert header.home == home
+        view = await store.view(story_id)
+        log = await store.log(story_id)
+        summary = await store.current_summary(story_id)
+        notes = await store.notes(story_id)
+        versions = await store.summary_versions(story_id)
+        assert view is not None
+        assert log is not None
+        assert summary is not None
+        assert notes is not None
+        assert versions is not None
+        assert {view.story, log.story, summary.story, notes.story, versions.story} == {header}
+        assert (await store.stories()).stories == (header,)
+        assert await store.stories_of(act("a1")) == (header,)
+
+    async def test_a_split_mints_its_story_in_the_home_of_the_story_split_from(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0386 §2:3: the new story takes its source's home; the split takes none."""
+        source = await store.create([act("a1"), act("a2")], home=RecordHome.shared(), actor=_OWNER)
+        assert source.story_id is not None
+        split = await store.split(source.story_id, [act("a2")], actor=_OWNER)
+        assert split.story_id is not None
+        made_off = await store.header(split.story_id)
+        assert made_off is not None
+        assert made_off.home == RecordHome.shared()
+
+    async def test_no_write_changes_a_storys_home_a_merge_included(self, store: StoryStore) -> None:
+        """ADR-0383 §4:6: every write that changes a story leaves its home as it was."""
+        shared = await store.create([act("a1")], home=RecordHome.shared(), actor=_OWNER)
+        owners = await made(store, act("a2"), act("a3"))
+        assert shared.story_id is not None
+        await store.link(owners, [act("a4")], actor=_OWNER)
+        await store.unlink(owners, [act("a4")], actor=_OWNER)
+        await noted(store, owners, "A note.", on="a2")
+        await store.merge(shared.story_id, owners, actor=_OWNER)
+        absorbed = await store.header(shared.story_id)
+        target = await store.header(owners)
+        assert absorbed is not None
+        assert target is not None
+        assert absorbed.merged_into == owners
+        assert (absorbed.home, target.home) == (RecordHome.shared(), RecordHome.owners())
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.person("person:sam"), RecordHome.group("group:house")],
+        ids=["another-person", "a-group"],
+    )
+    @pytest.mark.parametrize("members", [[act("a1")], []], ids=["members", "no-members"])
+    async def test_a_home_no_write_may_carry_is_refused_before_any_check_or_write(
+        self, store: StoryStore, home: RecordHome, members: list[StoryMember]
+    ) -> None:
+        """ADR-0383 §2:3, §4:7, ADR-0386 §6:2: ``ValueError``, not a refusal outcome."""
+        await made(store, act("a0"))
+        before = await everything(store)
+
+        with pytest.raises(ValueError, match="home"):
+            await store.create(members, home=home, actor=_OWNER)
+
+        assert await everything(store) == before
+
     # --- create (§3) ---------------------------------------------------------
 
     async def test_create_mints_a_story_with_its_members_in_order(self, store: StoryStore) -> None:
         """Create mints a ``story:`` id, logs ``created`` then each member ``added``."""
-        outcome = await store.create([act("a1"), act("a2")], actor=_OWNER)
+        outcome = await store.create([act("a1"), act("a2")], home=RecordHome.owners(), actor=_OWNER)
         assert outcome.refusal is None
         assert outcome.logged == 3
         story_id = outcome.story_id
@@ -321,11 +405,16 @@ class StoryStoreContract:
     async def test_create_with_no_members_is_refused_and_writes_nothing(
         self, store: StoryStore
     ) -> None:
-        refused(await store.create([], actor=_OWNER), StoryRefusalReason.NO_MEMBERS)
+        refused(
+            await store.create([], home=RecordHome.owners(), actor=_OWNER),
+            StoryRefusalReason.NO_MEMBERS,
+        )
         assert (await store.stories()).stories == ()
 
     async def test_a_member_named_twice_is_added_once(self, store: StoryStore) -> None:
-        outcome = await store.create([act("a"), act("a"), act("b")], actor=_OWNER)
+        outcome = await store.create(
+            [act("a"), act("a"), act("b")], home=RecordHome.owners(), actor=_OWNER
+        )
         assert outcome.logged == 3
         assert outcome.story_id is not None
         assert await held(store, outcome.story_id) == [act("a"), act("b")]
@@ -340,14 +429,18 @@ class StoryStoreContract:
         assert await store.stories_of(act("x")) != await store.stories_of(sub("x"))
 
     async def test_create_naming_an_unknown_story_is_refused(self, store: StoryStore) -> None:
-        outcome = await store.create([act("a"), sub("story:nowhere")], actor=_OWNER)
+        outcome = await store.create(
+            [act("a"), sub("story:nowhere")], home=RecordHome.owners(), actor=_OWNER
+        )
         refused(outcome, StoryRefusalReason.UNKNOWN_STORY)
         assert outcome.refusal is not None
         assert outcome.refusal.story_id == "story:nowhere"
         assert (await store.stories()).stories == ()
 
     async def test_a_trigger_is_recorded_on_every_line(self, store: StoryStore) -> None:
-        outcome = await store.create([act("a")], actor=_OWNER, trigger="activation-7")
+        outcome = await store.create(
+            [act("a")], home=RecordHome.owners(), actor=_OWNER, trigger="activation-7"
+        )
         assert outcome.story_id is not None
         lines = await logged(store, outcome.story_id)
         assert [line.trigger for line in lines] == ["activation-7", "activation-7"]
@@ -594,7 +687,7 @@ class StoryStoreContract:
             store.split(absorbed, [act("a")], actor=_OWNER),
             store.merge(absorbed, other, actor=_OWNER),
             store.merge(other, absorbed, actor=_OWNER),
-            store.create([sub(absorbed)], actor=_OWNER),
+            store.create([sub(absorbed)], home=RecordHome.owners(), actor=_OWNER),
             store.link(other, [sub(absorbed)], actor=_OWNER),
         ]
         for attempt in attempts:
@@ -766,7 +859,7 @@ class StoryStoreContract:
         self, store: StoryStore, members: object
     ) -> None:
         with pytest.raises(ValueError, match="member"):
-            await store.create(members, actor=_OWNER)  # type: ignore[arg-type]
+            await store.create(members, home=RecordHome.owners(), actor=_OWNER)  # type: ignore[arg-type]
         assert (await store.stories()).stories == ()
 
     async def test_a_blank_story_id_or_unknown_actor_is_a_value_error(
@@ -775,7 +868,7 @@ class StoryStoreContract:
         with pytest.raises(ValueError):  # noqa: PT011 — any validation message will do
             await store.link("  ", [act("a")], actor=_OWNER)
         with pytest.raises(ValueError):  # noqa: PT011 — any validation message will do
-            await store.create([act("a")], actor="planner")  # type: ignore[arg-type]
+            await store.create([act("a")], home=RecordHome.owners(), actor="planner")  # type: ignore[arg-type]
         assert (await store.stories()).stories == ()
 
     # --- the actors ADR-0300 adds (§3:15) ------------------------------------
@@ -786,7 +879,7 @@ class StoryStoreContract:
     async def test_each_new_actor_is_recorded_as_it_writes(
         self, store: StoryStore, actor: StoryActor
     ) -> None:
-        outcome = await store.create([act("a")], actor=actor, trigger="a")
+        outcome = await store.create([act("a")], home=RecordHome.owners(), actor=actor, trigger="a")
         assert outcome.story_id is not None
         view = await store.view(outcome.story_id)
         assert view is not None
@@ -1963,7 +2056,9 @@ class StoryStoreContract:
             store.leave_flag(flag, actor=_PASS, outcome=StoryDecision.NOT_APPLIED),
             store.merge(first, second, actor=_PASS, answers=flag),
             store.move(first, second, [act("a2")], actor=_PASS, answers=flag),
-            store.create([sub(first), sub(second)], actor=_PASS, answers=flag),
+            store.create(
+                [sub(first), sub(second)], home=RecordHome.owners(), actor=_PASS, answers=flag
+            ),
         ):
             outcome = await attempt
             refused(outcome, StoryRefusalReason.UNKNOWN_FLAG)
@@ -2108,7 +2203,9 @@ class StoryStoreContract:
         )
         members = [sub(story_id), sub(other)]
         if operation == "create":
-            outcome = await store.create(members, actor=_PASS, answers=flag)
+            outcome = await store.create(
+                members, home=RecordHome.owners(), actor=_PASS, answers=flag
+            )
             assert outcome.logged == 1 + 2 + 2
         else:
             outcome = await store.link(larger, members, actor=_PASS, answers=flag)
@@ -2129,7 +2226,9 @@ class StoryStoreContract:
         flag = await raised(store, story_id, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
         before = await everything(store)
         attempt = (
-            store.create([sub(story_id), act("a9")], actor=_PASS, answers=flag)
+            store.create(
+                [sub(story_id), act("a9")], home=RecordHome.owners(), actor=_PASS, answers=flag
+            )
             if operation == "create"
             else store.link(story_id, [act("a9")], actor=_PASS, answers=flag)
         )
@@ -2165,7 +2264,10 @@ class StoryStoreContract:
         note = await noted(store, target, "On t.", on="t")
         before = await everything(store)
         for attempt, reason in [
-            (store.create([], actor=_PASS, answers=unknown), StoryRefusalReason.NO_MEMBERS),
+            (
+                store.create([], home=RecordHome.owners(), actor=_PASS, answers=unknown),
+                StoryRefusalReason.NO_MEMBERS,
+            ),
             (
                 store.move(target, outer, actor=_PASS, answers=unknown),
                 StoryRefusalReason.NO_MEMBERS,
@@ -2221,7 +2323,9 @@ class StoryStoreContract:
         await store.leave_flag(flag, actor=_PASS)
         before = await everything(store)
         for attempt in (
-            store.create([sub(story_id), sub(other)], actor=_PASS, answers=flag),
+            store.create(
+                [sub(story_id), sub(other)], home=RecordHome.owners(), actor=_PASS, answers=flag
+            ),
             store.link(other, [sub(story_id)], actor=_PASS, answers=flag),
             store.merge(story_id, other, actor=_PASS, answers=flag),
             store.split(story_id, [act("a2")], actor=_PASS, answers=flag),

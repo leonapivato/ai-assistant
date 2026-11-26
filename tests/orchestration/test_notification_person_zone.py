@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     Profile,
     ProfileField,
     QuietWindow,
+    RecordHome,
 )
 from ai_assistant.orchestration import NotificationWriteStage
 from ai_assistant.orchestration.engine import Engine
@@ -298,7 +299,9 @@ async def test_a_store_fault_on_the_live_path_rules_and_writes_nothing() -> None
 
 async def _held(store: FakeNotificationStore) -> str:
     """A record held at reach ``hold``, then made due by raising the class (ADR-0130 §6:7)."""
-    held = await store.admit(_candidate(), policy=FakeNotificationPolicy(timezone="UTC"))
+    held = await store.admit(
+        _candidate(), home=RecordHome.owners(), policy=FakeNotificationPolicy(timezone="UTC")
+    )
     assert held.kind is NotificationDispositionKind.HOLD
     assert held.notification_id is not None
     return held.notification_id

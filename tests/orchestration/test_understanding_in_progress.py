@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     JoinedInput,
     ProposedActivationUnderstanding,
     RecordedInputMessage,
+    RecordHome,
     ReplyFailure,
     StoryActor,
     StoryMember,
@@ -370,13 +371,14 @@ async def test_the_story_links_stage_links_a_running_activation_member(where: st
     if where == "later-absorbed":
         made = await stories.create(
             (StoryMember(kind=StoryMemberKind.ACTIVATION, id=_RIVERSIDE),),
+            home=RecordHome.owners(),
             actor=StoryActor.UNDERSTANDING,
             trigger=_WEATHER,
         )
         held = made.story_id
 
     decision = await StoryLinksStage(stories=stories).record(
-        understood.story_links, activation_id=_HOLDER
+        understood.story_links, home=RecordHome.owners(), activation_id=_HOLDER
     )
 
     assert decision.refused == ()

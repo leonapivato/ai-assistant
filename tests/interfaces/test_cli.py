@@ -3114,6 +3114,7 @@ def _held(**overrides: object) -> HeldNotification:
     """
     fields: dict[str, object] = {
         "id": "ntf-1",
+        "home": RecordHome.owners(),
         "candidate": _candidate(expires_at=AT + timedelta(hours=1)),
         "kind": NotificationDispositionKind.HOLD,
         "reason": NotificationCondition.REACH_INTERRUPT,
@@ -3861,7 +3862,9 @@ def test_notification_settings_renders_all_three_from_an_empty_store(
 
 async def _admit(engine: FakeAssistantEngine) -> str:
     """Put one held record in the fake's store and return the id it minted."""
-    ruling = await engine.notification_store.admit(_candidate(), policy=engine.notification_policy)
+    ruling = await engine.notification_store.admit(
+        _candidate(), home=RecordHome.owners(), policy=engine.notification_policy
+    )
     assert ruling.notification_id is not None
     engine.calls.clear()
     return ruling.notification_id

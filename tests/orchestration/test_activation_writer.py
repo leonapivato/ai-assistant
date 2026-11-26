@@ -791,7 +791,9 @@ async def test_a_close_that_would_exceed_the_record_bound_deletes_the_episode() 
 async def _story_with_a_summary(stories: FakeStoryStore) -> tuple[str, int]:
     """A story with one summary written, and that summary's version."""
     made = await stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-earlier")], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-earlier")],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
     assert made.story_id is not None
     return made.story_id, await _summarised(stories, made.story_id, "Before.")

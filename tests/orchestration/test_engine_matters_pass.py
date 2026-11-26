@@ -20,6 +20,7 @@ from test_engine import Harness
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -64,7 +65,9 @@ def _pass(
 async def test_it_runs_the_pass_and_answers_its_report() -> None:
     stories = _stories()
     memory = await memory_of(episode("a-1"))
-    created = await stories.create([activation("a-1")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     trip = created.story_id
     assert trip is not None
     note = await stories.append_note(trip, "Riverside.", author=StoryNoteAuthor.OWNER)

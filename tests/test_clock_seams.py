@@ -845,7 +845,9 @@ async def _sqlite_conversation_store(now: Clock) -> None:
 async def _fake_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     await FakeStoryStore(now=now).create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
 
 
@@ -925,7 +927,9 @@ async def _sqlite_story_store(now: Clock) -> None:
         store = SqliteStoryStore(path=Path(directory) / "stories.db", now=now)
         try:
             await store.create(
-                [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")], actor=StoryActor.OWNER
+                [StoryMember(kind=StoryMemberKind.ACTIVATION, id="a1")],
+                home=RecordHome.owners(),
+                actor=StoryActor.OWNER,
             )
         finally:
             store.close()

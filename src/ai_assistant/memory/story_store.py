@@ -51,6 +51,16 @@ log holds, and that no ``decided`` line answers it yet — are made inside that
 transaction, so two writers cannot both answer one flag. A tidy-up's flags are the
 only ones (ADR-0303 §8): a flag named by an activation is never held.
 
+**Each story carries its home** (ADR-0383 §3, ADR-0386 §2), as both its kind and its
+identifier in two columns of the story's own row (``home_kind``, ``home_id``), so a read
+can be narrowed by it inside this store's own query. ``create`` writes the home it is
+handed, a split's new story takes the home of the story it was split from, and no write
+changes one. A note, a summary, a version and a log line take their story's home and
+hold none of their own (ADR-0383 §3:2). A home
+:func:`~ai_assistant.core.types.home_may_be_written` does not allow is refused with
+``ValueError`` before any check or write (ADR-0386 §6:2). The upgrade to the layout that
+added it writes the owner's domain into every story the file holds (ADR-0383 §5:1).
+
 The file is created owner-only (ADR-0004 §4). The membership records hold
 identities and instants only (ADR-0289 §2:7); the notes and the summary hold
 the text ADR-0300 §3 gives them, which is a fact about the owner's life as well.
@@ -76,9 +86,12 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
     STORY_ID_PREFIX,
     STORY_SUMMARY_CAP_CHARS,
     Identifier,
+    RecordHome,
+    RecordHomeKind,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -111,6 +124,7 @@ from ai_assistant.core.types import (
     check_story_page,
     check_story_version,
     describe_untrusted,
+    home_may_be_written,
     story_members,
     story_note_ids,
 )
@@ -131,10 +145,13 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: The schema this module writes, held in ``PRAGMA user_version``. A file carrying
 #: another version is refused at open rather than read under the wrong layout, except
 #: version 1, ADR-0289's layout, version 2, ADR-0300's, version 3, ADR-0302's, version 4,
-#: ADR-0303's, and version 5, ADR-0304's, which are migrated in place (see
-#: :data:`_MIGRATE_1`, :data:`_MIGRATE_2`, :func:`_migrate_3`, :data:`_MIGRATE_4` and
-#: :data:`_MIGRATE_5`).
-_SCHEMA_VERSION: Final = 6
+#: ADR-0303's, version 5, ADR-0304's, and version 6, ADR-0347's, which are migrated in
+#: place (see :data:`_MIGRATE_1`, :data:`_MIGRATE_2`, :func:`_migrate_3`,
+#: :data:`_MIGRATE_4`, :data:`_MIGRATE_5` and :func:`_migrate_6`).
+_SCHEMA_VERSION: Final = 7
+
+#: The columns a story's header is read from, in :func:`_header_from`'s order.
+_HEADER_COLUMNS: Final = "id, created_at, merged_into, home_kind, home_id"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -158,7 +175,7 @@ _IDENTIFIER: TypeAdapter[str] = TypeAdapter(Identifier)
 _SCHEMA: Final = (
     "CREATE TABLE IF NOT EXISTS stories("
     "id TEXT PRIMARY KEY, created_seq INTEGER NOT NULL UNIQUE, "
-    "created_at INTEGER NOT NULL, merged_into TEXT)",
+    "created_at INTEGER NOT NULL, merged_into TEXT, home_kind TEXT, home_id TEXT)",
     "CREATE TABLE IF NOT EXISTS members("
     "story_id TEXT NOT NULL, kind TEXT NOT NULL, member_id TEXT NOT NULL, "
     "position INTEGER NOT NULL UNIQUE, linked_at INTEGER NOT NULL, actor TEXT NOT NULL, "
@@ -259,6 +276,28 @@ _MIGRATE_5: Final = (
 )
 
 
+#: ADR-0347's layout, version 6, to this one (ADR-0383 §5:1, ADR-0386 §2:1), and every
+#: earlier one once its own steps have run. Each story gains its home, as its kind and
+#: its identifier (ADR-0383 §2:2), and every story the file holds is the owner's,
+#: whatever its members' works were for: nothing asks the owner anything. Only the
+#: stories' rows change; no note, summary, version or log line gains a home (§3:2),
+#: and no other byte moves. The columns are the ones :data:`_SCHEMA` creates, so a file
+#: upgraded and a file made at this layout hold the same table.
+_MIGRATE_6: Final = (
+    "ALTER TABLE stories ADD COLUMN home_kind TEXT",
+    "ALTER TABLE stories ADD COLUMN home_id TEXT",
+)
+
+
+def _migrate_6(conn: sqlite3.Connection) -> None:
+    """Add each story's home, and write the owner's domain into every one (:data:`_MIGRATE_6`)."""
+    _run(conn, _MIGRATE_6)
+    conn.execute(
+        "UPDATE stories SET home_kind = ?, home_id = ?",
+        (RecordHomeKind.PERSON.value, OWNER_PERSON_ID),
+    )
+
+
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """Bring a file at an earlier layout ``version`` to this one, in the caller's transaction.
 
@@ -285,6 +324,8 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
         _run(conn, _MIGRATE_4)
     if version in {2, 3, 4, 5}:
         _run(conn, _MIGRATE_5)
+    if version in {1, 2, 3, 4, 5, 6}:
+        _migrate_6(conn)
 
 
 def _run(conn: sqlite3.Connection, statements: Sequence[str]) -> None:
@@ -523,6 +564,24 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
     return checked_actor, checked_trigger
 
 
+def _checked_home(home: object) -> RecordHome:
+    """Validate the home a create writes on the story it mints (ADR-0386 §2:2, §6:2).
+
+    Raises:
+        ValueError: If it is not a :class:`~ai_assistant.core.types.RecordHome`, or is
+            one :func:`~ai_assistant.core.types.home_may_be_written` does not allow
+            (ADR-0383 §2:3, §4:7).
+    """
+    if not isinstance(home, RecordHome):
+        msg = f"a story's home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
+
+
 def _unique[T](items: Sequence[T]) -> list[T]:
     """The items in the order given, each once."""
     return list(dict.fromkeys(items))
@@ -743,7 +802,7 @@ class SqliteStoryStore:
             self._restrict_permissions()
             with transaction(conn, "prepare the story store", error=StoryStoreError):
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1, 2, 3, 4, 5, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
                     msg = (
                         f"the story store at {self._path!r} carries schema version "
                         f"{version}, and this build writes {_SCHEMA_VERSION}"
@@ -799,7 +858,8 @@ class SqliteStoryStore:
     @staticmethod
     def _header(conn: sqlite3.Connection, story_id: str) -> StoryHeader | None:
         row = conn.execute(
-            "SELECT id, created_at, merged_into FROM stories WHERE id = ?", (story_id,)
+            f"SELECT {_HEADER_COLUMNS} FROM stories WHERE id = ?",  # noqa: S608 — a module constant, no input
+            (story_id,),
         ).fetchone()
         if row is None:
             return None
@@ -1071,8 +1131,8 @@ class SqliteStoryStore:
             is not None
         )
 
-    def _mint(self, conn: sqlite3.Connection, stamp: _Stamp) -> str:
-        """Mint a story id, write its row and log ``created``."""
+    def _mint(self, conn: sqlite3.Connection, stamp: _Stamp, home: RecordHome) -> str:
+        """Mint a story id, write its row carrying ``home`` and log ``created``."""
         suffix = self._new_id()
         if type(suffix) is not str or not suffix.strip():
             msg = f"the story id source returned an unusable id: {describe_untrusted(suffix)}"
@@ -1083,8 +1143,9 @@ class SqliteStoryStore:
             raise StoryStoreError(msg)
         sequence = self._append(conn, story_id, StoryChange.CREATED, stamp)
         conn.execute(
-            "INSERT INTO stories(id, created_seq, created_at, merged_into) VALUES(?, ?, ?, NULL)",
-            (story_id, sequence, stamp.at),
+            "INSERT INTO stories(id, created_seq, created_at, merged_into, home_kind, home_id) "
+            "VALUES(?, ?, ?, NULL, ?, ?)",
+            (story_id, sequence, stamp.at, home.kind.value, home.id),
         )
         return story_id
 
@@ -1101,20 +1162,25 @@ class SqliteStoryStore:
         self,
         members: Sequence[StoryMember],
         *,
+        home: RecordHome,
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Mint a story holding ``members`` (ADR-0289 §3, ADR-0302 §4)."""
+        """Mint a story holding ``members``, in ``home`` (ADR-0289 §3, ADR-0386 §2:2)."""
+        checked_home = _checked_home(home)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         flag = _answers(answers)
         _grouping(named, flag)
-        return await self._locked(self._create_sync, named, checked_actor, checked_trigger, flag)
+        return await self._locked(
+            self._create_sync, named, checked_home, checked_actor, checked_trigger, flag
+        )
 
     def _create_sync(
         self,
         members: tuple[StoryMember, ...],
+        home: RecordHome,
         actor: StoryActor,
         trigger: str | None,
         flag: StoryFlagName | None,
@@ -1127,7 +1193,7 @@ class SqliteStoryStore:
                 return StoryOutcome(refusal=refused)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
-            story_id = self._mint(conn, stamp)
+            story_id = self._mint(conn, stamp, home)
             unique = _unique(members)
             for member in unique:
                 self._add(conn, story_id, member, stamp)
@@ -1382,7 +1448,11 @@ class SqliteStoryStore:
                 return StoryOutcome(refusal=refused)
             if flag is not None and (refused := self._flag_refusal(conn, flag)):
                 return StoryOutcome(refusal=refused)
-            split_off = self._mint(conn, stamp)
+            source = self._header(conn, story_id)
+            assert source is not None  # noqa: S101 — the story refusal above found it
+            # The story a split mints takes the home of the story it is split from
+            # (ADR-0386 §2:3).
+            split_off = self._mint(conn, stamp, source.home)
             self._append(conn, story_id, StoryChange.SPLIT_OFF, stamp, other=split_off)
             self._append(conn, split_off, StoryChange.SPLIT_OFF, stamp, other=story_id)
             for member in moved:
@@ -1821,13 +1891,13 @@ class SqliteStoryStore:
         with self._transaction("list stories", immediate=False) as conn:
             if cursor is None:
                 rows = conn.execute(
-                    "SELECT id, created_at, merged_into, created_seq FROM stories "
+                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — a module constant, no input
                     "ORDER BY created_seq DESC LIMIT ?",
                     (limit + 1,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, created_at, merged_into, created_seq FROM stories "
+                    f"SELECT {_HEADER_COLUMNS}, created_seq FROM stories "  # noqa: S608 — a module constant, no input
                     "WHERE created_seq < ? ORDER BY created_seq DESC LIMIT ?",
                     (cursor, limit + 1),
                 ).fetchall()
@@ -1835,7 +1905,7 @@ class SqliteStoryStore:
         headers = [_decoded(_header_from, row) for row in kept]
         more = len(rows) > limit
         return _decoded(
-            lambda: StoryPage(stories=tuple(headers), next_cursor=kept[-1][3] if more else None)
+            lambda: StoryPage(stories=tuple(headers), next_cursor=kept[-1][5] if more else None)
         )
 
     async def stories_of(self, member: StoryMember) -> tuple[StoryHeader, ...]:
@@ -1846,7 +1916,7 @@ class SqliteStoryStore:
     def _stories_of_sync(self, member: StoryMember) -> tuple[StoryHeader, ...]:
         with self._transaction("read a member's stories", immediate=False) as conn:
             rows = conn.execute(
-                "SELECT s.id, s.created_at, s.merged_into FROM members m "
+                "SELECT s.id, s.created_at, s.merged_into, s.home_kind, s.home_id FROM members m "
                 "JOIN stories s ON s.id = m.story_id "
                 "WHERE m.kind = ? AND m.member_id = ? ORDER BY s.created_seq DESC",
                 (member.kind.value, member.id),
@@ -2004,8 +2074,17 @@ def _line_from(row: Sequence[Any]) -> StoryLogLine:
 
 
 def _header_from(row: Sequence[Any]) -> StoryHeader:
-    """Decode a stored story row: id, creation instant, merge target."""
-    return StoryHeader(story_id=row[0], created_at=_instant_from(row[1]), merged_into=row[2])
+    """Decode a stored story row: id, creation instant, merge target, and home.
+
+    A row with no home, or one that does not validate, is not read as anyone's: it
+    raises, as any other corrupt row does (ADR-0383 §5:3).
+    """
+    return StoryHeader(
+        story_id=row[0],
+        created_at=_instant_from(row[1]),
+        merged_into=row[2],
+        home=RecordHome(kind=row[3], id=row[4]),
+    )
 
 
 def _member_from(row: Sequence[Any]) -> StoryMember:

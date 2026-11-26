@@ -22497,11 +22497,23 @@ class HeldNotification(BaseModel):
     afterwards** (§7), the arrangement the retired ``DeferredProposal`` took, for
     its reason: live configuration governs records admitted from now on and never
     reaches back.
+
+    **The record carries its home** (ADR-0383 §3, ADR-0386 §3:1): the domain it landed
+    in, handed to the store's admission beside the candidate and never on it, since the
+    outbox holds candidates and no home (ADR-0386 §3:2). A reconsideration, a dismissal
+    and every other write leave it as it was (ADR-0383 §4:6).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier = Field(description="The record's own id, minted by the store.")
+    home: RecordHome = Field(
+        description=(
+            "The domain the record landed in (ADR-0383 §2:2, §3), set by code from whoever "
+            "the source it was noticed from belongs to (§4:3) and never changed by a later "
+            "write (§4:6). Required, so no write can leave it out (§5:4)."
+        ),
+    )
     candidate: NotificationCandidate = Field(
         description="The proposal verbatim — what the user would be told, and what it is about."
     )
@@ -23645,17 +23657,31 @@ class StoryRefusalReason(StrEnum):
 
 
 class StoryHeader(BaseModel):
-    """What a story carries of its own: its id, when it was made, and where it went.
+    """What a story carries of its own: its id, when it was made, where it went, its home.
 
     A story holds no title, summary, state, owner or text of any kind (ADR-0289
     §2). ``merged_into`` names the story it was merged into, once it has been,
     which is how a reader of a merged story follows it.
+
+    ``home`` is the domain the story landed in (ADR-0383 §3, ADR-0386 §2:1). It says
+    which domain the record lies in, not who owns the matter, so it is not the owner
+    §2 rules out. Its notes, its summary, its versions and its log lines take its home
+    and carry none of their own (ADR-0383 §3:2). ``create`` sets it, the story a split
+    mints takes the home of the story it was split from (ADR-0386 §2:2, §2:3), and no
+    write changes it (ADR-0383 §4:6).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     story_id: Identifier
     created_at: UtcInstant
     merged_into: Identifier | None
+    home: RecordHome = Field(
+        description=(
+            "The domain the story landed in (ADR-0383 §2:2, §3), set by code (§4) and "
+            "never changed by a later write (§4:6). Required, so no write can leave it "
+            "out (§5:4)."
+        ),
+    )
 
 
 class StoryEntry(BaseModel):

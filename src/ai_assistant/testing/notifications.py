@@ -24,6 +24,11 @@ implementation they most need to hold for.
 **The store defaults to ADR-0130's own figures**, not to whatever was convenient:
 a cap of 100 actionable records and a retention of seven days. A fake looser than
 the contract would certify consumers a real store rejects.
+
+**Each record carries the home its admission is handed** (ADR-0386 §3), and a home no
+write may carry is a ``ValueError`` before the atomic act, as the durable store refuses
+it (§6:2). :class:`FakeNotificationWriter` supplies the home a producer's notification
+takes, the owner's domain unless a test names another (ADR-0383 §4:3).
 """
 
 from __future__ import annotations
@@ -50,7 +55,9 @@ from ai_assistant.core.types import (
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
     describe_untrusted,
+    home_may_be_written,
     minute_of_day,
 )
 
@@ -90,6 +97,18 @@ _RECORD_PAGE = 200
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _checked_home(home: object) -> RecordHome:
+    """Refuse a home that is no ``RecordHome``, or one no write may carry (ADR-0386 §6:2)."""
+    if not isinstance(home, RecordHome):
+        msg = f"a notification's home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
 
 
 def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
@@ -502,18 +521,28 @@ class FakeNotificationStore:
             raise NotificationStoreError(str(exc)) from exc
 
     async def admit(
-        self, candidate: NotificationCandidate, *, policy: NotificationPolicy
+        self,
+        candidate: NotificationCandidate,
+        *,
+        home: RecordHome,
+        policy: NotificationPolicy,
     ) -> NotificationDisposition:
         """Rule on an offered candidate and record the ruling atomically (§3).
 
         Args:
             candidate: What was noticed.
+            home: The domain the record it may write lands in (ADR-0386 §3:2).
             policy: The ruling, asked inside the critical section.
 
         Returns:
             The disposition, carrying no ``notification_id`` where it is a
             ``DROP`` — §8 wrote no record for one.
+
+        Raises:
+            ValueError: If ``home`` is no ``RecordHome`` or one no write may carry,
+                before the critical section: nothing is ruled or written (§6:2).
         """
+        checked_home = _checked_home(home)
         async with self._lock:
             await asyncio.sleep(0)  # the suspension a real store's I/O has anyway
             now = self._now()
@@ -535,6 +564,7 @@ class FakeNotificationStore:
             # leave no spent unit behind it (ADR-0130 §5).
             record = HeldNotification(
                 id=record_id,
+                home=checked_home,
                 candidate=candidate,
                 kind=ruling.kind,
                 reason=ruling.reason,
@@ -582,6 +612,7 @@ class FakeNotificationStore:
             )
             ruled = HeldNotification(
                 id=record.id,
+                home=record.home,
                 candidate=record.candidate,
                 kind=ruling.kind,
                 reason=ruling.reason,
@@ -966,15 +997,26 @@ class FakeNotificationWriter:
     satisfy every word of §3 except the one that matters.
     """
 
-    def __init__(self, *, store: NotificationStore, policy: NotificationPolicy) -> None:
+    def __init__(
+        self,
+        *,
+        store: NotificationStore,
+        policy: NotificationPolicy,
+        home: RecordHome | None = None,
+    ) -> None:
         """Wire the seam to the store it writes through and the policy it asks.
 
         Args:
             store: Where records live and where the atomic act happens.
             policy: The deterministic ruling of §4 and §5.
+            home: The home every record an offer writes takes, which this seam supplies
+                to the store beside the candidate (ADR-0386 §3:2). ``None`` is the
+                owner's domain: whoever a producer's source belongs to, today the owner
+                (ADR-0383 §4:3).
         """
         self._store = store
         self._policy = policy
+        self._home = RecordHome.owners() if home is None else home
 
     @property
     def store(self) -> NotificationStore:
@@ -995,7 +1037,7 @@ class FakeNotificationWriter:
         Returns:
             The ruling, naming the condition that decided it.
         """
-        return await self._store.admit(candidate, policy=self._policy)
+        return await self._store.admit(candidate, home=self._home, policy=self._policy)
 
 
 def _check_outbox_bounds(*, lease: timedelta, max_entries: int) -> None:

@@ -114,6 +114,7 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     EpisodicMemory,
     Message,
+    RecordHome,
     ReplyFailure,
     Role,
     StoryActor,
@@ -163,6 +164,12 @@ __all__ = ["MATTERS_PASS_PROMPT", "MattersPass", "MattersPassReply", "MattersPas
 _log = structlog.get_logger(__name__)
 
 _ACTOR: Final = StoryActor.MATTERS_PASS
+
+#: The domain the pass tends, whose home a story its group mints takes (ADR-0383 §4:5,
+#: ADR-0384 §4:1): today the owner's, the one domain whose records it reads. A story its
+#: split mints takes the home of the story it was split from, in the store (ADR-0386
+#: §2:3). Running once per domain is a later lane's.
+_TENDS: Final = RecordHome.owners()
 
 #: The two refusals on which the pass writes nothing more for a flag (§5:6): the store
 #: holds no such flag, or a decision already answers it.
@@ -1021,7 +1028,7 @@ class MattersPass:
                     for story_id in choice.stories
                 ]
                 if choice.to is None:
-                    return await stories.create(members, actor=_ACTOR, answers=flag)
+                    return await stories.create(members, home=_TENDS, actor=_ACTOR, answers=flag)
                 return await stories.link(choice.to, members, actor=_ACTOR, answers=flag)
         return await stories.leave_flag(flag, actor=_ACTOR)
 

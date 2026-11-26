@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
     TraceRef,
 )
 from ai_assistant.orchestration.engine import Engine
@@ -148,7 +149,7 @@ async def test_the_surface_reads_and_tunes_what_the_store_holds() -> None:
     store = FakeNotificationStore(now=lambda: AT)
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
-    ruling = await store.admit(_candidate("k1"), policy=policy)
+    ruling = await store.admit(_candidate("k1"), home=RecordHome.owners(), policy=policy)
     assert ruling.notification_id is not None
 
     assert [record.id for record in await engine.notifications()] == [ruling.notification_id]
@@ -196,7 +197,7 @@ async def test_one_run_drains_every_due_record_not_one_page() -> None:
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
     for index in range(120):
-        await store.admit(_candidate(f"k{index}"), policy=policy)
+        await store.admit(_candidate(f"k{index}"), home=RecordHome.owners(), policy=policy)
     assert len(await store.export()) == 120
 
     # Raising the class reaches every actionable held record of it (§6).
@@ -233,7 +234,7 @@ async def test_a_read_size_that_reads_nothing_is_refused(
     store = FakeNotificationStore(now=lambda: AT)
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
-    await store.admit(_candidate("k1"), policy=policy)
+    await store.admit(_candidate("k1"), home=RecordHome.owners(), policy=policy)
     await engine.set_notification_preferences(
         NotificationPreferences(
             reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
@@ -257,8 +258,10 @@ async def test_a_drained_run_leaves_each_record_ruled_afresh() -> None:
     store = FakeNotificationStore(now=lambda: AT)
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
-    keeps = await store.admit(_candidate("k1"), policy=policy)
-    perishes = await store.admit(_candidate("k2", expires=AT + timedelta(days=1)), policy=policy)
+    keeps = await store.admit(_candidate("k1"), home=RecordHome.owners(), policy=policy)
+    perishes = await store.admit(
+        _candidate("k2", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
     assert keeps.notification_id is not None
     assert perishes.notification_id is not None
     await engine.set_notification_preferences(
@@ -308,7 +311,9 @@ async def test_a_policy_that_never_advances_cannot_hang_the_drain() -> None:
     store = FakeNotificationStore(now=lambda: AT)
     policy = _Stuck()
     engine = _wired(Harness(), store, policy)  # type: ignore[arg-type]
-    await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
+    await store.admit(
+        _candidate("k1", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
 
     ruled = await engine.reconsider_notifications(page=10)
 
@@ -332,7 +337,9 @@ async def test_a_run_with_nothing_due_rules_nothing_and_terminates() -> None:
             quiet_windows=(QuietWindow.between(time(0, 0), time(23, 59)),),
         )
     )
-    await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
+    await store.admit(
+        _candidate("k1", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
 
     assert await engine.reconsider_notifications() == 0
 
@@ -404,7 +411,9 @@ async def test_a_reconsideration_sweep_rules_inside_a_bound_correlation() -> Non
     store = _WatchingStore(now=lambda: AT)
     policy = FakeNotificationPolicy()
     engine = _wired(harness, store, policy)
-    await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
+    await store.admit(
+        _candidate("k1", expires=AT + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+    )
     await store.set_preferences(
         NotificationPreferences(
             reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
@@ -439,7 +448,7 @@ async def test_the_sweep_reports_the_notifications_it_reclaimed() -> None:
     store = FakeNotificationStore(now=lambda: now, retention=timedelta(seconds=1))
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
-    ruling = await store.admit(_candidate("k1"), policy=policy)
+    ruling = await store.admit(_candidate("k1"), home=RecordHome.owners(), policy=policy)
     assert ruling.notification_id is not None
     await store.dismiss(ruling.notification_id)
     now = AT + timedelta(hours=1)
@@ -467,7 +476,7 @@ async def test_the_sweep_never_purges_an_actionable_record() -> None:
     store = FakeNotificationStore(now=lambda: AT, retention=timedelta(seconds=1))
     policy = FakeNotificationPolicy()
     engine = _wired(Harness(), store, policy)
-    await store.admit(_candidate("k1"), policy=policy)
+    await store.admit(_candidate("k1"), home=RecordHome.owners(), policy=policy)
 
     report = await engine.purge_expired()
 

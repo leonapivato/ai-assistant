@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
 )
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -80,7 +81,7 @@ async def _held(engine: FakeAssistantEngine, key: str = "k1") -> str:
     nothing else, and §7 makes the engine's side of it a **read**.
     """
     ruling = await engine.notification_store.admit(
-        _candidate(key), policy=engine.notification_policy
+        _candidate(key), home=RecordHome.owners(), policy=engine.notification_policy
     )
     assert ruling.notification_id is not None
     return ruling.notification_id

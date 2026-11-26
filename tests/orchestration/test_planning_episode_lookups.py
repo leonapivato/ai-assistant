@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     ProposedCall,
     RecordedCall,
+    RecordHome,
     RoundResponse,
     ShownRecord,
     ShownRecordKind,
@@ -709,7 +710,9 @@ def _probe_cases() -> list[tuple[str, dict[str, Any]]]:
         )
 
     standing = StoryStanding(
-        story=StoryHeader(story_id="story:trip", created_at=_AT, merged_into=None),
+        story=StoryHeader(
+            home=RecordHome.owners(), story_id="story:trip", created_at=_AT, merged_into=None
+        ),
         recent=(
             StoryStandingEpisode(
                 activation_id="moment",
@@ -953,7 +956,10 @@ def _dentist_now(version: int, line: str, notes: int) -> StorySummaryState:
     """The dentist matter as the store holds it, at ``version``, with ``notes`` pending."""
     return StorySummaryState(
         story=StoryHeader(
-            story_id="story:dentist", created_at=_AT - timedelta(days=3), merged_into=None
+            home=RecordHome.owners(),
+            story_id="story:dentist",
+            created_at=_AT - timedelta(days=3),
+            merged_into=None,
         ),
         summary=StorySummary(
             version=version, lines=(StorySummaryLine(text=line),), written_at=_AT, outside=False

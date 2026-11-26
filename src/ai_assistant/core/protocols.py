@@ -230,6 +230,7 @@ if TYPE_CHECKING:
         QuestionPart,
         RecordChunk,
         RecordedInvocation,
+        RecordHome,
         RemoveLineResult,
         RoundResponse,
         RulePush,
@@ -7590,9 +7591,18 @@ class StoryStore(Protocol):
     A **story** is the assistant's memory of which experiences belong together. The
     windows find what is recent, recall finds what is similar, and stories find what
     belongs. A story is identified by a ``story:`` id this store mints, carries the
-    instant it was created and, once merged, the story it was merged into — and
-    **nothing else**: no title, summary, state, owner or text of any kind (§2).
-    What is learned about the matter is a belief about the story, kept outside it.
+    instant it was created, once merged, the story it was merged into, and its home,
+    the domain it landed in (ADR-0386 §2:1) — and **nothing else**: no title, summary,
+    state, owner or text of any kind (§2). What is learned about the matter is a
+    belief about the story, kept outside it.
+
+    **A story's home** (ADR-0383 §3, ADR-0386 §2). :meth:`create` writes the home it is
+    handed on the story it mints, the story a :meth:`split` mints takes the home of the
+    story it was split from, and no write changes a story's home (ADR-0383 §4:6). Every
+    read that gives back a :class:`~ai_assistant.core.types.StoryHeader` gives it. A
+    note, a summary, a version and a log line take their story's home (§3:2). A home
+    :func:`~ai_assistant.core.types.home_may_be_written` does not allow is a malformed
+    argument, refused with ``ValueError`` before any check or write (ADR-0386 §6:2).
 
     **Members** are exactly one of two kinds, carried with the id and never inferred
     from it: an activation, named by its activation id, or another story (§2).
@@ -7704,6 +7714,7 @@ class StoryStore(Protocol):
         self,
         members: Sequence[StoryMember],
         *,
+        home: RecordHome,
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
@@ -7714,12 +7725,16 @@ class StoryStore(Protocol):
         named twice is added once. The store does not require two members: whether
         something connects moments is the linker's judgment.
 
+        The story it mints carries ``home`` (ADR-0386 §2:2), which the caller sets by
+        ADR-0383 §4 and never a model (§4:6).
+
         Given ``answers``, it groups the stories it names under the one it mints and
         records the decision ``grouped`` on the stories the flag concerns (ADR-0302
         §4:2), in its own transaction.
 
         Args:
             members: The story's first members, at least one.
+            home: The domain the story it mints lands in. Required, with no default.
             actor: Who is creating it.
             trigger: The activation that triggered it, where there was one.
             answers: The flag this create decides, where it decides one.
@@ -7731,7 +7746,9 @@ class StoryStore(Protocol):
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
-                named by a create answering a flag (ADR-0302 §4:3).
+                named by a create answering a flag (ADR-0302 §4:3), and a ``home``
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow,
+                which is refused before any check or write (ADR-0386 §6:2).
             StoryStoreError: If the store cannot be read or written.
         """
         ...
@@ -7861,7 +7878,8 @@ class StoryStore(Protocol):
         Mints story C, removes ``members`` from A logged ``removed`` on A, and adds
         them to C, which logs ``created`` and each as ``added``. Both log
         ``split_off`` naming the other. The moved members keep A's link order. C is
-        not made a member of A.
+        not made a member of A. C takes A's home, and the split takes no argument for
+        it (ADR-0386 §2:3).
 
         In the same transaction it moves to C exactly the notes named in ``notes``
         that A holds, whoever wrote them; a note named that A does not hold is passed
@@ -8645,6 +8663,16 @@ class NotificationStore(Protocol):
     be deciding for itself, and a validator that only checks the fields agree with each
     other cannot catch it.
 
+    **A record's home is the one field a caller hands in** (ADR-0383 §3, ADR-0386 §3):
+    :meth:`admit` takes it beside the candidate, which carries none, and writes it on
+    the record it may write. The ``NotificationWriter`` a producer offers through
+    supplies it by ADR-0383 §4, never a model (§4:6). :meth:`reconsider` and every other
+    write leave a record's home as it was, and every read that gives back a
+    :class:`~ai_assistant.core.types.HeldNotification` gives it. A home
+    :func:`~ai_assistant.core.types.home_may_be_written` does not allow is refused with
+    ``ValueError`` before the atomic act, so no record and no unit of budget (ADR-0386
+    §6:2): not a ``DROP``, which names a §5 condition, and not a store fault.
+
     **An id it mints is fresh, and a collision is a fault rather than an
     overwrite.** Because ids are this store's own, a repeat is its own defect and
     not a caller's — but the consequence of absorbing one is still a record lost
@@ -8691,7 +8719,11 @@ class NotificationStore(Protocol):
         ...
 
     async def admit(
-        self, candidate: NotificationCandidate, *, policy: NotificationPolicy
+        self,
+        candidate: NotificationCandidate,
+        *,
+        home: RecordHome,
+        policy: NotificationPolicy,
     ) -> NotificationDisposition:
         """Rule on an offered candidate and record the ruling — atomically (§3).
 
@@ -8727,17 +8759,24 @@ class NotificationStore(Protocol):
         **A ``DROP`` writes no durable record** (§8), and the disposition
         returned for one carries no ``notification_id``: there is no record to
         name. A ``HOLD`` and an ``INTERRUPT`` each write one, stamped with this
-        store's ``admitted_at`` and its constructed retention.
+        store's ``admitted_at`` and its constructed retention, and carrying ``home``
+        (ADR-0386 §3:2).
 
         Args:
             candidate: What was noticed. Refused before this store is reached if
                 its sensitivity is Tier 0 or its expiry has already passed (§2).
+            home: The domain the record it may write lands in, set by ADR-0383 §4.
+                Required, with no default.
             policy: The ruling, asked inside this store's critical section.
 
         Returns:
             The disposition, naming the condition that decided it.
 
         Raises:
+            ValueError: If ``home`` is one
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow.
+                Raised before the atomic act: the policy is not asked, and no record
+                and no unit of budget is written (ADR-0386 §6:2).
             NotificationStoreError: If the store cannot be read or written.
         """
         ...

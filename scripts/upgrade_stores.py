@@ -1063,6 +1063,7 @@ async def _write_stories(directory: Path, moment: Moment) -> None:
     try:
         made = await store.create(
             (StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-upgrade-1"),),
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
         story = made.story_id
@@ -1097,6 +1098,7 @@ async def _write_stories(directory: Path, moment: Moment) -> None:
             )
         second = await store.create(
             (StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-upgrade-3"),),
+            home=RecordHome.owners(),
             actor=StoryActor.UNDERSTANDING,
             trigger="act-upgrade-3",
         )
@@ -1951,7 +1953,9 @@ async def _write_notifications(directory: Path, moment: Moment) -> None:
     store = _notifications(directory, traces)
     try:
         policy = DefaultNotificationPolicy(timezone=check_settings(directory).timezone)
-        await store.admit(_candidate("upgrade-held", moment), policy=policy)
+        await store.admit(
+            _candidate("upgrade-held", moment), home=RecordHome.owners(), policy=policy
+        )
     finally:
         store.close()
         traces.close()

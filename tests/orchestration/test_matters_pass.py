@@ -24,6 +24,7 @@ from ai_assistant.core.reply_shapes import reply_schema
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     Message,
+    RecordHome,
     ReplyFailure,
     Role,
     StoryActor,
@@ -111,7 +112,9 @@ def _shown(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
 
 
 async def _story(stories: FakeStoryStore, *activations: str) -> str:
-    created = await stories.create([activation(a) for a in activations], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation(a) for a in activations], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     return created.story_id
 
@@ -227,7 +230,10 @@ async def test_stories_are_grouped_under_a_new_story_holding_them() -> None:
     report = await _pass(model, stories, memory).run()
 
     assert report.decided == 1
-    (larger,) = [header.story_id for header in await stories.stories_of(story(trip))]
+    (header,) = await stories.stories_of(story(trip))
+    larger = header.story_id
+    # The domain the pass tends: the owner's (ADR-0383 §4:5, ADR-0384 §4:1).
+    assert header.home == RecordHome.owners()
     assert await _members(stories, larger) == [trip, other]
     assert await _decisions(stories, trip) == [
         (flag, StoryDecision.GROUPED, StoryActor.MATTERS_PASS)

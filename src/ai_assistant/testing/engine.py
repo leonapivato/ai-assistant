@@ -375,7 +375,7 @@ class FakeAssistantEngine:
         self._max_payload_bytes = max_payload_bytes
         #: The notification surface's whole state, public so a consumer can
         #: seed it: ``await engine.notification_store.admit(candidate,
-        #: policy=engine.notification_policy)`` is how a held record gets
+        #: home=RecordHome.owners(), policy=engine.notification_policy)`` is how a held record gets
         #: here, there being no producer on this surface (ADR-0130 §1).
         self.notification_store = FakeNotificationStore()
         self.notification_policy = FakeNotificationPolicy()
@@ -886,7 +886,10 @@ class FakeAssistantEngine:
         self.calls.append(("create_story", {"members": named}))
         if refusal := await unknown_activation(self.episode_memory, named):
             return self._checked(StoryOutcome(refusal=refusal), "create_story")
-        outcome = await self.story_store.create(named, actor=StoryActor.OWNER)
+        # The owner's own act outside a work: the owner's domain (ADR-0383 §4:5).
+        outcome = await self.story_store.create(
+            named, home=RecordHome.owners(), actor=StoryActor.OWNER
+        )
         return self._checked(outcome, "create_story")
 
     async def link_story(

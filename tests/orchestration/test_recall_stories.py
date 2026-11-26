@@ -55,7 +55,9 @@ def _stories() -> FakeStoryStore:
 
 
 async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
-    story_id = (await stories.create(list(members), actor=StoryActor.OWNER)).story_id
+    story_id = (
+        await stories.create(list(members), home=RecordHome.owners(), actor=StoryActor.OWNER)
+    ).story_id
     assert story_id is not None
     return story_id
 

@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
 )
 from ai_assistant.memory import SqliteNotificationOutbox
 from ai_assistant.memory.notification_outbox import _run_to_completion
@@ -112,7 +113,7 @@ async def interrupting(
         )
     )
     subject = candidate(key=key, expires_at=NOW + timedelta(hours=2))
-    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    ruled = await records.admit(subject, home=RecordHome.owners(), policy=FakeNotificationPolicy())
     assert ruled.notification_id is not None
     return ruled.notification_id, subject
 

@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import (
+        RecordHome,
         StoryNote,
         StoryRefusal,
         StorySummaryLine,
@@ -507,20 +508,22 @@ class StoryLinksStage:
         self._serial = asyncio.Lock()
 
     async def record(
-        self, links: Sequence[StoryMember], *, activation_id: str
+        self, links: Sequence[StoryMember], *, activation_id: str, home: RecordHome
     ) -> StoryLinksDecision:
         """Write the links of one activation's latest recorded understanding.
 
         Args:
             links: The understanding's ``story_links``, in proposal order.
             activation_id: The activation the understanding is of.
+            home: The home a story the run starts takes: whom the activation's work is
+                for gives it (ADR-0383 §4:1, ``ActivationState.home``).
 
         Returns:
             The decision: ``done`` with what was linked, started and refused, or
             ``failed`` carrying the ``StoryStoreError`` the store raised. Writes made
             before a failure stand, each its own transaction.
         """
-        writes = _Writes(self._stories, activation_id)
+        writes = _Writes(self._stories, activation_id, home)
         try:
             async with self._serial:
                 unstoried: list[StoryMember] = []
@@ -552,9 +555,10 @@ class StoryLinksStage:
 class _Writes:
     """One stage run's writes, and what they did."""
 
-    def __init__(self, stories: StoryStore, activation_id: str) -> None:
+    def __init__(self, stories: StoryStore, activation_id: str, home: RecordHome) -> None:
         self._stories = stories
         self._trigger = activation_id
+        self._home = home
         self._activation = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
         self.linked: dict[str, None] = {}
         self.started: str | None = None
@@ -594,7 +598,10 @@ class _Writes:
     async def start(self, members: Sequence[StoryMember]) -> None:
         """Start one story holding the earlier episodes in no story, and the activation."""
         outcome = await self._stories.create(
-            [*members, self._activation], actor=StoryActor.UNDERSTANDING, trigger=self._trigger
+            [*members, self._activation],
+            home=self._home,
+            actor=StoryActor.UNDERSTANDING,
+            trigger=self._trigger,
         )
         if outcome.refusal is not None:
             self.refused.append(outcome.refusal)

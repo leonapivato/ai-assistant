@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
 )
 from ai_assistant.testing import (
     FakeNotificationOutbox,
@@ -357,7 +358,7 @@ async def test_the_fakes_withdrawal_reports_the_stores_answer() -> None:
         )
     )
     subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
-    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    ruled = await records.admit(subject, home=RecordHome.owners(), policy=FakeNotificationPolicy())
     assert ruled.notification_id is not None
     outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
     await outbox.offer(subject)
@@ -376,7 +377,7 @@ async def test_the_fakes_withdrawal_reports_a_dismissal_it_performed() -> None:
         )
     )
     subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
-    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    ruled = await records.admit(subject, home=RecordHome.owners(), policy=FakeNotificationPolicy())
     assert ruled.notification_id is not None
     outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
     await outbox.offer(subject)
@@ -416,7 +417,7 @@ async def _ruled(records: FakeNotificationStore) -> tuple[str, NotificationCandi
         )
     )
     subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
-    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    ruled = await records.admit(subject, home=RecordHome.owners(), policy=FakeNotificationPolicy())
     assert ruled.notification_id is not None
     return ruled.notification_id, subject
 
@@ -483,6 +484,7 @@ async def test_the_fakes_sweep_reads_every_record_and_not_one_page_of_them() -> 
     for index in range(_PAST_ONE_PAGE):
         ruled = await records.admit(
             candidate(key=f"k{index}", expires_at=NOW + timedelta(hours=2)),
+            home=RecordHome.owners(),
             policy=FakeNotificationPolicy(),
         )
         assert ruled.notification_id is not None

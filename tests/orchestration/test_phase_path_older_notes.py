@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     LabelKind,
     PlanningLabel,
+    RecordHome,
     RoundResponse,
     StageOutcome,
     StoryActor,
@@ -52,7 +53,9 @@ _ROUND: Final = (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, Controll
 
 async def _story(stories: FakeStoryStore, member: str) -> str:
     created = await stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=member)], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=member)],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
     assert created.story_id is not None
     return created.story_id
@@ -168,6 +171,7 @@ async def test_a_note_on_a_later_page_is_read_then_split_off_by_its_label() -> N
             StoryMember(kind=StoryMemberKind.ACTIVATION, id="past"),
             StoryMember(kind=StoryMemberKind.ACTIVATION, id="other"),
         ],
+        home=RecordHome.owners(),
         actor=StoryActor.OWNER,
     )
     trip = created.story_id

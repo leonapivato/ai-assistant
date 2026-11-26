@@ -20,7 +20,7 @@ from structlog.testing import capture_logs
 from structured_support import structured
 
 from ai_assistant.core.errors import StoryStoreError
-from ai_assistant.core.types import Message, StoryActor, StoryNoteAuthor
+from ai_assistant.core.types import Message, RecordHome, StoryActor, StoryNoteAuthor
 from ai_assistant.orchestration.story_tidy_up import (
     STORY_TIDY_UP_PROMPT,
     ScheduledTidyUp,
@@ -129,7 +129,9 @@ async def _story(stories: FakeStoryStore, *notes: str, members: Sequence[str] = 
         held = len((await stories.stories(limit=100)).stories)
         members = (_HELD[held],)
     created = await stories.create(
-        [activation(member) for member in members], actor=StoryActor.UNDERSTANDING
+        [activation(member) for member in members],
+        home=RecordHome.owners(),
+        actor=StoryActor.UNDERSTANDING,
     )
     assert created.story_id is not None
     for text in notes:
