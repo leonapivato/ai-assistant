@@ -127,8 +127,8 @@ Every store the composition root opens, and the device store the service opens:
 > names as taking its parent's home, has its parent's home, and no write puts into a parent a part
 > of another home.
 
-> **Normative.** A record of a store or kind the table marks as carrying none is held by no bound
-> store (§7): every member of a bound store answers as though it held none of them.
+> **Normative.** A record of a store or kind the table marks as carrying none is given back,
+> counted and named by no member of a bound store (§7); a write's own checks still read it (§7:11).
 
 The stores that carry none are read only by code that decides something, whose answer is the
 decision and never the record: the check and the Connections section's filter read lines and
@@ -191,8 +191,8 @@ home, which the reader then sees too.
 > reads that field's person as the record's home.
 
 > **Normative.** Once a store's upgrade has run, a stored record with no home, or with one the store
-> cannot read, is the home of no one: no bound store holds it, it is never read as the owner's or as
-> anyone else's, and it is withheld from every sight.
+> cannot read, is the home of no one: no bound store gives it back, it is never read as the owner's
+> or as anyone else's, and it is withheld from every sight.
 
 > **Normative.** A home is a required field of each `core` model §3 puts it on, so no write can
 > leave it out.
@@ -203,9 +203,9 @@ than the owner's own domain. What the owner's own acts show of such a record is 
 ### 6. The sight
 
 > **Normative.** A sight is one value of a new `core/types.py` model: a non-empty set of bounds,
-> and, where it is a work's or a producer's, that work's activation. A read through it gives back a
-> record only where every bound sees the record's home, or where the record is the activation's
-> own (§7:4).
+> and, where it is a work's, that work's activation. A read through it gives back a record only
+> where every bound sees the record's home, or, for a work's sight, where the record is that
+> work's own (§7:4).
 
 > **Normative.** A bound is one of: a **person**, who sees their own domain and, for the owner,
 > the hub's shared things (ADR-0369 §6:1); **no one**, which sees the hub's shared things
@@ -229,10 +229,11 @@ than the owner's own domain. What the owner's own acts show of such a record is 
 > they are recorded again (ADR-0368 §2:4), as the meet of the sight it had and the one its facts now
 > give, so it never widens within a work.
 
-> **Normative.** A producer reads for an ended work by the sight that work had, made by §6:4 from
-> the facts and senders its episode records, with the work's activation. An episode that records no
-> facts is read by the sight of its home: a one-domain bound and that home's person, or no one for
-> the shared things.
+> **Normative.** A producer reads for an ended work by the sight §6:4 makes from the facts and
+> senders its episode records, with no activation, so nothing is its own. Where the episode records
+> no facts, or its home is not the one §4:1 gives from whom its facts say it was for, as §5:1 makes
+> it for an earlier episode recorded for no one, the producer reads by the sight of its home: a
+> one-domain bound and that home's person, or no one for the shared things.
 
 > **Normative.** An ADR-0384 run reads by a one-domain bound for the domain it tends and a person
 > bound for that domain's person, the owner for the shared things (ADR-0384 §3:1, §3:2); a tidy-up a
@@ -264,8 +265,8 @@ whole domain.
 > gain one member that takes a sight and returns the same Protocol bound to it, and no read member
 > of any of them gains an argument.
 
-> **Normative.** A bound store answers every member as the same store would answer it if it held
-> only the records its sight sees: the same records in the same order, the same totals and counts,
+> **Normative.** Save a write's own checks (§7:11), a bound store answers every member as the same
+> store would answer it if it held only the records its sight sees: the same records in the same order, the same totals and counts,
 > the same pages and whether more follow, and, for a named record it does not hold, the same
 > outcome, returned or raised, as for a record never written. It applies the sight before it
 > ranks, orders, limits, pages or counts.
@@ -278,8 +279,8 @@ whole domain.
 > activation: that activation's episode, its effects, and the approval requests it asked.
 
 > **Normative.** A write through a bound store carries its own home on its record (§4), and a
-> write to a record the bound store does not hold is refused as a write to one the store does not
-> hold.
+> write that changes a record the bound store does not give back is refused as a write to one the
+> store does not hold.
 
 > **Normative.** A bound `MemoryWriter` makes every read it makes for a write, its conflict search
 > and its fetch of a placed proposal's memories included, through the memory store bound to the same
@@ -305,6 +306,16 @@ whole domain.
 > set by the composition root and read from no `Settings` field and no running act; the build that
 > first binds the stores counts (§11), and a later build switches it to withhold.
 
+> **Normative.** A bound store decides a write's own checks over every record the store holds, as
+> the unbound store does: whether a stop record stands for its activation (ADR-0306 §6:2), whether
+> a record already has its identifier (ADR-0046), and whether a revision is the one held. A new
+> record's identifier is one code minted for it, never one taken from a model's output or an
+> input's text, so no reader can steer a check onto a record it does not see.
+
+> **Normative.** A producer keeps its own record of its work on an episode, the observation record
+> ADR-0329 §16:1 keys by that episode, through the plan store unbound, and through it reads and
+> writes that record alone, whatever its sight sees of the episode.
+
 The choice ADR-0369 §16 left is taken this way for three reasons. **Absence holds by
 construction.** A store applies the sight before it limits or counts, so a page of ten is the ten
 the reader may see and a total counts only those; a seam above the store would see only a store's
@@ -322,14 +333,15 @@ predicate in `core` and §9:3 proves each store applies it alike.
 > bound store gives back counts or reflects a record it does not hold, and `ChannelEpisodePage`'s
 > `total` among them.
 
-> **Normative.** A look-up, fetch or write that names a record its reader does not see gives the
-> reader exactly what naming a record never written gives: a `get` its `None`, a `get_many` the id
+> **Normative.** Save §7:11's checks, a look-up, fetch or write that names a record its reader
+> does not see gives the reader exactly what naming a record never written gives: a `get` its `None`, a `get_many` the id
 > left out, a store error the same error, a tool result the same result. ADR-0282 §2:8's "an id with
 > no record" is that outcome.
 
-> **Normative.** No record a reader sees names a record of another home, by §4:7, so no member,
-> link, pin, mark, lineage, reply or evidence a reader is shown names a withheld record, and no
-> view marks one forgotten, missing or withheld.
+> **Normative.** No record a reader sees names a record of another home, by §4:7, and a sight
+> sees every record of a home or none of them, so no member, link, pin, mark, lineage, reply or
+> evidence a reader is shown names a withheld record, and no view marks one forgotten, missing or
+> withheld. What a work read before a join narrowed its sight (§6:6) stays in it (§14).
 
 > **Normative.** A label, a referent, a count of items or an order a rendering gives a reader is
 > made from what the reader's bound stores gave back, never from what an unbound store holds.
@@ -346,7 +358,7 @@ out of view stays the next prompt review's (ADR-0369 §10).
 ### 9. Catching a read that goes round the filter
 
 > **Normative.** No class or function under `orchestration/`, save the holder that binds stores
-> for a pass and the holders §7:8 names, takes or holds one of the six store Protocols of §7:1 or
+> for a pass and the holders §7:8 and §7:12 name, takes or holds one of the six store Protocols of §7:1 or
 > `MemoryWriter` unbound; a stage holds a holder that gives a store only for a sight. The build
 > ships a named test that fails where any other does.
 
@@ -452,7 +464,7 @@ Named so the build is scoped, and made by none of this decision. Golden rule 5 m
   `HeldNotification` (§3, §5:4).
 - **`core/protocols.py`:** one binding member on each of `MemoryStore`, `StoryStore`,
   `ConversationStore`, `PlanStore`, `PersonModelStore`, `NotificationStore` and `MemoryWriter`
-  (§7:1), and the obligations of §4:7, §7:2 and §7:4 on their writes and reads. No new Protocol
+  (§7:1), and the obligations of §4:7, §7:2, §7:4 and §7:11 on their writes and reads. No new Protocol
   is owed, so no triad: each changed Protocol's conformance suite gains §9:3's obligation and its
   canonical fake meets it.
 - **`core/errors.py`:** an error for §4:7's refusal where the writer sees the record it names.
@@ -471,8 +483,8 @@ The names of the types, members, functions, tests, events and holders are the bu
   reads by, and what they show of a record with no home, never wider than the owner's domain.
   An export reads one domain (ADR-0369 §12:4).
 - **ADR-0384:** whose sight its runs read by; this decision gives the value only (§6:8).
-- **Milestone 4:** a place's audience, the mark and sends (ADR-0370, ADR-0372), and what the posture
-  becomes.
+- **Milestone 4:** a place's audience, the mark and sends (ADR-0370, ADR-0372), what the posture
+  becomes, and what a work does with what it read before a join narrowed its sight.
 - **Milestone 5:** another person's or a group's home; what a line opens and the reach it reads; a
   name of a record of another domain, for a record made from another domain's records (ADR-0369
   §7:5); a home for the stores §3 gives none, the trails' for an access log among them; and whether
@@ -491,8 +503,9 @@ none (§3); a part taking its parent's home (§3:2); the producer's home from th
 name across homes, and of a refusal that tells (§4:7, §4:8); the upgrade writing the owner's home
 over facts for no one, and a record with no home as no one's (§5); the sight's bounds, their meet,
 senders from inputs, no level in a sight, and a producer's and a run's sights (§6); the filter in
-each store behind one binding member, the equivalence rule, a work's own records, and count or
-withhold fixed at construction (§7); §8's places; §9's tests; §10's reading of `owner_records`;
+each store behind one binding member, the equivalence rule, a work's own records, count or
+withhold fixed at construction, a write's checks over every record and the producer's observation
+record (§7); §8's places; §9's tests; §10's reading of `owner_records`;
 §11's event; and §12:2's reading of earlier clauses over a bound store.
 
 Of the coordinator's readings: the filter goes by person, not level (§6:9, from ADR-0369 §6:1 and
@@ -506,13 +519,13 @@ itself rather than wrapped over it (§7); and `DeviceChecks` stays (§10:5).
 
 - Every record a work, a producer, a run or a connection writes says whose it is, and the upgrade
   makes every earlier one the owner's with nothing for the owner to do.
-- Every work for the owner reads what it reads today; an unidentified sender's work reads its own
-  records alone, its chat's history, its line's earlier episodes and the conversations in its
-  Connections section included.
-- The observer of an unidentified sender's work lands its writes in the owner's domain but reads
-  nothing of it, so it folds nothing into what the owner's domain already holds.
+- Every work for the owner reads what it reads today. An unidentified sender's work reads its own
+  records alone: its chat's history, its line's earlier episodes and the conversations its
+  Connections section would list are withheld.
+- The observer reads nothing of an unidentified sender's work, its episode included, so it writes
+  nothing from it; it still keeps its observation record (§7:12).
 - A pre-upgrade episode whose facts say it was for no one is the owner's, and a producer reads for
-  it by the shared things' sight; the first deploy's count shows whether any is still observed.
+  it by the owner's sight (§6:7), as its work read.
 - Stages are handed stores per read, which moves where each holds them; no read site's call changes.
 - **Revisit** when a second person, a group or a sharing rule is built, or if a store cannot answer
   a bound read at the cost the unbound one has.
