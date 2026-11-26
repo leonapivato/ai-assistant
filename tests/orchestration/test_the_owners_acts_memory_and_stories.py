@@ -27,7 +27,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
-from pending_candidates_contract import PENDING_AT, PendingCandidatesSubject, hold_episode
+from pending_candidates_contract import PENDING_AT, PendingCandidatesSubject, _hold, hold_episode
 from phases_support import phases_harness
 from sight_support import sight_of
 from story_support import activation, episode, story
@@ -35,23 +35,35 @@ from structlog.testing import capture_logs
 from task_support import seams as task_seams
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationEffect,
     ActivationStop,
+    ApprovalRequest,
     BeliefBand,
+    ConfirmationPart,
     MemoryKind,
+    MemorySupport,
+    MemoryWriterName,
+    PlanningRound,
+    ProposedCall,
+    ReadingCertainty,
     RecordHome,
+    RequestedCall,
     SightMode,
     StoryActor,
     StoryNoteAuthor,
+    SupportDirection,
+    SupportOrigin,
     ToolOutcome,
 )
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.memory.story_store import SqliteStoryStore
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.orchestration.bound_stores import BoundStores
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.planning.sqlite_store import SqlitePlanStore
 from ai_assistant.testing import FakeTraceSink
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 if TYPE_CHECKING:
     import sqlite3
@@ -60,7 +72,7 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
-    from ai_assistant.core.types import Sight
+    from ai_assistant.core.types import FrozenJson, Sight
     from ai_assistant.orchestration.engine import Engine
 
 #: The instant every store and the engine are clocked at.
@@ -412,6 +424,160 @@ async def test_an_act_naming_a_record_of_another_home_is_answered_as_for_one_nev
             assert await engine.story_standing(named) is None
             assert await engine.activation_stories(one) == ()
 
+    assert _counted(logs) == []
+
+
+#: The activation whose remember call a memory rests on, and the request a memory's
+#: confirmation names: each read from the plan store when the memory is shown.
+_REMEMBERED: Final = "a-remember"
+_REQUEST: Final = "q-confirmed"
+
+
+async def _seed_the_supports(world: _World, *, asked_for: str) -> None:
+    """A memory resting on a remember call its effect record holds, and one resting on a
+    confirmation of a request written for ``asked_for``; their episodes are the owner's."""
+    # A round whose remember call states the memory; its effect record names the round.
+    subject = PendingCandidatesSubject(
+        engine=world.engine, memory=cast("Any", world.memory), plans=cast("Any", world.plans)
+    )
+    call = ProposedCall(
+        call_id="c1", name="remember_fact", arguments={"statement": "prefers the quiet car"}
+    )
+    at = NOW - timedelta(hours=2)
+    await _hold(
+        subject,
+        _REMEMBERED,
+        at,
+        PlanningRound(id=f"round:{_REMEMBERED}", recorded_at=at, calls=(call,)),
+    )
+    remembered = ActivationEffect(
+        home=RecordHome.owners(),
+        id=f"effect:{_REMEMBERED}:1",
+        activation_id=_REMEMBERED,
+        round=f"round:{_REMEMBERED}",
+        capability="remember_fact",
+        values_digest="1" * 64,
+        decision_id=f"decision:{_REMEMBERED}",
+        claimed_at=at,
+    )
+    await world.plans.claim_activation_effect(remembered, match=None)
+    await world.plans.finish_activation_effect(remembered.id, ToolOutcome.SUCCEEDED)
+    await world.memory.add(
+        memory(
+            "m-remembered",
+            "prefers the quiet car",
+            remembered_support(_address(_REMEMBERED), effect=f"effect:{_REMEMBERED}:1"),
+        )
+    )
+    values: dict[str, FrozenJson] = {
+        "fact": "likes jazz",
+        "why": "they said so",
+        "rests_on_this_stimulus": True,
+        "episode": _address(_OWN),
+        "rests_on_outside_content": False,
+    }
+    request = ApprovalRequest(
+        id=_REQUEST,
+        person=asked_for,
+        activation_id="a-ask",
+        round="round:a-ask",
+        call=RequestedCall(tool=REMEMBER_CANDIDATE, values=values),
+        why="You told me you like jazz.",
+        written_at=NOW - timedelta(hours=1),
+        expires_at=NOW + timedelta(days=1),
+    )
+    asked = ActivationEffect(
+        home=RecordHome.owners(),
+        id=f"effect:{_REQUEST}",
+        activation_id="a-ask",
+        round="round:a-ask",
+        capability="request_approval",
+        values_digest="0" * 64,
+        decision_id=f"decision:{_REQUEST}",
+        claimed_at=NOW - timedelta(hours=1),
+        request=_REQUEST,
+    )
+    await world.plans.write_approval_request(request, asked, match=None)
+    confirmed = MemorySupport(
+        points_at=ConfirmationPart(
+            episode=_address(_OWN), asking_activation="a-ask", request=_REQUEST, ran_in="a-ask"
+        ),
+        origin=SupportOrigin.CONFIRMATION,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        how_sure=ReadingCertainty.SURE,
+        when=NOW,
+        added_at=NOW,
+        added_by=MemoryWriterName.REMEMBER,
+    )
+    await world.memory.add(memory("m-confirmed", "likes jazz", confirmed))
+
+
+async def _beside_the_episodes(world: _World) -> dict[str, object]:
+    """What the acts that read the plan store beside an episode show of it."""
+    engine = world.engine
+    remembered = await engine.belief("m-remembered")
+    confirmed = await engine.belief("m-confirmed")
+    standing = await engine.story_standing(world.named["trip"])
+    assert remembered is not None
+    assert confirmed is not None
+    assert standing is not None
+    return {
+        "remembered": [one.content for one in remembered.supports],
+        "remembered gone": remembered.supports_gone,
+        "confirmed": [one.content for one in confirmed.supports],
+        "done": [one.activation_id for one in standing.done],
+        "shown": [one.activation_id for one in standing.recent],
+        "pending": [one.fact for one in await engine.pending_candidates()],
+        "episode held": await engine.belief(_address(_REMEMBERED)) is not None,
+    }
+
+
+@_MODES
+@pytest.mark.parametrize("home", [_SAMS, _NOBODYS], ids=["another person's", "no home"])
+async def test_a_plan_record_the_sight_does_not_see_is_not_shown_beside_an_episode_it_sees(
+    mode: SightMode, home: tuple[str | None, str | None], worlds: list[_World]
+) -> None:
+    """§3:1, §4:2: the effect records and the request an act reads beside an episode are
+    read through the plan store bound to the owner's sight, apart from the episode. With
+    the episodes the owner's, an effect record or a request the sight does not see is
+    not there: a support resting on it is gone, where the matter stands lists nothing
+    done for it, and the candidate it showed done is no longer pending."""
+    clean = await _opened(mode)
+    await _seed_the_supports(clean, asked_for=OWNER_PERSON_ID)
+    crowded = await _opened(mode)
+    await _seed_the_supports(crowded, asked_for="person:sam" if home == _SAMS else OWNER_PERSON_ID)
+    crowded.alter(
+        "plans",
+        "activation_effects",
+        "id",
+        [f"effect:{_OWN}", f"effect:{_REMEMBERED}:1", "effect:a-candidate:1"],
+        home,
+    )
+    if home == _NOBODYS:
+        crowded.alter("plans", "activation_effects", "id", [f"effect:{_REQUEST}"], home)
+    worlds.extend((clean, crowded))
+
+    shown = await _beside_the_episodes(clean)
+    with capture_logs() as logs:
+        hidden = await _beside_the_episodes(crowded)
+
+    assert {key: shown[key] for key in ("remembered", "confirmed", "done", "pending")} == {
+        "remembered": ["prefers the quiet car"],
+        "confirmed": ["likes jazz"],
+        "done": [_OWN],
+        "pending": ["prefers aisle seats"],
+    }
+    assert shown["remembered gone"] is False
+    assert shown["episode held"] is True
+    # The episodes stay in sight, so no memory reads as resting on none that resolves
+    # (ADR-0328 §15:7); what rests on the unseen plan records alone reads as gone.
+    assert hidden == shown | {
+        "remembered": [None],
+        "confirmed": [None] if home == _SAMS else ["likes jazz"],
+        "done": [],
+        "pending": [],
+    }
     assert _counted(logs) == []
 
 
