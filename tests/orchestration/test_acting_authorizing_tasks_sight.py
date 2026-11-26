@@ -433,41 +433,49 @@ async def _ask(plans: FakePlanStore, *senders: Any, activation_id: str) -> objec
         )
 
 
-async def test_a_work_asks_its_own_request_and_its_card_is_recorded_through_its_sight() -> None:
-    """§7:4, §7:5: the request an unidentified sender's work asks is its own: written,
-    its card recorded on it, and read back through its bound store."""
+async def _not_offered(plans: FakePlanStore) -> object:
+    """What the runner answers a request where none is offered: no asker open."""
+    runner = ApprovalCalls(
+        stores=holder(plans=plans), expiry=timedelta(hours=24), now=_now, cards=_Cards()
+    )
+    with in_a_work(at=_AT, activation_id=_STRANGERS):
+        return await runner.run_claiming(
+            _ask_call(), _ask_effect(_STRANGERS), match=None, deliberate_repeat=False
+        )
+
+
+async def test_a_work_asks_its_request_and_its_card_is_recorded_through_its_sight() -> None:
+    """§7:5: the request the owner's work asks is written, its card recorded on it, and
+    read back through its bound store."""
     plans = FakePlanStore(now=_now, sight_mode=_WITHHOLD)
 
-    answer = await _ask(plans, UNIDENTIFIED, activation_id=_STRANGERS)
+    answer = await _ask(plans, activation_id=_OWNERS_ID)
 
     assert isinstance(answer, ToolResult), answer
-    (request,) = await plans.bound(_stranger(_STRANGERS)).person_approval_requests(
+    (request,) = await plans.bound(_owner(_OWNERS_ID)).person_approval_requests(
         OWNER_PERSON_ID, tuple(ApprovalRequestState)
     )
-    assert request.activation_id == _STRANGERS
+    assert request.activation_id == _OWNERS_ID
     assert request.cards
 
 
-async def test_a_duplicate_of_the_owners_pending_request_is_checked_as_if_none_were_written() -> (
-    None
-):
-    """§2:8 read through the bound store: the owner's work is told its request already
-    waits; an unidentified sender's work, which does not see the owner's, is answered as
-    where none was written, and its own request is written."""
+async def test_a_duplicate_of_the_owners_pending_request_is_checked_over_what_is_held() -> None:
+    """ADR-0388 §6:1, §6:2: the owner's work, which sees the owner's requests, is told
+    its request already waits; a work whose sight does not see the request's home is
+    not made the write, and is answered as where the call is not offered."""
     plans = FakePlanStore(now=_now, sight_mode=_WITHHOLD)
     assert isinstance(await _ask(plans, activation_id=_OWNERS_ID), ToolResult)
 
     again = await _ask(plans, activation_id=_AGAIN)
     strangers = await _ask(plans, UNIDENTIFIED, activation_id=_STRANGERS)
-    never = await _ask(
-        FakePlanStore(now=_now, sight_mode=_WITHHOLD), UNIDENTIFIED, activation_id=_STRANGERS
-    )
+    not_offered = await _not_offered(FakePlanStore(now=_now, sight_mode=_WITHHOLD))
 
     assert not isinstance(again, ToolResult)
     assert "already waits" in str(again)
-    assert isinstance(strangers, ToolResult)
-    assert type(strangers) is type(never)
-    assert strangers.output == never.output
+    assert strangers == not_offered
+    assert not isinstance(strangers, ToolResult)
+    held = await plans.person_approval_requests(OWNER_PERSON_ID, tuple(ApprovalRequestState))
+    assert [one.activation_id for one in held] == [_OWNERS_ID]
 
 
 # --- the Task Manager, as a work's task calls use it (ADR-0350 §4, §10) -----------------------

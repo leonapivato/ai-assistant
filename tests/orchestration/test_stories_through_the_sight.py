@@ -68,7 +68,6 @@ from ai_assistant.orchestration.story_calls import (
     STORY_ARGUMENT,
     TO_ARGUMENT,
     UNLINK_STORY,
-    StartUnfinishedError,
     StoryCalls,
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
@@ -346,20 +345,35 @@ async def test_the_hub_check_naming_the_owners_story_says_what_one_never_written
     assert reasons[0] == reasons[1] == "the story named is not there"
 
 
-async def test_a_start_by_an_unidentified_senders_work_lands_in_its_works_home_unfinished() -> None:
-    """The story it creates is the owner's (§4:4) and not its own (§7:4), so its first
-    notes, written next through the same bound store, are refused as written to a story
-    it does not hold (§7:5): the start is unfinished, never reported done or not done
-    (ADR-0306 §5:6). Recorded, not widened (#3743)."""
+async def test_a_start_by_an_unidentified_senders_work_lands_in_its_works_home_whole() -> None:
+    """ADR-0388 §3:1, §3:2: the story it creates is the owner's (§4:4) and not its own
+    (§7:4), and its first notes are written with it in the one create, so the start is
+    done whole; the work then sees nothing of it, and a later note naming it is told
+    what a note naming a story never written is told (§8:2)."""
     world = await _world(SightMode.WITHHOLD)
-    with work_of(_UNIDENTIFIED), pytest.raises(StartUnfinishedError):
-        await world.calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A trip."]}, decision="d"))
-    page = await world.stories.stories()
-    (started,) = [one for one in page.stories if one.story_id != world.trip]
+    with work_of(_UNIDENTIFIED):
+        result = await world.calls.run(
+            _call(START_STORY, {NOTES_ARGUMENT: ["A trip."]}, decision="d")
+        )
+        page = await world.stories.stories()
+        (started,) = [one for one in page.stories if one.story_id != world.trip]
+        later = await world.calls.run(
+            _call(
+                NOTE_STORY,
+                {STORY_ARGUMENT: started.story_id, NOTE_ARGUMENT: "Later."},
+                decision="e",
+            )
+        )
+        never = await world.calls.run(
+            _call(NOTE_STORY, {STORY_ARGUMENT: _NEVER, NOTE_ARGUMENT: "Later."}, decision="e")
+        )
+    assert result.outcome is ToolOutcome.SUCCEEDED
     assert started.home == RecordHome.owners()
     notes = await world.stories.notes(started.story_id)
     assert notes is not None
-    assert notes.notes == ()
+    assert [one.text for one in notes.notes] == ["A trip."]
+    assert later == never
+    assert later.outcome is ToolOutcome.FAILED
 
 
 # --- the owner's work, with stores that withhold: as today (§6's first row, §6:9) --------
