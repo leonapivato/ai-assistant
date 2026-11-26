@@ -10,8 +10,9 @@ that stops an ended activation of the owner's gets what stopping one never writt
 the counting build every read answers as today and writes its count with the reader
 "work" (§11:1).
 
-The owner's own ``stop_activation`` is not a work's: it reads unbound, as today, until
-the owner's sight is built (ADR-0385, lane B10).
+The owner's own ``stop_activation`` is not a work's: it reads by the owner's sight, which
+sees the owner's domain and the shared things, so it answers as today (ADR-0385 §3:1,
+lane B10b).
 """
 
 from __future__ import annotations
@@ -167,8 +168,9 @@ async def test_an_unidentified_senders_stop_of_the_owners_ended_one_is_as_never_
     assert (await harness.plans.export()).stopped_activations == ()
 
 
-async def test_the_owners_own_stop_of_that_activation_reads_unbound_as_today() -> None:
-    """The owner's act is not a work's: it reads as it does today (ADR-0385, lane B10)."""
+async def test_the_owners_own_stop_of_that_activation_answers_as_today() -> None:
+    """The owner's act is not a work's: it reads by the owner's sight, which sees the
+    owner's episode, so it answers as it does today (ADR-0385 §3:1, lane B10b)."""
     harness = _engine(SightMode.WITHHOLD)
     await _ended(harness)
     before = await _held(harness)

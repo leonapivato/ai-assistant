@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
     from ai_assistant.core.types import RecordHome, StoryNote, StorySummaryState
+    from ai_assistant.orchestration.bound_stores import Bound
 
 
 def episode_address(activation_id: str) -> str:
@@ -67,7 +68,7 @@ def episode_address(activation_id: str) -> str:
 
 
 async def unknown_activation(
-    memory: MemoryStore, members: Sequence[StoryMember]
+    memory: Bound[MemoryStore], members: Sequence[StoryMember]
 ) -> StoryRefusal | None:
     """Refuse the first activation member with no record at its episode's address.
 
@@ -76,7 +77,9 @@ async def unknown_activation(
     against one state of the memory store.
 
     Args:
-        memory: The memory store the engine holds.
+        memory: The memory store, bound to the sight of the work or the owner's act that
+            makes the write (ADR-0383 §7:7, ADR-0385 §3:1): an episode it does not see
+            is one with no record.
         members: The members a create or a link names.
 
     Returns:
@@ -94,7 +97,7 @@ async def unknown_activation(
 
 
 async def of_another_home(
-    memory: MemoryStore, members: Sequence[StoryMember], home: RecordHome
+    memory: Bound[MemoryStore], members: Sequence[StoryMember], home: RecordHome
 ) -> StoryMember | None:
     """The first activation member whose episode is held and of another home than ``home``.
 
@@ -112,7 +115,7 @@ async def of_another_home(
     judged against one state of the memory store.
 
     Args:
-        memory: The memory store the episodes are read from.
+        memory: The memory store the episodes are read from, bound to the writer's sight.
         members: The members the write names; story members are the story store's to
             judge, in its own file.
         home: The home of the story the members would be written into.
@@ -132,14 +135,17 @@ async def of_another_home(
 
 
 async def resolved_view(
-    stories: StoryStore,
-    memory: MemoryStore,
+    stories: Bound[StoryStore],
+    memory: Bound[MemoryStore],
     story_id: str,
     *,
     cursor: int | None,
     limit: int,
 ) -> StoryView | None:
     """Read one page of a story's view and resolve its members (ADR-0289 §4).
+
+    Both stores are bound to the owner's sight (ADR-0385 §4:1), so an episode it does not
+    see resolves as forgotten, as one with no record does.
 
     Raises:
         StoryStoreError: If the story store cannot be read, or holds a story member
@@ -207,7 +213,7 @@ _OWNER: Final = SummaryVisibility(owner_records=True)
 
 
 async def owner_summary(
-    stories: StoryStore,
+    stories: Bound[StoryStore],
     story_id: str,
     *,
     notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
@@ -272,7 +278,7 @@ def _summary_view(
     )
 
 
-async def _all_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
+async def _all_notes(stories: Bound[StoryStore], story_id: str) -> list[StoryNote]:
     """Every note the story holds, in the order they were written, read page by page."""
     found: list[StoryNote] = []
     cursor: int | None = None

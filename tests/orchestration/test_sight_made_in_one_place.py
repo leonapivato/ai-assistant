@@ -9,7 +9,10 @@ made by the observer's run once for each episode it reads, from the facts and se
 episode records (§6:7), in ``observer/stage.py``'s ``_sight_of``; an upkeep run's, made
 once for the run from the domain it tends (§6:8), in ``upkeep.py``'s ``upkeep_run``; and
 the sight of a tidy-up a work asks for, made where the call starts it from the asking
-work's sight and the story's home (§6:8), in ``story_calls.py``'s ``StoryCalls._tidy``.
+work's sight and the story's home (§6:8), in ``story_calls.py``'s ``StoryCalls._tidy``;
+and the owner's sight, made for each owner's own act through
+:meth:`Sight.of_owners_act <ai_assistant.core.types.Sight.of_owners_act>`, in
+``engine.py``'s ``Engine._owners_sight``, the place ADR-0385 §10:3 adds.
 
 **How it reads "constructs".** Any reference to ``Sight`` or ``SightBound`` outside an
 annotation, by its own name or as an attribute (``Sight(...)``, ``Sight.of_work``,
@@ -48,6 +51,9 @@ PLACES: Final = frozenset(
         "upkeep.py:upkeep_run",
         # §6:8: a tidy-up a work asks for, its work's with the story's domain's bound.
         "story_calls.py:StoryCalls._tidy",
+        # ADR-0385 §10:3: the owner's sight, made by the engine's members through its
+        # one constructor, anew for each owner's own act.
+        "engine.py:Engine._owners_sight",
     }
 )
 

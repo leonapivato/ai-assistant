@@ -103,9 +103,18 @@ class _RacingStore(FakeMemoryStore):
         super().__init__(now=lambda: AT)
         self._lands = lands
         self._races = races
-        #: How many interleaved writes actually happened. Read by a case as a
-        #: **negative control**: an act that never re-read would leave this at one.
-        self.raced = 0
+        # Held in a list, so the bound copy the act reads through (ADR-0385 §3:1) counts
+        # into the store the case holds.
+        self._raced: list[int] = [0]
+
+    @property
+    def raced(self) -> int:
+        """How many interleaved writes actually happened.
+
+        Read by a case as a **negative control**: an act that never re-read would leave
+        this at one.
+        """
+        return self._raced[0]
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Read as the fake does, then let the other writer land.
@@ -117,7 +126,7 @@ class _RacingStore(FakeMemoryStore):
         """
         found = await super().get(record_id)
         if found is not None and self.raced < self._races:
-            self.raced += 1
+            self._raced[0] += 1
             await self.write_atomic(
                 [
                     MemoryWrite(
@@ -151,16 +160,24 @@ class _DeletingStore(FakeMemoryStore):
         """
         super().__init__(now=lambda: AT)
         self._recreated = recreated
-        #: How many reads this store has served. Asserted at **two** by every case
-        #: below, because §7's bound is a statement about the number of attempts and a
-        #: case that only checked the answer could not see an implementation that
-        #: returned the right value after one attempt or after ten.
-        self.reads = 0
+        # Held in a list, so the bound copy the act reads through (ADR-0385 §3:1) counts
+        # into the store the case holds.
+        self._reads: list[int] = [0]
+
+    @property
+    def reads(self) -> int:
+        """How many reads this store has served.
+
+        Asserted at **two** by every case below, because §7's bound is a statement about
+        the number of attempts and a case that only checked the answer could not see an
+        implementation that returned the right value after one attempt or after ten.
+        """
+        return self._reads[0]
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Read as the fake does, then destroy the record on the first read."""
         found = await super().get(record_id)
-        self.reads += 1
+        self._reads[0] += 1
         if self.reads == 1 and found is not None:
             await self.delete(record_id)
             if self._recreated is not None:

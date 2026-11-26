@@ -110,39 +110,36 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B9 the observer's pin pass and the upcoming-event producer's writes, B10 the owner's
-#: own acts (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals
-#: and tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
-#: B9a's observer reads and B9b's upkeep runs and a tidy-up a work asks for are converted,
-#: save the parts named here for a later lane. A holder more than one lane converts names
-#: the last of them. **Only shrinks.** A holder whose last unbound read is one §7:8, §7:12
-#: or §7:13 names moves to :data:`NAMED_BY_THE_DECISION` in the lane that converts the
-#: rest: the observer's finding of what is due (§7:12, §7:13), the engine's start and
-#: ADR-0384 §2's unchanged jobs (§7:8).
+#: B9 the observer's pin pass and the upcoming-event producer's writes, B10e the owner's
+#: own acts on conversations, notifications, the profile, the approvals panel and tasks
+#: (ADR-0385); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals and
+#: tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
+#: B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, and B10b's owner's
+#: acts on memory and stories are converted, save the parts named here for a later lane.
+#: A holder more than one lane converts names the last of them. **Only shrinks.** A holder
+#: whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
+#: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's finding
+#: of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged jobs
+#: (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
-    # The phases hand it the plan store bound to the work's sight (B8d); the owner's
-    # (B10) an unbound one.
-    "candidates.py:pending_candidates": "B10",
-    "candidates.py:held_candidates": "B10",
-    "candidates.py:_page_candidates": "B10",
-    "candidates.py:_approved_candidates": "B10",
-    "change_stream.py:ChangeStream": "B10",
-    # The surface's acts (B10); its sweeps are §7:8's. Its `begin`, which marks the
+    "change_stream.py:ChangeStream": "B10e",
+    # The surface's acts (B10e); its sweeps are §7:8's. Its `begin`, which marks the
     # trigger's conversation active as a work's turn begins, is admitted by ADR-0387 §7:4.
-    "conversations.py:ConversationLifecycle": "B10",
-    "conversations.py:conversation_state": "B10",
-    "conversations.py:episodes_on_place": "B10",
-    "conversations.py:_open_on": "B10",
-    "conversations.py:_shown_ending": "B10",
-    "conversations.py:_older_ending": "B10",
-    "conversations.py:_judged": "B10",
-    "conversations.py:_last_taker": "B10",
-    # Every lane from B8b to B10 converts a use; its start is §7:8's.
-    "engine.py:Engine": "B10",
-    "engine.py:_written_preferences": "B10",
-    "engine.py:approval_panel": "B10",
-    "engine.py:episode_card_facts": "B10",
-    "engine.py:tap_on_approval_panel": "B10",
+    "conversations.py:ConversationLifecycle": "B10e",
+    "conversations.py:conversation_state": "B10e",
+    "conversations.py:episodes_on_place": "B10e",
+    "conversations.py:_open_on": "B10e",
+    "conversations.py:_shown_ending": "B10e",
+    "conversations.py:_older_ending": "B10e",
+    "conversations.py:_judged": "B10e",
+    "conversations.py:_last_taker": "B10e",
+    # Every lane from B8b to B10e converts a use; its start is §7:8's. The owner's acts on
+    # memory and stories read through the holder, bound to the owner's sight (B10b).
+    "engine.py:Engine": "B10e",
+    "engine.py:_written_preferences": "B10e",
+    "engine.py:approval_panel": "B10e",
+    "engine.py:episode_card_facts": "B10e",
+    "engine.py:tap_on_approval_panel": "B10e",
     # The upcoming-event producer's writes (ADR-0132): it reads a source, not a store, so
     # ADR-0384 §2's table makes it no upkeep run, and no clause yet gives it a sight. It
     # reads the owner's zone from the person-model store and rules into the notification
@@ -162,37 +159,23 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "observer/stage.py:Observer": "B9",
     # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
     # panel's pins, unpins and walks, and the unbound store handed to the zone picker
-    # (`PersonZones`' reads outside a work), are the person panel's (B10); the
+    # (`PersonZones`' reads outside a work), are the person panel's (B10e); the
     # reconsideration reads the zone through the holder (B9b).
-    "person_block.py:PersonBlocks": "B10",
-    # A work's story calls and story links hand these a store bound to the work's sight
-    # (B8c); the engine's story methods (B10) and the canonical fake engine an unbound one.
-    "stories.py:unknown_activation": "B10",
-    "stories.py:of_another_home": "B10",
-    "stories.py:resolved_view": "B10",
-    "stories.py:owner_summary": "B10",
-    "stories.py:_all_notes": "B10",
-    # The phases' story views hand these stores bound to the work's sight (B8c); the
-    # engine's story standing (B10) unbound ones.
-    "story_standing.py:story_standing": "B10",
-    "story_standing.py:_shown": "B10",
-    "story_standing.py:_done": "B10",
-    "story_standing.py:_related": "B10",
-    "story_standing.py:_member_count": "B10",
+    "person_block.py:PersonBlocks": "B10e",
     # A work's task calls read and write through the holder (B8d); `tidy` and
     # `parent_ended`, removing finished tasks, are §7:8's (ADR-0384 §2's table), and the
-    # operations from outside (ADR-0350 §10), the owner's own acts, are B10's.
-    "task_manager.py:TaskManager": "B10",
+    # operations from outside (ADR-0350 §10), the owner's own acts, are B10e's.
+    "task_manager.py:TaskManager": "B10e",
     # A work's read of a person's zone is bound (`of`, B8d); `outside_a_work` is the task
-    # sensor's push (§7:8) and the owner's replace (B10).
-    "task_rules.py:PersonZones": "B10",
+    # sensor's push (§7:8) and the owner's replace (B10e).
+    "task_rules.py:PersonZones": "B10e",
     # The line's cards: a work's approval card is recorded through the plan store bound to
     # its sight, handed to `post` (B8d), and the line's window reads them through the
-    # stores it is handed bound (B8b); the owner's tap and the cards' refresh are B10's.
-    "telegram.py:TelegramCards": "B10",
+    # stores it is handed bound (B8b); the owner's tap and the cards' refresh are B10e's.
+    "telegram.py:TelegramCards": "B10e",
 }
 
-_LANES: Final = frozenset({"B9", "B10"})
+_LANES: Final = frozenset({"B9", "B10e"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -414,7 +397,7 @@ def test_the_holders_b8d_converted_hold_no_store() -> None:
 #: The methods of each holder that keeps a store unbound for reads outside a work, which
 #: alone may reach it (B8d): every other method is a work's, and reads through the holder.
 _OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]]] = {
-    # §7:8: removing finished tasks (ADR-0384 §2's table); B10: the operations from
+    # §7:8: removing finished tasks (ADR-0384 §2's table); B10e: the operations from
     # outside (ADR-0350 §10), the owner's own acts.
     ("task_manager.py", "TaskManager"): (
         frozenset({"_plans", "_memory"}),
@@ -430,7 +413,7 @@ _OUTSIDE_A_WORK: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str
             }
         ),
     ),
-    # §7:8: the task sensor's push; B10: the owner's replace.
+    # §7:8: the task sensor's push; B10e: the owner's replace.
     ("task_rules.py", "PersonZones"): (
         frozenset({"_people"}),
         frozenset({"__init__", "outside_a_work"}),
@@ -577,6 +560,33 @@ def test_the_upkeep_runs_and_a_works_tidy_up_hold_no_store() -> None:
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
     assert not any(lane == "B9b" for lane in NOT_YET_CONVERTED.values())
+
+
+def test_the_helpers_of_the_owners_acts_on_memory_and_stories_hold_no_store() -> None:
+    """The story surface's checks and views, where a matter stands and the pending
+    candidates (milestone 22's B10b) take stores the holder bound to a sight alone: the
+    owner's act's (ADR-0385 §3:1) or a work's (ADR-0383 §7:7). No holder is left to B10,
+    and what is left of the owner's acts is B10e's."""
+    held = unbound_holders()
+    for converted in (
+        "candidates.py:pending_candidates",
+        "candidates.py:held_candidates",
+        "candidates.py:_page_candidates",
+        "candidates.py:_approved_candidates",
+        "stories.py:unknown_activation",
+        "stories.py:of_another_home",
+        "stories.py:resolved_view",
+        "stories.py:owner_summary",
+        "stories.py:_all_notes",
+        "story_standing.py:story_standing",
+        "story_standing.py:_shown",
+        "story_standing.py:_done",
+        "story_standing.py:_related",
+        "story_standing.py:_member_count",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+    assert "B10" not in NOT_YET_CONVERTED.values()
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:
