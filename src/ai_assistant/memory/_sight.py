@@ -79,27 +79,39 @@ def count_records(sight: Sight, member: str, records: Iterable[MemoryRecord]) ->
     count_given(sight, member, ((record.home, made_by(record)) for record in records))
 
 
-#: A ``records`` row's home as the decoder reads it, rendered in the compact form
-#: ``RecordHome.model_dump_json()`` gives, or ``NULL`` where the row has none the
-#: decoder could read (ADR-0383 §5:3, §7:3).
-#:
-#: It reads the row's JSON as the record decoder does, so the expression and the
-#: predicate over a decoded record agree on every row: the **last** top-level ``home``
-#: key where one is given twice, as the decoder keeps the last; an object holding no
-#: key but ``kind`` and ``id``, in any order, the last of each where one is given
-#: twice; and ``id`` absent read as ``null``. The rendered text equals a valid home's
-#: only where the decoder would read that home, since a value of another type renders
-#: otherwise (a number unquoted, an object as a string). Invalid JSON has no home.
-STORED_HOME_SQL: Final = (
-    "(SELECT CASE WHEN h.type = 'object' "
-    "AND NOT EXISTS (SELECT 1 FROM json_each(h.value) e WHERE e.key NOT IN ('kind', 'id')) "
-    "THEN json_object("
-    "'kind', (SELECT e.value FROM json_each(h.value) e WHERE e.key = 'kind' "
-    "ORDER BY e.id DESC LIMIT 1), "
-    "'id', (SELECT e.value FROM json_each(h.value) e WHERE e.key = 'id' "
-    "ORDER BY e.id DESC LIMIT 1)) END "
+#: The JSON text of a ``records`` row's home object as the record decoder finds it,
+#: or ``NULL`` where it finds none: the **last** top-level ``home`` key, as the decoder
+#: keeps the last of a key given twice, and only where that is an object. The text is
+#: the object's own, escapes kept, so validating it as a ``RecordHome`` reads exactly
+#: the home the decoder would, and fails exactly where the decoder would fail on it
+#: (ADR-0383 §5:3). Invalid JSON has no home.
+STORED_HOME_OBJECT_SQL: Final = (
+    "(SELECT CASE WHEN h.type = 'object' THEN h.value END "
     "FROM json_each(CASE WHEN json_valid(data) THEN data END) h "
     "WHERE h.key = 'home' ORDER BY h.id DESC LIMIT 1)"
+)
+
+#: That home object, read in SQL as the record decoder reads it and rendered in the
+#: compact form ``RecordHome.model_dump_json()`` gives, or ``NULL`` where the decoder
+#: could read no home there (ADR-0383 §5:3, §7:3). Its keys are ``kind`` and ``id`` and
+#: no other, in any order, the last of each where one is given twice; ``kind`` is a
+#: string, and ``id`` a string, ``null`` or absent (read as ``null``). A value of any
+#: other type, or another key, renders nothing. So the rendering equals a valid home's
+#: text exactly where the decoder reads that home, and is compared in SQL alone: it
+#: never reaches the driver, which a lone surrogate's escape would make undecodable.
+STORED_HOME_SQL: Final = (
+    "(SELECT CASE WHEN NOT EXISTS ("  # noqa: S608 — module literals alone
+    "SELECT 1 FROM json_each(o.home) e WHERE e.key NOT IN ('kind', 'id')) "
+    "AND (SELECT e.type FROM json_each(o.home) e WHERE e.key = 'kind' "
+    "ORDER BY e.id DESC LIMIT 1) = 'text' "
+    "AND coalesce((SELECT e.type FROM json_each(o.home) e WHERE e.key = 'id' "
+    "ORDER BY e.id DESC LIMIT 1), 'null') IN ('text', 'null') "
+    "THEN json_object("
+    "'kind', (SELECT e.value FROM json_each(o.home) e WHERE e.key = 'kind' "
+    "ORDER BY e.id DESC LIMIT 1), "
+    "'id', (SELECT e.value FROM json_each(o.home) e WHERE e.key = 'id' "
+    "ORDER BY e.id DESC LIMIT 1)) END "
+    f"FROM (SELECT {STORED_HOME_OBJECT_SQL} AS home) o)"
 )
 
 
