@@ -88,7 +88,7 @@ message's (§5:3). A message's home is not compared with its conversation's.
 returns this store over the same connection, bound to a sight; whether it withholds or
 only counts is fixed when the store is built (§7:10). Withholding, it holds a
 conversation whose home columns name a home the sight sees, and within it each message,
-or marker, whose own columns do (:func:`~ai_assistant.memory._bound_columns.seen_sql`);
+or marker, whose own columns do (:func:`~ai_assistant.memory._home_columns.seen_sql`);
 every statement applies that before it orders, limits, pages or counts, so it answers
 as this store would holding only those records (§7:2, §8). Device rows carry no home and
 are given back by no member of it (§3:3); a write's own checks still read them, and
@@ -157,7 +157,6 @@ from ai_assistant.core.types import (
     describe_untrusted,
     home_may_be_written,
 )
-from ai_assistant.memory._bound_columns import count_given, home_of_columns, seen_sql
 from ai_assistant.memory._episode_format import (
     CAME_THROUGH_CONVERSATION_RECORD_FORMAT,
     CLAIMED_CONVERSATION_RECORD_FORMAT,
@@ -166,6 +165,7 @@ from ai_assistant.memory._episode_format import (
     inspect_existing,
     stored_format,
 )
+from ai_assistant.memory._home_columns import count_homes, seen_sql, stored_home
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
@@ -1400,12 +1400,12 @@ class SqliteConversationStore:
         sight = self._withholding()
         if sight is None:
             return "1", []
-        return seen_sql(sight, kind=f"{prefix}home_kind", ident=f"{prefix}home_id")
+        return seen_sql(sight, kind_column=f"{prefix}home_kind", id_column=f"{prefix}home_id")
 
     def _holds(self, kind: object, ident: object) -> bool:
         """Whether this store, as bound, holds a record whose home columns are these."""
         sight = self._withholding()
-        return sight is None or sight.sees(home_of_columns(kind, ident))
+        return sight is None or sight.sees(stored_home(kind, ident))
 
     def _standing(self, conn: sqlite3.Connection, conversation_id: str) -> Sequence[Any] | None:
         """The conversation's row where it stands and this store, as bound, holds it.
@@ -1440,7 +1440,7 @@ class SqliteConversationStore:
     def _counted(self, member: str, given: Iterable[RecordHome | None]) -> None:
         """Write §11:1's count of one read, where this store is bound and only counts."""
         if self._sight is not None and self._sight_mode is SightMode.COUNT:
-            count_given(self._sight, store=_STORE_CODE, member=member, given=given)
+            count_homes(self._sight, store=_STORE_CODE, member=member, homes=given)
 
     def _deciding(self, conversation: RecordHome | None, message: object) -> RecordHome | None:
         """The home a message in ``conversation`` is withheld by, for §11:1's count.
@@ -1449,7 +1449,7 @@ class SqliteConversationStore:
         conversation it does not hold is withheld with it; otherwise its own, read from
         ``message``, the row's two home columns.
         """
-        own = home_of_columns(*cast("Sequence[object]", message))
+        own = stored_home(*cast("Sequence[object]", message))
         if self._sight is None or self._sight.sees(conversation):
             return own
         return conversation
@@ -1774,7 +1774,7 @@ class SqliteConversationStore:
         """
         async with self._lock:
             rows = await _run_to_completion(self._get_sync, conversation_id)
-        self._counted("get", (home_of_columns(row[5], row[6]) for row in rows))
+        self._counted("get", (stored_home(row[5], row[6]) for row in rows))
         return self._decode_conversation(rows[0]) if rows else None
 
     def _get_sync(self, conversation_id: str) -> list[Any]:
@@ -1891,7 +1891,7 @@ class SqliteConversationStore:
             return []
         async with self._lock:
             rows = await _run_to_completion(self._stamped_ids_sync, batch, after_id)
-        self._counted("stamped_conversation_ids", (home_of_columns(*row[1:3]) for row in rows))
+        self._counted("stamped_conversation_ids", (stored_home(*row[1:3]) for row in rows))
         return [_stamped_id_of(row[0]) for row in rows]
 
     def _stamped_ids_sync(self, batch: int, after_id: str | None) -> list[Any]:
@@ -1926,7 +1926,7 @@ class SqliteConversationStore:
             return []
         async with self._lock:
             rows = await _run_to_completion(self._recent_sync, limit, offset)
-        self._counted("recent", (home_of_columns(row[5], row[6]) for row in rows))
+        self._counted("recent", (stored_home(row[5], row[6]) for row in rows))
         return [self._decode_conversation(row) for row in rows]
 
     def _recent_sync(self, limit: int, offset: int) -> list[Any]:
@@ -2065,7 +2065,7 @@ class SqliteConversationStore:
             exported_at, conversation_rows, message_rows = await _run_to_completion(
                 self._export_sync
             )
-        homes = {row[0]: home_of_columns(row[5], row[6]) for row in conversation_rows}
+        homes = {row[0]: stored_home(row[5], row[6]) for row in conversation_rows}
         self._counted(
             "export",
             [
@@ -2369,20 +2369,20 @@ class SqliteConversationStore:
             row = self._standing(conn, conversation_id)
             if row is None:
                 raise self._unknown(conversation_id)
-            conversation = home_of_columns(row[5], row[6])
-            position = self._claimed(conn, conversation_id, effect_id)
-            if position is None:
-                return conversation, None, None
-            message = self._fetch(
+            conversation = stored_home(row[5], row[6])
+            # Whether the claimed message is held is read from its home columns before
+            # anything of it is validated: a message it does not hold is one never
+            # written, whatever its row holds (ADR-0383 §8:2).
+            claimed = self._fetch(
                 conn,
                 "read the home of a claimed message",
                 "SELECT home_kind, home_id FROM messages WHERE conversation_id = ? "
-                "AND position = ?",
-                (conversation_id, position),
-            )[0]
-            if not self._holds(*message):
+                "AND effect_id = ?",
+                (conversation_id, effect_id),
+            )
+            if not claimed or not self._holds(*claimed[0]):
                 return conversation, None, None
-            return conversation, position, message
+            return conversation, self._claimed(conn, conversation_id, effect_id), claimed[0]
 
     async def transcript(
         self,
@@ -2453,7 +2453,7 @@ class SqliteConversationStore:
                 )
             # `as_of` is the change stream's head, a store-wide figure that counts
             # writes: alike bound or not, gaps included (ADR-0383 §8:5).
-            return home_of_columns(row[5], row[6]), rows, self._head(conn)
+            return stored_home(row[5], row[6]), rows, self._head(conn)
 
     async def changes(
         self,
@@ -2544,7 +2544,7 @@ class SqliteConversationStore:
         kind = row[1]
         if kind == "devices_changed":
             return None
-        conversation = home_of_columns(row[19], row[20])
+        conversation = stored_home(row[19], row[20])
         if kind in {"message_added", "message_deleted"}:
             return self._deciding(conversation, row[17:19])
         return conversation
@@ -2621,7 +2621,7 @@ class SqliteConversationStore:
             row = self._standing(conn, conversation_id)
             if row is None:
                 return None
-            home = home_of_columns(row[5], row[6])
+            home = stored_home(row[5], row[6])
             if self._withholding() is not None:
                 return home, ()  # a device row is given back by no bound store (§3:3)
             return home, self._devices_of(conn, conversation_id)
@@ -2758,7 +2758,7 @@ class SqliteConversationStore:
             row = self._standing(conn, conversation_id)
             if row is None:
                 return None, []
-            return home_of_columns(row[5], row[6]), self._fetch(
+            return stored_home(row[5], row[6]), self._fetch(
                 conn,
                 "read untaken messages",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "  # noqa: S608 — module text; values bound
@@ -2786,7 +2786,7 @@ class SqliteConversationStore:
             return []
         async with self._lock:
             rows = await _run_to_completion(self._awaiting_sync, limit, after_id)
-        self._counted("conversations_awaiting", (home_of_columns(*row[1:3]) for row in rows))
+        self._counted("conversations_awaiting", (stored_home(*row[1:3]) for row in rows))
         return [_stamped_id_of(row[0]) for row in rows]
 
     def _awaiting_sync(self, limit: int, after_id: str | None) -> list[Any]:
@@ -2850,7 +2850,7 @@ class SqliteConversationStore:
                 return None, []
             # The bookkeeping is about a message, read with that message's row, so a
             # bound store gives back none about a message it does not hold (§7:2).
-            return home_of_columns(row[5], row[6]), self._fetch(
+            return stored_home(row[5], row[6]), self._fetch(
                 conn,
                 "read messages taken in",
                 "SELECT t.position, t.activation_id, m.home_kind, m.home_id FROM taken_in t "  # noqa: S608 — module text; values bound

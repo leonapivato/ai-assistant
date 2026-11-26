@@ -44,7 +44,6 @@ from itertools import count
 from typing import TYPE_CHECKING, Final, final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -72,6 +71,7 @@ from ai_assistant.core.types import (
     SuggestionState,
     encodable_text,
 )
+from ai_assistant.testing._home_count import count_homes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -83,8 +83,6 @@ __all__ = ["DEFAULT_PROFILE_FIELD_CHARS", "FakePersonModelStore", "profile_value
 #: The fake's bound on a text field's length, where a test names none. The deployment's
 #: is a composition-root constant (ADR-0338 §3:2); this is only the fake's default.
 DEFAULT_PROFILE_FIELD_CHARS: Final = 200
-
-_log = structlog.get_logger(__name__)
 
 #: The store's code in ADR-0383 §11:1's event, as the person-model store writes it.
 _STORE_CODE: Final = "person_model"
@@ -277,10 +275,9 @@ class FakePersonModelStore:
         """Write §11:1's count of one read, given each record's person, where counting."""
         if self._sight is None or self._sight_mode is not SightMode.COUNT:
             return
-        count = self._sight.count(
-            store=_STORE_CODE, member=member, given=((_home_of(one), None) for one in given)
+        count_homes(
+            self._sight, store=_STORE_CODE, member=member, homes=(_home_of(one) for one in given)
         )
-        _log.info("sight_counted", **count.model_dump(mode="json"))
 
     def _mint(self, kind: str) -> str:
         """A new record's id, never one a held record carries, minted before any change.

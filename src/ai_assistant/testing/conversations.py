@@ -69,7 +69,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
-import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -103,6 +102,7 @@ from ai_assistant.core.types import (
     describe_untrusted,
     home_may_be_written,
 )
+from ai_assistant.testing._home_count import count_homes
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
@@ -111,8 +111,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ChatChange, NewMessage, Sight
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
-
-_log = structlog.get_logger(__name__)
 
 #: The store's code in ADR-0383 §11:1's event, as the conversation store writes it.
 _STORE_CODE: Final = "conversations"
@@ -594,10 +592,7 @@ class FakeConversationStore:
         """Write §11:1's count of one read, where this fake is bound and only counts."""
         if self._sight is None or self._sight_mode is not SightMode.COUNT:
             return
-        count = self._sight.count(
-            store=_STORE_CODE, member=member, given=((home, None) for home in given)
-        )
-        _log.info("sight_counted", **count.model_dump(mode="json"))
+        count_homes(self._sight, store=_STORE_CODE, member=member, homes=given)
 
     def _deciding(
         self, conversation: RecordHome | None, message: RecordHome | None

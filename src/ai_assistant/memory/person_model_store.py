@@ -94,6 +94,7 @@ from ai_assistant.core.types import (
     ProfileChange,
     ProfileField,
     ProposedSuggestion,
+    RecordHomeKind,
     SightMode,
     StyleMark,
     SuggestionKind,
@@ -101,7 +102,7 @@ from ai_assistant.core.types import (
     describe_untrusted,
     encodable_text,
 )
-from ai_assistant.memory._bound_columns import count_given, home_of_person, persons_seen_sql
+from ai_assistant.memory._home_columns import count_homes, seen_sql, stored_home
 from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
@@ -116,6 +117,20 @@ _log = structlog.get_logger(__name__)
 
 #: The store's code in ADR-0383 §11:1's event.
 _STORE_CODE: Final = "person_model"
+
+#: A person's domain's kind, as a SQL literal: the kind column every record here has by
+#: construction, read by ``seen_sql`` beside the ``person_id`` it keys by.
+_PERSON_KIND_SQL: Final = f"'{RecordHomeKind.PERSON.value}'"
+
+
+def _home_of(person_id: object) -> RecordHome | None:
+    """The home of a record keyed by ``person_id``: that person's domain (ADR-0383 §3, §5:2).
+
+    Read by ``stored_home``, the one reading of a stored home, so a stored id that is
+    not, exactly, a person's has no home a bound store reads (§5:3).
+    """
+    return stored_home(RecordHomeKind.PERSON.value, person_id)
+
 
 _OWNER_ONLY: Final = 0o600
 
@@ -411,17 +426,17 @@ def _homes_of_model(model: PersonModel) -> list[RecordHome | None]:
     domain (ADR-0383 §3).
     """
     records = 1 + len(model.changes) + len(model.pins) + len(model.style_marks)
-    return [home_of_person(model.person.id)] * (records + len(model.suggestions))
+    return [_home_of(model.person.id)] * (records + len(model.suggestions))
 
 
 def _homes_of_export(exported: PersonModelExport) -> list[RecordHome | None]:
     """The home of each record an export carries, for §11:1's count."""
     return [
-        *(home_of_person(one.id) for one in exported.persons),
-        *(home_of_person(one.person_id) for one in exported.changes),
-        *(home_of_person(one.person_id) for one in exported.pins),
-        *(home_of_person(one.person_id) for one in exported.style_marks),
-        *(home_of_person(one.person_id) for one in exported.suggestions),
+        *(_home_of(one.id) for one in exported.persons),
+        *(_home_of(one.person_id) for one in exported.changes),
+        *(_home_of(one.person_id) for one in exported.pins),
+        *(_home_of(one.person_id) for one in exported.style_marks),
+        *(_home_of(one.person_id) for one in exported.suggestions),
     ]
 
 
@@ -620,12 +635,16 @@ class SqlitePersonModelStore:
     def _seen(self, column: str) -> tuple[str, list[object]]:
         """The sight's condition over ``column``'s person, or ``1`` where nothing is held back."""
         sight = self._withholding()
-        return ("1", []) if sight is None else persons_seen_sql(sight, column=column)
+        if sight is None:
+            return "1", []
+        # The person-model store keeps no kind column: every record's home is its
+        # person's domain (ADR-0383 §5:2), so the kind is the literal it always is.
+        return seen_sql(sight, kind_column=_PERSON_KIND_SQL, id_column=column)
 
     def _counted(self, member: str, given: Iterable[RecordHome | None]) -> None:
         """Write §11:1's count of one read, where this store is bound and only counts."""
         if self._sight is not None and self._sight_mode is SightMode.COUNT:
-            count_given(self._sight, store=_STORE_CODE, member=member, given=given)
+            count_homes(self._sight, store=_STORE_CODE, member=member, homes=given)
 
     # --- internals -----------------------------------------------------------------
 
@@ -692,7 +711,7 @@ class SqlitePersonModelStore:
         (ADR-0383 §7:5, §8:2).
         """
         sight = self._withholding()
-        if sight is not None and not sight.sees(home_of_person(person_id)):
+        if sight is not None and not sight.sees(_home_of(person_id)):
             return False
         return (
             conn.execute("SELECT 1 FROM persons WHERE id = ?", (person_id,)).fetchone() is not None
