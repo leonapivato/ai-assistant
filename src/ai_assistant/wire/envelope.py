@@ -2920,7 +2920,14 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``another_home``, on the ``MessageReceipt`` ``write_message`` answers. A peer at
 #:     140 cannot decode either value, so a frame carrying one is invalid for it. No
 #:     model gains a field, and the method set does not move.
-PROTOCOL_VERSION: Final[int] = 141
+#: 142: ADR-0124 §9:2 advances the version in the change that adds a value to a
+#:     wire-carried closed enumeration for ADR-0383 §4:7's refusal of a summary version
+#:     naming a story of another home: ``StorySummaryRefusalReason`` gains
+#:     ``another_home``, on the ``StorySummaryRefusal`` a ``StoryNoteOutcome`` carries,
+#:     which ``add_story_note`` answers. A peer at 141 cannot decode the value, so a
+#:     frame carrying it is invalid for it. No model gains a field, and the method set
+#:     does not move.
+PROTOCOL_VERSION: Final[int] = 142
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
