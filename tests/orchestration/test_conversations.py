@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ChannelEpisodeId,
         ChannelIdentity,
+        Conversation,
+        ConversationDigest,
     )
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
@@ -93,6 +95,24 @@ class Wiring:
             retention=retention,
             now=self.clock,
         )
+
+    # The stage's owner's acts, handed the stores the engine hands them bound to the
+    # owner's sight (ADR-0385 §3:1). Unbound here: these cases pin the stage's sequences,
+    # and `test_the_owners_acts_on_conversations` what the sight withholds.
+
+    async def digest(self, conversation_id: str) -> ConversationDigest | None:
+        return await self.stage.digest(
+            conversation_id, conversations=self.conversations, memory=self.memory
+        )
+
+    async def delete(self, conversation_id: str) -> bool:
+        return await self.stage.delete(conversation_id, conversations=self.conversations)
+
+    async def forget(self, conversation_id: str) -> bool:
+        return await self.stage.forget(conversation_id, memory=self.memory)
+
+    async def recent(self) -> list[Conversation]:
+        return await self.stage.recent(conversations=self.conversations)
 
     async def seed(  # noqa: PLR0913 — one keyword per axis a seeded episode varies
         self,
@@ -149,13 +169,13 @@ async def test_the_digest_counts_every_episode_on_the_channel() -> None:
     await wiring.seed(conversation_id, "activation:ended-early", completed=False)
     other_id, _ = await _seed_turns(wiring, 4)
 
-    digest = await wiring.stage.digest(conversation_id)
+    digest = await wiring.digest(conversation_id)
 
     assert digest is not None
     assert digest.id == conversation_id
     assert digest.recorded_turns == 3
     assert digest.last_turn_at == AT
-    other = await wiring.stage.digest(other_id)
+    other = await wiring.digest(other_id)
     assert other is not None
     assert other.recorded_turns == 4
 
@@ -165,7 +185,7 @@ async def test_the_digest_of_a_conversation_with_no_episodes_counts_none() -> No
     wiring = Wiring()
     conversation = await wiring.stage.begin(None, home=RecordHome.owners())
 
-    digest = await wiring.stage.digest(conversation)
+    digest = await wiring.digest(conversation)
 
     assert digest is not None
     assert digest.recorded_turns == 0
@@ -214,7 +234,7 @@ async def test_deletion_runs_its_steps_in_the_ratified_order() -> None:
     conversation_id, episodes = await _seed_turns(wiring, 2)
     log.clear()
 
-    assert await wiring.stage.delete(conversation_id) is True
+    assert await wiring.delete(conversation_id) is True
 
     assert log == ["stamp_deleted", "drop_if_eligible"]
     assert await channel_ids(memory, conversation_id) == episodes
@@ -226,7 +246,7 @@ async def test_deleting_a_conversation_keeps_every_episode_on_its_channel() -> N
     wiring = Wiring(clock=clock)
     conversation_id, episodes = await _seed_turns(wiring, 2)
 
-    assert await wiring.stage.delete(conversation_id) is True
+    assert await wiring.delete(conversation_id) is True
 
     assert await wiring.conversations.get(conversation_id) is None
     assert await channel_ids(wiring.memory, conversation_id) == episodes
@@ -258,12 +278,12 @@ async def test_forgetting_a_conversation_forgets_every_episode_on_its_channel() 
     clock.advance(HOUR)  # the expired one is now past its horizon and not yet purged
     assert len(await channel_ids(wiring.memory, conversation)) == 4
 
-    assert await wiring.stage.forget(conversation) is True
+    assert await wiring.forget(conversation) is True
 
     assert await channel_ids(wiring.memory, conversation) == []
     assert await channel_ids(wiring.memory, other_id) == other_episodes
     assert await wiring.conversations.get(conversation) is not None, "§5:6: it stands"
-    assert await wiring.stage.forget(conversation) is False, "nothing left to forget"
+    assert await wiring.forget(conversation) is False, "nothing left to forget"
 
 
 async def test_forgetting_reaches_a_deleted_conversations_episodes() -> None:
@@ -271,11 +291,11 @@ async def test_forgetting_reaches_a_deleted_conversations_episodes() -> None:
     clock = MovableClock()
     wiring = Wiring(clock=clock)
     conversation_id, _ = await _seed_turns(wiring, 2)
-    await wiring.stage.delete(conversation_id)
+    await wiring.delete(conversation_id)
     clock.advance(GRACE)
     await wiring.stage.sweep_deletions()
 
-    assert await wiring.stage.forget(conversation_id) is True
+    assert await wiring.forget(conversation_id) is True
 
     assert await channel_ids(wiring.memory, conversation_id) == []
 
@@ -308,12 +328,12 @@ async def test_forgetting_interrupted_part_way_is_completed_by_a_re_run() -> Non
     memory.arm = True
 
     with pytest.raises(MemoryStoreError):
-        await wiring.stage.forget(conversation_id)
+        await wiring.forget(conversation_id)
 
     assert await channel_ids(memory, conversation_id) == episodes[interrupt:]
 
     memory.arm = False
-    assert await wiring.stage.forget(conversation_id) is True
+    assert await wiring.forget(conversation_id) is True
 
     assert await channel_ids(memory, conversation_id) == []
     assert await wiring.conversations.get(conversation_id) is not None
@@ -330,8 +350,8 @@ async def test_the_sweep_reaches_a_tombstone_no_presenting_read_will_show() -> N
     await wiring.conversations.stamp_deleted(conversation_id)
 
     assert await wiring.conversations.get(conversation_id) is None
-    assert await wiring.stage.recent() == []
-    assert await wiring.stage.digest(conversation_id) is None
+    assert await wiring.recent() == []
+    assert await wiring.digest(conversation_id) is None
     assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
     assert await channel_ids(wiring.memory, conversation_id) == episodes
 
@@ -342,11 +362,11 @@ async def test_a_repeat_deletion_reports_it_did_not_stamp_and_still_finishes_the
     wiring = Wiring(clock=clock)
     conversation_id, _ = await _seed_turns(wiring, 1)
 
-    assert await wiring.stage.delete(conversation_id) is True  # inside the grace: no drop yet
+    assert await wiring.delete(conversation_id) is True  # inside the grace: no drop yet
     assert await wiring.conversations.stamped_conversation_ids() == [conversation_id]
     clock.advance(GRACE)
 
-    assert await wiring.stage.delete(conversation_id) is False, "already stamped"
+    assert await wiring.delete(conversation_id) is False, "already stamped"
     assert await wiring.conversations.stamped_conversation_ids() == []
 
 
@@ -354,7 +374,7 @@ async def test_deleting_something_that_is_already_gone_is_not_an_error() -> None
     """ADR-0076 §2: a conversation that is gone is a deletion that completed."""
     wiring = Wiring()
 
-    assert await wiring.stage.delete("nobody") is False
+    assert await wiring.delete("nobody") is False
 
 
 async def test_an_episode_landing_after_the_stamp_is_kept() -> None:
@@ -366,7 +386,7 @@ async def test_an_episode_landing_after_the_stamp_is_kept() -> None:
     clock = MovableClock()
     wiring = Wiring(clock=clock)
     conversation_id, _ = await _seed_turns(wiring, 1)
-    assert await wiring.stage.delete(conversation_id) is True
+    assert await wiring.delete(conversation_id) is True
     await wiring.memory.add(conversation_episode(conversation_id, "activation:late"))
 
     assert await wiring.stage.sweep_deletions() == 0, "the grace has not elapsed"

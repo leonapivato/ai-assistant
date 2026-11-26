@@ -2539,12 +2539,19 @@ class Engine:
         if approvals is not None:
             self._wire_approvals(approvals, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
-        # space and the same account of what runs as ``conversation`` reads.
+        # space and the same account of what runs as ``conversation`` reads. Following
+        # the stream is an owner's act (ADR-0385 §4:1): each state it reads, and the hub's
+        # own machine's listing of the conversations to read them of, is read through the
+        # store bound to the owner's sight, made anew for each read, never once for a
+        # stream. Its pages and a device's listing are not yet (`ChangeStream`).
         self._change_stream = ChangeStream(
             chat=conversations.chat_space,
+            seen_chat=lambda: self._stores.conversations(self._owners_sight(None)),
             running=self._activity,
             state_of=lambda conversation_id, running: self._conversations.state(
-                conversation_id, running=running
+                conversation_id,
+                memory=self._stores.memory(self._owners_sight(None)),
+                running=running,
             ),
             closing=lambda: self._closing,
             tracked=self._stream_read,
@@ -4988,6 +4995,9 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(device_id, name="device_id")
+        # Unbound, as today: the hub's act, no member of `AssistantEngine` (ADR-0385 §3:6),
+        # which reads no conversation record and writes device rows alone, no domain's
+        # records (§3:2, ADR-0383 §3).
         return await self._tracked(
             self._conversations.chat_space.remove_device(named), "remove_device"
         )
@@ -5076,9 +5086,19 @@ class Engine:
         ADR-0298 §5 "Reading many": a device other than the hub's own machine must
         hold a role, and is listed only the conversations it reads, in the same
         order and pages (``ConversationStore.device_conversations``).
+
+        The hub's own machine's listing is read through the conversation store bound to
+        the owner's sight from none (ADR-0385 §4:1). **A device's listing is not yet**
+        (milestone 22's B10e): each entry is a device row's access beside the
+        conversation, and a store bound to any sight gives back no device row (ADR-0383
+        §3:3), so bound, every device's listing would be empty.
         """
         if device.is_hub:
-            listed = await self._conversations.recent(limit=limit, offset=offset)
+            listed = await self._conversations.recent(
+                conversations=self._stores.conversations(self._owners_sight(None)),
+                limit=limit,
+                offset=offset,
+            )
             return tuple(conversation_summary(one) for one in listed)
         await self._device_checks.reading_many(device, "recent_conversations")
         reads = await self._conversations.device_conversations(
@@ -5152,9 +5172,14 @@ class Engine:
 
         Counted however the walk ends, since one that failed part-way may still have
         destroyed the episode the state was read from.
+
+        ADR-0385 §5:4: it acts on the owner's domain alone, reading and forgetting
+        through the memory store bound to the owner's sight from that domain, so it
+        forgets that domain's episodes on the place and none of another home.
         """
+        memory = self._stores.memory(self._owners_sight(RecordHome.owners()))
         try:
-            return await self._conversations.forget(conversation_id)
+            return await self._conversations.forget(conversation_id, memory=memory)
         finally:
             self._count_change(conversation_id)
 
@@ -5180,9 +5205,21 @@ class Engine:
     async def _digest(
         self, device: RequestingDevice, conversation_id: str, *, running: Sequence[str | None]
     ) -> ConversationDigest | None:
-        """ADR-0298 §5 "Reading one", then the digest."""
+        """ADR-0298 §5 "Reading one", then the digest.
+
+        The device check reads the conversation's devices as today and runs first
+        (ADR-0385 §3:2, §5:3); the digest's record and episodes are then read through the
+        stores bound to the owner's sight from none (§4:1), so a conversation it does not
+        see is ``None``, as one never started.
+        """
         await self._device_checks.reading(device, conversation_id, "conversation")
-        return await self._conversations.digest(conversation_id, running=running)
+        sight = self._owners_sight(None)
+        return await self._conversations.digest(
+            conversation_id,
+            conversations=self._stores.conversations(sight),
+            memory=self._stores.memory(sight),
+            running=running,
+        )
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Forget the episodes on a conversation's place, and leave it (ADR-0293 §2:4).
@@ -5234,13 +5271,22 @@ class Engine:
         """ADR-0298 §5 "Starting", then the conversation.
 
         A conversation a device starts takes the home of whoever the connection it came
-        by belongs to, by the one rule :func:`source_home` reads (ADR-0383 §4:3).
+        by belongs to, by the one rule :func:`source_home` reads (ADR-0383 §4:3). The
+        check reads "my devices" as today (ADR-0385 §3:2); the conversation is written
+        through the store bound to the owner's sight from none (§3:1).
         """
         await self._device_checks.starting(device)
-        return conversation_summary(await self._conversations.start(home=source_home()))
+        started = await self._conversations.start(
+            home=source_home(),
+            conversations=self._stores.conversations(self._owners_sight(None)),
+        )
+        return conversation_summary(started)
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
         """Read "my devices" (ADR-0293 §3:1).
+
+        Read as today, unbound: "my devices" is a set of device rows, no domain's records
+        (ADR-0385 §3:2, ADR-0383 §3).
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -5251,6 +5297,8 @@ class Engine:
 
     async def set_my_devices(self, devices: Sequence[ChatDevice]) -> bool:
         """Replace "my devices" (ADR-0293 §3:1, §3:2).
+
+        Written as today, unbound: device rows are no domain's records (ADR-0385 §3:2).
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -5286,8 +5334,12 @@ class Engine:
             devices=held,
         )
         check_devices_fit(held, conversation_id=named, max_bytes=self._max_payload_bytes)
+        # ADR-0385 §3:1, §3:2: the devices are no domain's records, but the conversation
+        # named is, so it is named through the store bound to the owner's sight from none.
         return await self._tracked(
-            self._conversations.set_conversation_devices(named, held),
+            self._conversations.set_conversation_devices(
+                named, held, conversations=self._stores.conversations(self._owners_sight(None))
+            ),
             "set_conversation_devices",
             checked=True,
         )
@@ -5343,6 +5395,15 @@ class Engine:
         the request or the message carries (ADR-0378 §4:2). It lands in the home of
         whoever that connection belongs to, by the one rule :func:`source_home` reads
         (ADR-0383 §4:3), never one the request names.
+
+        **The owner's act ends at the record** (ADR-0385 §3:1): the check reads the
+        conversation's devices as today (§3:2), and the message is written through the
+        conversation store bound to the owner's sight from none, so a conversation it does
+        not see is one never started. Telling the chat's reader hands over nothing but
+        the conversation's id: the message becomes a work's input only when the reader's
+        intake takes it in (``untaken_messages``, ``take_in``), a sensor's finding of what
+        is due, which reads as today (ADR-0383 §7:8), and it then reaches its work as its
+        input (§7:9).
         """
         await self._device_checks.writing_message(device, conversation_id, message)
         receipt = await self._conversations.write(
@@ -5350,6 +5411,7 @@ class Engine:
             message,
             home=source_home(),
             came_through=device.connecting_device_id,
+            conversations=self._stores.conversations(self._owners_sight(None)),
         )
         if receipt.position is not None and self._chat_reader is not None:
             self._chat_reader.notice(conversation_id)
@@ -5379,7 +5441,11 @@ class Engine:
         await self._tracked(self._composed(device, named), "composing", checked=True, traced=False)
 
     async def _composed(self, device: RequestingDevice, conversation_id: str) -> None:
-        """ADR-0298 §5 "Writing", then the signal to the chat's reader (ADR-0332 §5:7)."""
+        """ADR-0298 §5 "Writing", then the signal to the chat's reader (ADR-0332 §5:7).
+
+        No store but the conversation's devices is read, as today (ADR-0385 §3:2), and
+        nothing is written (ADR-0332 §5:8), so there is nothing to bind.
+        """
         await self._device_checks.writing(device, conversation_id, "composing")
         if self._chat_reader is not None:
             self._chat_reader.composing(conversation_id)
@@ -5407,9 +5473,19 @@ class Engine:
     async def _deleted_message(
         self, device: RequestingDevice, conversation_id: str, position: int
     ) -> bool:
-        """ADR-0298 §5 "Writing", then the deletion."""
+        """ADR-0298 §5 "Writing", then the deletion.
+
+        ADR-0385 §5:2, §5:3: the device check runs first and stands; then the deletion
+        through the store bound to the owner's sight from none, which raises
+        ``UnknownConversationError`` for a conversation it does not see and answers
+        ``False`` for a message it does not see, as for one never written.
+        """
         await self._device_checks.writing(device, conversation_id, "delete_message")
-        return await self._conversations.delete_message(conversation_id, position)
+        return await self._conversations.delete_message(
+            conversation_id,
+            position,
+            conversations=self._stores.conversations(self._owners_sight(None)),
+        )
 
     async def delete_conversation(self, conversation_id: Identifier) -> bool:
         """Delete a conversation and its transcript, forgetting nothing (ADR-0293 §2:3).
@@ -5430,9 +5506,16 @@ class Engine:
         )
 
     async def _deleted_conversation(self, device: RequestingDevice, conversation_id: str) -> bool:
-        """ADR-0298 §5 "Writing", then the deletion."""
+        """ADR-0298 §5 "Writing", then the deletion.
+
+        ADR-0385 §5:2, §5:3: the device check runs first and stands; then the deletion
+        through the store bound to the owner's sight from none, which answers ``False``
+        for a conversation it does not see, as for one never written.
+        """
         await self._device_checks.writing(device, conversation_id, "delete_conversation")
-        return await self._conversations.delete(conversation_id)
+        return await self._conversations.delete(
+            conversation_id, conversations=self._stores.conversations(self._owners_sight(None))
+        )
 
     async def transcript(
         self,
@@ -5471,9 +5554,20 @@ class Engine:
     async def _transcript(
         self, device: RequestingDevice, conversation_id: str, *, before: int | None, limit: int
     ) -> TranscriptPage | None:
-        """ADR-0298 §5 "Reading one", then the page, fitted."""
+        """ADR-0298 §5 "Reading one", then the page, fitted.
+
+        The device check reads the conversation's devices as today and runs first
+        (ADR-0385 §3:2); the page is then read through the store bound to the owner's
+        sight from none (§4:1): ``None`` for a conversation it does not see, and the
+        messages it sees.
+        """
         await self._device_checks.reading(device, conversation_id, "transcript")
-        page = await self._conversations.transcript(conversation_id, before=before, limit=limit)
+        page = await self._conversations.transcript(
+            conversation_id,
+            before=before,
+            limit=limit,
+            conversations=self._stores.conversations(self._owners_sight(None)),
+        )
         return fit_transcript(page, max_bytes=self._max_payload_bytes)
 
     async def chat_changes(
@@ -5524,6 +5618,11 @@ class Engine:
         and reads ``ConversationStore.device_changes`` — the changes it may see, by
         its membership as each change was recorded — restricted to the conversations
         it named as :meth:`ConversationStore.changes` restricts them.
+
+        **Not yet read through the owner's sight** (milestone 22's B10e). A store bound to
+        any sight gives back no device row (ADR-0383 §3:3): bound, the hub's page would
+        lose every change of a set of devices and each start's devices, and a device's
+        page every change, where the owner reads them today (ADR-0385 §3:2).
         """
         if device.is_hub:
             page = await self._conversations.changes(

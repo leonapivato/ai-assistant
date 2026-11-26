@@ -141,17 +141,18 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 #: of what is due (§7:12, §7:13), the engine's start and ADR-0384 §2's unchanged jobs
 #: (§7:8).
 NOT_YET_CONVERTED: Final[dict[str, str]] = {
+    # Each state it sends, and the hub's own machine's listing, read through the store
+    # bound to the owner's sight for each read (B10e). Held unbound: each conversation's
+    # devices, read as today (ADR-0385 §3:2); and, not yet converted, the pages of changes
+    # and a device's listing, which mix device rows with records of a home where a store
+    # bound to any sight gives back no device row (ADR-0383 §3:3).
     "change_stream.py:ChangeStream": "B10e",
-    # The surface's acts (B10e); its sweeps are §7:8's. Its `begin`, which marks the
-    # trigger's conversation active as a work's turn begins, is admitted by ADR-0387 §7:4.
+    # The owner's acts on conversations read and write through stores bound to the
+    # owner's sight, handed per call (B10e). Held unbound: the sweeps (§7:8); `begin`,
+    # admitted by ADR-0387 §7:4; "my devices" and a conversation's devices (ADR-0385
+    # §3:2); and, not yet converted, a device's listing, its changes and the hub's
+    # changes, as `ChangeStream`'s pages (ADR-0383 §3:3).
     "conversations.py:ConversationLifecycle": "B10e",
-    "conversations.py:conversation_state": "B10e",
-    "conversations.py:episodes_on_place": "B10e",
-    "conversations.py:_open_on": "B10e",
-    "conversations.py:_shown_ending": "B10e",
-    "conversations.py:_older_ending": "B10e",
-    "conversations.py:_judged": "B10e",
-    "conversations.py:_last_taker": "B10e",
     # Every lane from B8b to B10e converts a use; its start is §7:8's. The owner's acts on
     # memory and stories (B10b), and on notifications, the profile and the approvals panel
     # (B10f), read through the holder, bound to the owner's sight.
@@ -601,6 +602,103 @@ def test_the_owners_acts_on_notifications_the_profile_approvals_and_tasks_hold_n
     ):
         assert NAMED_BY_THE_DECISION[left] == "§7:8"
     assert held["task_manager.py:TaskManager"] == frozenset({"PlanStore"})
+
+
+def test_the_helpers_of_the_owners_acts_on_conversations_hold_no_store() -> None:
+    """A conversation's current state, the episodes on its place and the walks under them
+    (milestone 22's B10e) take a memory store bound to a sight alone: the owner's act's,
+    from none for the state and from the owner's domain for forgetting (ADR-0385 §4:1,
+    §5:4)."""
+    held = unbound_holders()
+    for converted in (
+        "conversations.py:conversation_state",
+        "conversations.py:episodes_on_place",
+        "conversations.py:_open_on",
+        "conversations.py:_shown_ending",
+        "conversations.py:_older_ending",
+        "conversations.py:_judged",
+        "conversations.py:_last_taker",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+
+
+#: The methods of each holder B10e left holding a store unbound, which alone may reach
+#: it: every other method is an owner's act, and reads through the stores handed it bound
+#: to the owner's sight.
+_KEPT_UNBOUND: Final[dict[tuple[str, str], tuple[frozenset[str], frozenset[str]]]] = {
+    ("conversations.py", "ConversationLifecycle"): (
+        frozenset({"_conversations", "_memory"}),
+        frozenset(
+            {
+                "__init__",
+                # Handed to the readers and writers that hold it under their own clauses.
+                "chat_space",
+                # ADR-0387 §7:4: a work's own turn.
+                "begin",
+                # ADR-0385 §3:2: device rows, read and written as today.
+                "my_devices",
+                "set_my_devices",
+                "conversation_devices",
+                # Not yet converted (ADR-0383 §3:3); the device checks read them as today.
+                "device_conversations",
+                "device_changes",
+                "changes",
+                # §7:8: the engine's start and its sweeps.
+                "sweep_deletions",
+                "_finish_deletion",
+                "reclaim",
+                "_idle_candidates",
+                "_is_emptied",
+            }
+        ),
+    ),
+    ("change_stream.py", "ChangeStream"): (
+        frozenset({"_chat"}),
+        frozenset(
+            {
+                "__init__",
+                # A device's listing, not yet converted; the hub's own machine's listing
+                # reads the bound store, or `_chat` where none is handed (the canonical
+                # fake engine).
+                "_read_conversations",
+                # The pages of changes, not yet converted.
+                "_page",
+                # ADR-0385 §3:2: whether a device reads a conversation, from its devices.
+                "_reads",
+            }
+        ),
+    ),
+}
+
+
+def test_the_owners_acts_on_conversations_reach_no_store_unbound() -> None:
+    """ADR-0385 §3:1: the lifecycle's and the change stream's methods the owner's acts
+    reach read through the stores handed them bound; the unbound store is reached only
+    where a clause keeps a read so, or a read is not yet converted (B10e)."""
+    reaches: dict[str, list[str]] = {}
+    for (module, holder), (attributes, kept) in _KEPT_UNBOUND.items():
+        tree = _parsed(_ROOT / module)
+        (cls,) = (one for one in tree.body if isinstance(one, ast.ClassDef) and one.name == holder)
+        methods = {
+            node.name: node
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        assert kept <= set(methods), f"{holder} no longer has {sorted(kept - set(methods))}"
+        reaches[f"{module}:{holder}"] = sorted(
+            name
+            for name, node in methods.items()
+            if name not in kept
+            and any(
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "self"
+                and inner.attr in attributes
+                for inner in ast.walk(node)
+            )
+        )
+    assert reaches == {key: [] for key in reaches}
 
 
 def test_the_reading_sees_every_shape_a_store_is_held_in(tmp_path: Path) -> None:
