@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryChange,
     StoryDecision,
+    StoryFirstNote,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
@@ -487,6 +488,58 @@ async def test_a_kept_summary_is_never_rewritten_or_removed_by_the_database(
             conn.execute("DELETE FROM summaries")
     finally:
         conn.close()
+
+
+async def test_a_backend_failure_on_a_first_note_rolls_the_whole_create_back(
+    tmp_path: Path,
+) -> None:
+    """ADR-0388 §3:3: a fault on the second first note leaves no story, member or note.
+
+    The fault is injected by a trigger on the second note's insert, so it fires inside
+    the create's transaction after the story is minted, its members added and its first
+    note written: the point a store writing the notes outside that transaction would
+    leave a story with one note.
+    """
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        earlier = await made(store, act("a"))
+        await noted(store, earlier, "An earlier note.", on="a")
+        before = await everything(store)
+        injector = sqlite3.connect(path)
+        injector.execute(
+            "CREATE TRIGGER injected BEFORE INSERT ON notes "
+            "WHEN NEW.text = 'Second.' "
+            "BEGIN SELECT RAISE(ABORT, 'injected fault'); END"
+        )
+        injector.commit()
+        firsts = [
+            StoryFirstNote(text=text, author=StoryNoteAuthor.PLANNING, written_during="d")
+            for text in ("First.", "Second.")
+        ]
+        with pytest.raises(StoryStoreError, match="injected fault"):
+            await store.create(
+                [act("d"), sub(earlier)],
+                home=RecordHome.owners(),
+                actor=StoryActor.PLANNING,
+                notes=firsts,
+            )
+        assert await everything(store) == before
+        assert await store.stories_of(act("d")) == ()
+        assert await store.stories_of(sub(earlier)) == ()
+        injector.execute("DROP TRIGGER injected")
+        injector.commit()
+        injector.close()
+        outcome = await store.create(
+            [act("d")], home=RecordHome.owners(), actor=StoryActor.PLANNING, notes=firsts
+        )
+        assert outcome.story_id is not None, outcome
+        assert [note.text for note in await notes_of(store, outcome.story_id)] == [
+            "First.",
+            "Second.",
+        ]
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("operation", ["merge", "split", "move"])
