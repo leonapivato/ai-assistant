@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    RecordHome,
     RoundResponse,
     SupportHolder,
     Sureness,
@@ -472,6 +473,7 @@ async def test_an_unknown_senders_words_are_received_and_withheld_and_its_item_s
                 written_at=AT,
                 device_id="x",
                 message_id="m-3",
+                home=RecordHome.owners(),
             ),
         ),
     )
@@ -540,6 +542,7 @@ async def test_a_work_that_is_no_persons_names_the_person_in_the_three_roles() -
         written_at=AT,
         device_id="home-pc",
         message_id="m-1",
+        home=RecordHome.owners(),
     )
     heard = await _heard(row, window=TranscriptWindow(CHAT, (earlier,)))
     framing = heard.section("The stimulus").split("\n")[0]
@@ -705,6 +708,7 @@ async def test_a_chat_batch_of_two_senders_attributes_each_message_by_its_own_re
                 written_at=AT,
                 device_id=f"device-{one.position}",
                 message_id=f"m-{one.position}",
+                home=RecordHome.owners(),
             )
             for one in taken
         ),

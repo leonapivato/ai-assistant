@@ -28,7 +28,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     UnknownConversationError,
 )
-from ai_assistant.core.types import Validity
+from ai_assistant.core.types import RecordHome, Validity
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.testing import (
@@ -131,7 +131,7 @@ class Wiring:
 
 async def _seed_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
     """Start a conversation and put ``count`` completed episodes on its channel."""
-    conversation = await wiring.stage.begin(None)
+    conversation = await wiring.stage.begin(None, home=RecordHome.owners())
     episodes = [
         await wiring.seed(conversation.id, f"activation:{conversation.id}-{index}")
         for index in range(count)
@@ -163,7 +163,7 @@ async def test_the_digest_counts_every_episode_on_the_channel() -> None:
 async def test_the_digest_of_a_conversation_with_no_episodes_counts_none() -> None:
     """§4:2: an emptied conversation still shows, with nothing to destroy but itself."""
     wiring = Wiring()
-    conversation = await wiring.stage.begin(None)
+    conversation = await wiring.stage.begin(None, home=RecordHome.owners())
 
     digest = await wiring.stage.digest(conversation.id)
 
@@ -247,7 +247,7 @@ async def test_forgetting_a_conversation_forgets_every_episode_on_its_channel() 
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock)
-    conversation = await wiring.stage.begin(None)
+    conversation = await wiring.stage.begin(None, home=RecordHome.owners())
     await wiring.seed(conversation.id, "activation:completed")
     await wiring.seed(conversation.id, "activation:failed", completed=False)
     await wiring.seed(conversation.id, "activation:expired", expires_at=AT + MINUTE)
@@ -530,7 +530,7 @@ async def test_a_crashed_deletion_is_finished_after_the_index_is_reopened(tmp_pa
             retention=RETENTION,
             now=clock,
         )
-        conversation = await stage.begin(None)
+        conversation = await stage.begin(None, home=RecordHome.owners())
         await memory.add(conversation_episode(conversation.id, "activation:before-the-crash"))
         assert await first.stamp_deleted(conversation.id) is True
         # ...and here the process dies: no episode deleted, no record dropped.
@@ -591,7 +591,7 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_an_episode(held:
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock, retention=7 * DAY)
-    conversation = await wiring.stage.begin(None)
+    conversation = await wiring.stage.begin(None, home=RecordHome.owners())
     if held == "live":
         episode = await wiring.seed(conversation.id, "activation:held", unexpiring=True)
     elif held == "expired-unpurged":
@@ -652,7 +652,9 @@ async def test_reclaim_judges_against_the_horizon_in_force_when_it_runs(
         retention=started_under,
         now=clock,
     )
-    conversation = await started.begin(None)  # emptied by construction: no turn ever landed
+    conversation = await started.begin(
+        None, home=RecordHome.owners()
+    )  # emptied by construction: no turn ever landed
 
     clock.advance(10 * DAY)
     conversations.retune(reclaimed_under)
@@ -675,7 +677,7 @@ async def test_reclaim_is_switched_off_when_retention_is_unset() -> None:
     """
     clock = MovableClock()
     wiring = Wiring(clock=clock, retention=None)
-    conversation = await wiring.stage.begin(None)
+    conversation = await wiring.stage.begin(None, home=RecordHome.owners())
 
     clock.advance(1000 * DAY)
 

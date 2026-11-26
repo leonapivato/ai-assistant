@@ -802,7 +802,7 @@ async def _fake_audit_trail(now: Clock) -> None:
 
 async def _fake_conversation_store(now: Clock) -> None:
     """Starting a conversation stamps it from the store's own clock."""
-    await FakeConversationStore(now=now).start()
+    await FakeConversationStore(now=now).start(home=RecordHome.owners())
 
 
 async def _fake_notification_outbox(now: Clock) -> None:
@@ -837,7 +837,7 @@ async def _sqlite_conversation_store(now: Clock) -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = SqliteConversationStore(path=Path(directory) / "conversations.db", now=now)
         try:
-            await store.start()
+            await store.start(home=RecordHome.owners())
         finally:
             store.close()
 

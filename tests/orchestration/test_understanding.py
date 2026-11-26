@@ -578,6 +578,7 @@ def _message(position: int, text: str, author: MessageAuthor) -> TranscriptMessa
         text=text,
         device_id="phone" if user else None,
         message_id=f"m-{position}" if user else None,
+        home=RecordHome.owners(),
     )
 
 

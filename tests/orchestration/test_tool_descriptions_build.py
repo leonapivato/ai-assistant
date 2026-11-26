@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
+    RecordHome,
     RequestedCall,
     Reversibility,
     RiskLevel,
@@ -443,13 +444,21 @@ async def test_an_approved_searchs_looking_for_survives_a_restart_and_reaches_it
 async def test_search_connections_finds_an_unshown_conversation_and_labels_it() -> None:
     """§3:7-§3:8: matched against its transcript, read through the store's existing reads."""
     store = FakeConversationStore()
-    plans = await store.start()
-    other = await store.start()
+    plans = await store.start(home=RecordHome.owners())
+    other = await store.start(home=RecordHome.owners())
     await store.append_message(
-        plans.id, NewMessage(author=MessageAuthor.ASSISTANT, text="the trip to Porto in June")
+        plans.id,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="the trip to Porto in June",
+            home=RecordHome.owners(),
+        ),
     )
     await store.append_message(
-        other.id, NewMessage(author=MessageAuthor.ASSISTANT, text="the dentist on Tuesday")
+        other.id,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT, text="the dentist on Tuesday", home=RecordHome.owners()
+        ),
     )
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
 
@@ -723,7 +732,7 @@ def test_a_recorded_request_for_approval_shows_its_nested_call_under_the_names_n
 async def test_search_connections_matches_what_an_entry_says_it_can_do() -> None:
     """§3:8: matched against what the entry would show, what it can do included."""
     store = FakeConversationStore()
-    quiet = await store.start()
+    quiet = await store.start(home=RecordHome.owners())
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
 
     found = await search.search("text messages", 1)

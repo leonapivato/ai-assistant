@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageReceipt,
     NewMessage,
+    RecordHome,
     UserMessage,
 )
 from ai_assistant.interfaces import cli
@@ -368,7 +369,10 @@ async def test_chat_offers_both_to_a_device_that_only_writes_or_only_reads(
     engine = FakeAssistantEngine()
     conversation = await _started(engine, ChatDevice(device_id="hub", access=access))
     await engine.chat.append_message(
-        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="the secret plan")
+        conversation,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT, text="the secret plan", home=RecordHome.owners()
+        ),
     )
 
     code = await _chat(engine, conversation, _lines(), confirm=False)
@@ -441,7 +445,10 @@ async def test_a_reply_names_the_message_it_replies_to(output: StringIO) -> None
     engine = FakeAssistantEngine()
     conversation = await _started(engine, HUB)
     await engine.chat.append_message(
-        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Booked Lakeside.")
+        conversation,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT, text="Booked Lakeside.", home=RecordHome.owners()
+        ),
     )
 
     await _chat(engine, conversation, _lines("/reply 1 wrong campsite, I meant Pinecrest"))
@@ -568,7 +575,10 @@ async def test_the_assistants_message_is_shown_as_it_arrives(output: StringIO) -
             return "Is Pinecrest free on Friday?"
         await _until(output, "received, #1")
         await engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest is free.")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Pinecrest is free.", home=RecordHome.owners()
+            ),
         )
         await _until(output, "Pinecrest is free.")
         return None
@@ -864,7 +874,10 @@ async def test_reading_taken_away_before_the_snapshot_shows_nothing(output: Stri
     engine = _NarrowsBeforeTheSnapshot()
     conversation = await _started(engine, HUB)
     await engine.chat.append_message(
-        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="the secret plan")
+        conversation,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT, text="the secret plan", home=RecordHome.owners()
+        ),
     )
 
     code = await _chat(engine, conversation, _lines("hello"))
@@ -1111,7 +1124,12 @@ async def test_a_conversation_shows_its_devices_state_and_messages(output: Strin
     )
     await engine.chat.append_message(
         conversation,
-        NewMessage(author=MessageAuthor.ASSISTANT, text="line one\nline two", cut_off=True),
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="line one\nline two",
+            cut_off=True,
+            home=RecordHome.owners(),
+        ),
     )
     await engine.write_message(
         conversation,

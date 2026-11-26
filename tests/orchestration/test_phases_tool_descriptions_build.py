@@ -16,7 +16,13 @@ from exchange_support import reported, section, tags, text_call
 from phases_support import open_conversation, phases_harness, say, settled, written
 
 from ai_assistant.core.errors import ConnectionStoreError
-from ai_assistant.core.types import MessageAuthor, NewMessage, ProposedCall, RoundResponse
+from ai_assistant.core.types import (
+    MessageAuthor,
+    NewMessage,
+    ProposedCall,
+    RecordHome,
+    RoundResponse,
+)
 from ai_assistant.orchestration.approval_calls import ApprovalsSeams
 from ai_assistant.orchestration.channel_kinds import EMAIL_ACCOUNT_KIND, AccountConnection
 from ai_assistant.testing import FakeToolCallingCompleter
@@ -182,7 +188,12 @@ async def test_a_conversation_search_connections_found_takes_a_text() -> None:
     recent = {one.id for one in await harness.conversation_store.recent(limit=3)}
     older = next(one for one in conversations if one not in recent)
     await harness.conversation_store.append_message(
-        older, NewMessage(author=MessageAuthor.ASSISTANT, text="the flight to Porto leaves at nine")
+        older,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="the flight to Porto leaves at nine",
+            home=RecordHome.owners(),
+        ),
     )
     assert older not in {one.id for one in await harness.conversation_store.recent(limit=3)}
     await say(harness, asking, "tell the Porto chat I found it")
@@ -226,7 +237,10 @@ async def test_connections_hold_the_three_most_recent_conversations_and_an_older
     for one in range(5):
         conversation = await open_conversation(harness)
         await harness.conversation_store.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text=f"note {one}")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text=f"note {one}", home=RecordHome.owners()
+            ),
         )
         conversations.append(conversation)
     recent = [one.id for one in await harness.conversation_store.recent(limit=3)]

@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     DeviceRole,
     MessageAddedChange,
     MessageAuthor,
+    RecordHome,
     RequestingDevice,
     TranscriptMessage,
     UserMessage,
@@ -497,6 +498,7 @@ class _Flooding(FakeAssistantEngine):
                 written_at=_AT,
                 author=MessageAuthor.ASSISTANT,
                 text="x" * 15_000,
+                home=RecordHome.owners(),
             )
             change = MessageAddedChange(seq=seq, message=message)
             yield ChatStreamChunk(change=DeviceChange(change=change))

@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RecordHome,
     Role,
     RoundResponse,
     TranscriptMessage,
@@ -439,8 +440,10 @@ async def test_the_state_is_working_until_the_reply_is_written_then_done() -> No
 
 def test_couldnt_finish_lists_the_effects_that_did_happen() -> None:
     """§9:1: the fixed text, then each effect that happened."""
-    assert couldnt_finish() == NewMessage(author=MessageAuthor.ASSISTANT, text=COULDNT_FINISH)
-    written = couldnt_finish(("the tool calendar.book ran",))
+    assert couldnt_finish(home=RecordHome.owners()) == NewMessage(
+        author=MessageAuthor.ASSISTANT, text=COULDNT_FINISH, home=RecordHome.owners()
+    )
+    written = couldnt_finish(("the tool calendar.book ran",), home=RecordHome.owners())
     assert written.author is MessageAuthor.ASSISTANT
     assert (
         written.text
@@ -615,19 +618,25 @@ async def test_each_input_message_carries_the_message_it_replies_to() -> None:
 def test_the_writer_fits_a_message_with_leading_whitespace_and_wide_characters() -> None:
     """§7:3: the longest prefix one read can return, found whatever the text holds."""
     conversation = "0" * 36
-    padded = NewMessage(author=MessageAuthor.ASSISTANT, text=" " * 9000 + "x" * 7000)
+    padded = NewMessage(
+        author=MessageAuthor.ASSISTANT, text=" " * 9000 + "x" * 7000, home=RecordHome.owners()
+    )
     fitted = fitted_message(conversation, padded, max_bytes=12000)
     assert fitted.cut_off
     assert fitted.text.strip()
     assert padded.text.startswith(fitted.text)
-    wide = NewMessage(author=MessageAuthor.ASSISTANT, text='é"\n' * 5000)
+    wide = NewMessage(author=MessageAuthor.ASSISTANT, text='é"\n' * 5000, home=RecordHome.owners())
     fitted = fitted_message(conversation, wide, max_bytes=4096)
     assert fitted.cut_off
     assert wide.text.startswith(fitted.text)
-    longer = NewMessage(author=MessageAuthor.ASSISTANT, text=wide.text[: len(fitted.text) + 1])
+    longer = NewMessage(
+        author=MessageAuthor.ASSISTANT,
+        text=wide.text[: len(fitted.text) + 1],
+        home=RecordHome.owners(),
+    )
     # The longest: one more character no longer fits.
     assert fitted_message(conversation, longer, max_bytes=4096) is not longer
-    short = NewMessage(author=MessageAuthor.ASSISTANT, text="fits")
+    short = NewMessage(author=MessageAuthor.ASSISTANT, text="fits", home=RecordHome.owners())
     assert fitted_message(conversation, short, max_bytes=4096) is short
 
 
@@ -712,7 +721,7 @@ async def _seeded(
     last message, which waits, replies to ``replies_to``.
     """
     await store.set_my_devices([_PHONE])
-    conversation = (await store.start()).id
+    conversation = (await store.start(home=RecordHome.owners())).id
     for n, author in enumerate(authors, 1):
         user = author is _USER
         message = NewMessage(
@@ -721,6 +730,7 @@ async def _seeded(
             device_id=_PHONE.device_id if user else None,
             message_id=f"m-{n}" if user else None,
             replies_to=replies_to if n == len(authors) else None,
+            home=RecordHome.owners(),
         )
         await store.append_message(conversation, message)
     for position, activation_id in (taken or {1: _WRITER_A, 4: _WRITER_B}).items():

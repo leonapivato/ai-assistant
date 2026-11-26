@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     MessageAuthor,
     NewMessage,
+    RecordHome,
 )
 from ai_assistant.wire.errors import HubUnavailableError
 
@@ -139,7 +140,12 @@ async def test_a_message_is_received_and_the_reply_arrives_by_following(
 
         await drive.engine.chat.append_message(
             conversation,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", replies_to=1),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="Pinecrest, Friday.",
+                replies_to=1,
+                home=RecordHome.owners(),
+            ),
         )
         drive.engine.push_state(conversation, ConversationState())
         reply = transcript.locator("li.from-assistant")
@@ -190,7 +196,10 @@ async def test_a_stream_that_fails_stops_and_follows_again_from_its_cursor_when_
         drive.engine.chat_reader = False
         conversation = await _open(drive)
         await drive.engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Before the failure.")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Before the failure.", home=RecordHome.owners()
+            ),
         )
         transcript = drive.page.locator("#chat-transcript")
         await expect(transcript).to_contain_text("Before the failure.", timeout=_FOLLOWED)
@@ -202,7 +211,10 @@ async def test_a_stream_that_fails_stops_and_follows_again_from_its_cursor_when_
         await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
         await expect(drive.page.locator("#chat .fault")).to_contain_text("declined")
         await drive.engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="While stopped.")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="While stopped.", home=RecordHome.owners()
+            ),
         )
         await drive.page.wait_for_timeout(3_000)
         assert len(_follows(drive)) == 1
@@ -266,7 +278,12 @@ async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
         )
         await drive.engine.chat.append_message(
             conversation,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="Booked.", replies_to=1),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="Booked.",
+                replies_to=1,
+                home=RecordHome.owners(),
+            ),
         )
         reply = drive.page.locator("#chat-transcript li.from-assistant")
         await expect(reply).to_contain_text("Booked.", timeout=_FOLLOWED)
@@ -640,7 +657,10 @@ async def test_a_transcript_that_could_not_be_read_is_offered_again(
         )
         started = await drive.engine.start_conversation()
         await drive.engine.chat.append_message(
-            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Already here.")
+            started.id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Already here.", home=RecordHome.owners()
+            ),
         )
         held = drive.engine.transcript
 
@@ -805,7 +825,10 @@ async def test_a_reply_being_written_to_a_message_deleted_meanwhile_names_it_as_
     async with driving(gateway_browser, tmp_path) as drive:
         conversation = await _open(drive)
         await drive.engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Secret plan.")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Secret plan.", home=RecordHome.owners()
+            ),
         )
         message = drive.page.locator("#chat-transcript li.from-assistant")
         await expect(message).to_contain_text("Secret plan.", timeout=_IDLE_FOLLOWED)
@@ -830,11 +853,19 @@ async def test_a_reply_to_a_deleted_message_older_than_the_snapshot_says_so(
         started = await drive.engine.start_conversation()
         for index in range(1, 51):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Note {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT, text=f"Note {index}.", home=RecordHome.owners()
+                ),
             )
         await drive.engine.chat.append_message(
             started.id,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="About the first.", replies_to=1),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="About the first.",
+                replies_to=1,
+                home=RecordHome.owners(),
+            ),
         )
         await drive.engine.delete_message(started.id, position=1)
 
@@ -882,17 +913,28 @@ async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
         started = await drive.engine.start_conversation()
         for index in range(1, 27):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Old {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT, text=f"Old {index}.", home=RecordHome.owners()
+                ),
             )
         for index in range(1, 51):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT,
+                    text=f"Filler {index}.",
+                    home=RecordHome.owners(),
+                ),
             )
         for index in range(1, 26):
             await drive.engine.chat.append_message(
                 started.id,
                 NewMessage(
-                    author=MessageAuthor.ASSISTANT, text=f"About {index}.", replies_to=index
+                    author=MessageAuthor.ASSISTANT,
+                    text=f"About {index}.",
+                    replies_to=index,
+                    home=RecordHome.owners(),
                 ),
             )
         for index in range(1, 27):
@@ -912,7 +954,12 @@ async def test_every_old_reply_target_is_read_including_one_a_live_reply_names(
 
         await drive.engine.chat.append_message(
             started.id,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="About 26.", replies_to=26),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="About 26.",
+                replies_to=26,
+                home=RecordHome.owners(),
+            ),
         )
         late = drive.page.locator("#chat-transcript li", has_text="About 26.")
         await expect(late).to_contain_text(
@@ -931,11 +978,19 @@ async def test_a_reply_target_lookup_that_failed_is_not_made_again_unasked(
         started = await drive.engine.start_conversation()
         for index in range(1, 60):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Note {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT, text=f"Note {index}.", home=RecordHome.owners()
+                ),
             )
         await drive.engine.chat.append_message(
             started.id,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="About the first.", replies_to=1),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="About the first.",
+                replies_to=1,
+                home=RecordHome.owners(),
+            ),
         )
         held = drive.engine.transcript
         lookups: list[int | None] = []
@@ -955,7 +1010,8 @@ async def test_a_reply_target_lookup_that_failed_is_not_made_again_unasked(
         assert lookups == [2]
 
         await drive.engine.chat.append_message(
-            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Unrelated.")
+            started.id,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Unrelated.", home=RecordHome.owners()),
         )
         await expect(drive.page.locator("#chat-transcript")).to_contain_text(
             "Unrelated.", timeout=_IDLE_FOLLOWED
@@ -974,15 +1030,28 @@ async def test_a_read_reply_target_deleted_later_is_named_as_deleted(
         )
         started = await drive.engine.start_conversation()
         await drive.engine.chat.append_message(
-            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="The secret.")
+            started.id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="The secret.", home=RecordHome.owners()
+            ),
         )
         for index in range(2, 60):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT,
+                    text=f"Filler {index}.",
+                    home=RecordHome.owners(),
+                ),
             )
         await drive.engine.chat.append_message(
             started.id,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="About the secret.", replies_to=1),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="About the secret.",
+                replies_to=1,
+                home=RecordHome.owners(),
+            ),
         )
         await drive.page.click("#chat-button")
         await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
@@ -1016,17 +1085,26 @@ async def test_a_lookups_marker_removes_a_loaded_message_whatever_the_next_looku
         started = await drive.engine.start_conversation()
         for text in ("Secret A.", "Secret B."):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=text)
+                started.id,
+                NewMessage(author=MessageAuthor.ASSISTANT, text=text, home=RecordHome.owners()),
             )
         for index in range(3, 60):
             await drive.engine.chat.append_message(
-                started.id, NewMessage(author=MessageAuthor.ASSISTANT, text=f"Filler {index}.")
+                started.id,
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT,
+                    text=f"Filler {index}.",
+                    home=RecordHome.owners(),
+                ),
             )
         for target in (1, 2):
             await drive.engine.chat.append_message(
                 started.id,
                 NewMessage(
-                    author=MessageAuthor.ASSISTANT, text=f"About {target}.", replies_to=target
+                    author=MessageAuthor.ASSISTANT,
+                    text=f"About {target}.",
+                    replies_to=target,
+                    home=RecordHome.owners(),
                 ),
             )
         held = drive.engine.transcript
@@ -1104,7 +1182,10 @@ async def test_a_device_added_to_a_conversation_is_listed_it_with_its_snapshot(
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
         started = await drive.engine.start_conversation()
         await drive.engine.chat.append_message(
-            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Written before.")
+            started.id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Written before.", home=RecordHome.owners()
+            ),
         )
         await drive.engine.set_conversation_devices(
             started.id, devices=[ChatDevice(device_id=_LAPTOP, access=DeviceAccess.READ_WRITE)]
@@ -1285,7 +1366,12 @@ async def test_a_message_to_the_open_conversation_is_news_on_a_phone_showing_the
         reads = [name for name, _ in drive.engine.calls if name == "transcript"]
 
         await drive.engine.chat.append_message(
-            conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="While you were away.")
+            conversation,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="While you were away.",
+                home=RecordHome.owners(),
+            ),
         )
         row = drive.page.locator("#chat-conversations button.chat-open[aria-current]")
         await expect(row).to_contain_text("new messages", timeout=_FOLLOWED)

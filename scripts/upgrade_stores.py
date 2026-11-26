@@ -1758,7 +1758,7 @@ async def _write_conversations(directory: Path, moment: Moment) -> None:
     phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
     try:
         await store.set_my_devices((phone,))
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.set_conversation_devices(
             conversation.id, (phone, ChatDevice(device_id="laptop", access=DeviceAccess.READ))
         )
@@ -1769,6 +1769,7 @@ async def _write_conversations(directory: Path, moment: Moment) -> None:
             conversation.id,
             NewMessage(
                 author=MessageAuthor.USER,
+                home=RecordHome.owners(),
                 text="When is the dentist?",
                 device_id="phone",
                 message_id="phone-msg-1",
@@ -1778,6 +1779,7 @@ async def _write_conversations(directory: Path, moment: Moment) -> None:
             conversation.id,
             NewMessage(
                 author=MessageAuthor.ASSISTANT,
+                home=RecordHome.owners(),
                 text="Thursday at nine.",
                 replies_to=1,
                 options=("Thanks", "Move it"),
@@ -1787,6 +1789,7 @@ async def _write_conversations(directory: Path, moment: Moment) -> None:
             conversation.id,
             NewMessage(
                 author=MessageAuthor.USER,
+                home=RecordHome.owners(),
                 text="Thanks",
                 device_id="phone",
                 message_id="phone-msg-2",
@@ -1794,12 +1797,13 @@ async def _write_conversations(directory: Path, moment: Moment) -> None:
             ),
         )
         await store.take_in(conversation.id, positions=(1,), activation_id="act-upgrade-1")
-        removed = await store.start()
+        removed = await store.start(home=RecordHome.owners())
         await store.set_conversation_devices(removed.id, (phone,))
         await store.append_message(
             removed.id,
             NewMessage(
                 author=MessageAuthor.USER,
+                home=RecordHome.owners(),
                 text="Never mind.",
                 device_id="phone",
                 message_id="phone-msg-3",

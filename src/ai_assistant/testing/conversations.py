@@ -13,6 +13,13 @@ they are written down: the per-conversation mutation exclusion and the
 tombstone's asymmetric visibility (hidden from every presenting read, still
 enumerable by the sweeps).
 
+Each conversation and each message carries its home (ADR-0386 §4): ``start`` writes the
+one it is handed and ``append_message`` the one its message carries, no write changes
+either, and a home no write may carry is a ``ValueError`` before anything is read, as the
+durable store refuses it (§6:2). A deleted message's marker carries none (ADR-0293
+§5:12); the durable store keeps the home on the marker's row, which no read gives back,
+so this double, which holds the marker as the model a read returns, has nothing to keep.
+
 It holds ADR-0293's chat space as the store does: each conversation's transcript,
 "my devices" and each conversation's devices, the change stream as one list of
 changes under one counter, and the reader's bookkeeping. A change is held as the
@@ -73,12 +80,14 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageDeletedChange,
     MessageReceipt,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
     checked_chat_devices,
     describe_untrusted,
+    home_may_be_written,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -257,6 +266,25 @@ def _checked_effect_id(effect_id: object) -> str:
     except ValidationError as exc:
         msg = f"effect_id must be a non-blank str, got {describe_untrusted(effect_id)}"
         raise ValueError(msg) from exc
+
+
+def _checked_home(home: object) -> RecordHome:
+    """Refuse a home that is no ``RecordHome``, or one no write may carry (ADR-0386 §6:2).
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason, so the two refuse the same homes, before anything is read.
+
+    Raises:
+        ValueError: If ``home`` is not a home a write may carry.
+    """
+    if not isinstance(home, RecordHome):
+        msg = f"a home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
 
 
 def _utcnow() -> datetime:
@@ -643,16 +671,19 @@ class FakeConversationStore:
 
     # --- the contract --------------------------------------------------------
 
-    async def start(self) -> Conversation:
-        """Mint an id, insert the record if that id is absent, and return it.
+    async def start(self, *, home: RecordHome) -> Conversation:
+        """Mint an id, insert the record in ``home`` if that id is absent, and return it.
 
         Retries on collision with a freshly minted id and gives up loudly rather
         than returning a conversation whose id names someone else's (ADR-0074 §1).
+        The home is checked before anything is read or minted (ADR-0386 §6:2).
 
         Raises:
+            ValueError: If ``home`` is one no write may carry.
             ConversationStoreError: If the retry budget is exhausted, or the id
                 factory produced something that is not a usable identifier.
         """
+        checked = _checked_home(home)
         async with self._start_lock, self._resource.held():
             await asyncio.sleep(0)
             for _ in range(_START_RETRY_BUDGET):
@@ -667,7 +698,9 @@ class FakeConversationStore:
                 # also makes the presence check read the *stripped* id the store
                 # would go on to store, rather than the raw value.
                 try:
-                    conversation = Conversation(id=minted, started_at=now, last_active_at=now)
+                    conversation = Conversation(
+                        id=minted, started_at=now, last_active_at=now, home=checked
+                    )
                 except (ValidationError, TypeError) as exc:
                     msg = f"the id factory minted an unusable id: {describe_untrusted(minted)}"
                     raise ConversationStoreError(msg) from exc
@@ -867,10 +900,15 @@ class FakeConversationStore:
     async def append_message(self, conversation_id: str, message: NewMessage) -> MessageReceipt:
         """Write one message into the transcript, under the exclusion (ADR-0293 §4, §6).
 
+        The message's home is checked before anything is read (ADR-0386 §6:2), and the
+        message recorded carries it.
+
         Raises:
+            ValueError: If the message's home is one no write may carry.
             UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
         """
+        _checked_home(message.home)
         async with self._exclusive(conversation_id):
             self._live(conversation_id)
             held = self._messages[conversation_id]

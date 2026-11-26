@@ -201,6 +201,7 @@ from ai_assistant.orchestration.stories import (
 )
 from ai_assistant.orchestration.story_standing import OWNER_READER
 from ai_assistant.orchestration.story_standing import story_standing as standing_of
+from ai_assistant.orchestration.work_facts import source_home
 from ai_assistant.testing.activation import FakeActivation
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.conversations import FakeConversationStore
@@ -1942,7 +1943,9 @@ class FakeAssistantEngine:
             if conversation_id in self._in_chat or conversation_id not in self.conversations_held:
                 return
             self._joining.append(conversation_id)
-            await self.chat.start()
+            # A conversation a device starts: whoever its connection belongs to, by the
+            # one rule the engine reads (ADR-0383 §4:3).
+            await self.chat.start(home=source_home())
             self._in_chat.add(conversation_id)
 
     async def start_conversation(self) -> ConversationSummary:
@@ -2009,10 +2012,16 @@ class FakeAssistantEngine:
             "write_message", max_bytes=self._max_payload_bytes, conversation_id=named, message=sent
         )
         through = current_requesting_device().connecting_device_id
-        check_message_fits(named, sent, max_bytes=self._max_payload_bytes, came_through=through)
+        # A message a device takes in, as the engine homes it (ADR-0383 §4:3).
+        home = source_home()
+        check_message_fits(
+            named, sent, max_bytes=self._max_payload_bytes, home=home, came_through=through
+        )
         self.calls.append(("write_message", {"conversation_id": named, "message": sent}))
         await self._joined(named)
-        receipt = await self.chat.append_message(named, sent.as_new_message(came_through=through))
+        receipt = await self.chat.append_message(
+            named, sent.as_new_message(home=home, came_through=through)
+        )
         # The reader is told after the record, as the engine tells it (ADR-0293 §6:1),
         # a repeat included: the message it repeats may still be waiting.
         if receipt.position is not None and self.chat_reader:
@@ -2102,7 +2111,7 @@ class FakeAssistantEngine:
                 # ends the pass as one does anywhere, its episode still captured.
                 try:
                     with contextlib.suppress(Exception):
-                        await self._say(activation, couldnt_finish())
+                        await self._say(activation, couldnt_finish(home=RecordHome.owners()))
                 except asyncio.CancelledError as cancelled:
                     failure = cancelled
         try:
@@ -2135,6 +2144,8 @@ class FakeAssistantEngine:
         text = f"This fake engine composed no real answer to {taken.text.strip()!r}."
         return NewMessage(
             author=MessageAuthor.ASSISTANT,
+            # The fake's activation is the owner's work, as its episode's home says.
+            home=RecordHome.owners(),
             text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
             cut_off=len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS,
         )

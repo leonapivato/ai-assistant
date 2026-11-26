@@ -353,6 +353,7 @@ from ai_assistant.orchestration.work_facts import (
     line_account,
     persons_work,
     senders_of,
+    source_home,
 )
 
 if TYPE_CHECKING:
@@ -4957,9 +4958,13 @@ class Engine:
         return await self._tracked(self._started(device), "start_conversation", checked=True)
 
     async def _started(self, device: RequestingDevice) -> ConversationSummary:
-        """ADR-0298 §5 "Starting", then the conversation."""
+        """ADR-0298 §5 "Starting", then the conversation.
+
+        A conversation a device starts takes the home of whoever the connection it came
+        by belongs to, by the one rule :func:`source_home` reads (ADR-0383 §4:3).
+        """
         await self._device_checks.starting(device)
-        return conversation_summary(await self._conversations.start())
+        return conversation_summary(await self._conversations.start(home=source_home()))
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
         """Read "my devices" (ADR-0293 §3:1).
@@ -5035,7 +5040,11 @@ class Engine:
         )
         device = current_requesting_device()
         check_message_fits(
-            named, sent, max_bytes=self._max_payload_bytes, came_through=device.connecting_device_id
+            named,
+            sent,
+            max_bytes=self._max_payload_bytes,
+            home=source_home(),
+            came_through=device.connecting_device_id,
         )
         return await self._tracked(
             self._written(device, named, sent), "write_message", checked=True
@@ -5058,11 +5067,16 @@ class Engine:
 
         The message records the device it came through: the requesting device's
         connecting device, which the wire server set from the connection, never a value
-        the request or the message carries (ADR-0378 §4:2).
+        the request or the message carries (ADR-0378 §4:2). It lands in the home of
+        whoever that connection belongs to, by the one rule :func:`source_home` reads
+        (ADR-0383 §4:3), never one the request names.
         """
         await self._device_checks.writing_message(device, conversation_id, message)
         receipt = await self._conversations.write(
-            conversation_id, message, came_through=device.connecting_device_id
+            conversation_id,
+            message,
+            home=source_home(),
+            came_through=device.connecting_device_id,
         )
         if receipt.position is not None and self._chat_reader is not None:
             self._chat_reader.notice(conversation_id)
@@ -9092,9 +9106,11 @@ class Engine:
         """ADR-0074 §2: resolve the conversation before the turn's work, and bind it.
 
         An id the store does not know is refused here, before anything is routed or
-        planned, exactly as it was refused before.
+        planned, exactly as it was refused before. A conversation the request starts is
+        one a device starts, which takes the home of whoever the connection it came by
+        belongs to (ADR-0383 §4:3).
         """
-        conversation = await self._conversations.begin(working.requested)
+        conversation = await self._conversations.begin(working.requested, home=source_home())
         if (state := active_state()) is not None:
             state.resolved_conversation(conversation.id)
         working.input = ResolvedChannelInput(

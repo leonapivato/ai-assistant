@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     GrantHow,
     PermissionLine,
     PermissionLineKind,
+    RecordHome,
     RequestedCall,
     Sureness,
     TicketState,
@@ -441,8 +442,8 @@ def test_a_ticket_the_work_holds_shows_the_connection_its_call_acts_in() -> None
 async def test_a_connections_search_finds_only_what_the_work_could_use() -> None:
     """ADR-0368 §8:2: ``search_connections`` finds only connections the work could use."""
     store = FakeConversationStore()
-    first = await store.start()
-    second = await store.start()
+    first = await store.start(home=RecordHome.owners())
+    second = await store.start(home=RecordHome.owners())
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
     own_place = f"conversation:{first.id}"
     at_none = CouldUse(connections=frozenset(), own=frozenset({own_place}))
@@ -482,8 +483,8 @@ def test_an_approvals_work_is_shown_where_its_request_was_asked_apart_from_its_o
 async def test_a_connections_search_finds_where_an_approvals_request_was_asked() -> None:
     """ADR-0382 §2:5: ``search_connections`` finds it, and no other conversation."""
     store = FakeConversationStore()
-    asked = await store.start()
-    await store.start()
+    asked = await store.start(home=RecordHome.owners())
+    await store.start(home=RecordHome.owners())
     search = ConnectionSearch(conversations=store, scan=10, page_size=5)
     place = f"conversation:{asked.id}"
     approvals = CouldUse(

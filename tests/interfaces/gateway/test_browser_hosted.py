@@ -49,7 +49,7 @@ from playwright.async_api import expect
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChatDevice, DeviceAccess, MessageAuthor, NewMessage
+from ai_assistant.core.types import ChatDevice, DeviceAccess, MessageAuthor, NewMessage, RecordHome
 from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle
 
 if TYPE_CHECKING:
@@ -621,7 +621,11 @@ async def _seeded(door: Door, *, written: str | None = None) -> str:
         await door.engine.chat.append_message(
             started.id,
             NewMessage(
-                author=MessageAuthor.USER, text=written, device_id=HOSTED_DEVICE, message_id="m-1"
+                author=MessageAuthor.USER,
+                text=written,
+                device_id=HOSTED_DEVICE,
+                message_id="m-1",
+                home=RecordHome.owners(),
             ),
         )
     await door.page.goto(f"{DOOR_ORIGIN}/")

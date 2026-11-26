@@ -115,6 +115,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
+    RecordHome,
     RequestingDevice,
     SpanCoverage,
     TranscriptMessage,
@@ -878,10 +879,10 @@ async def test_a_deletion_racing_a_first_read_leaves_no_chat_conversation() -> N
     entered, release = asyncio.Event(), asyncio.Event()
     start = engine.chat.start
 
-    async def slow_start() -> Conversation:
+    async def slow_start(*, home: RecordHome) -> Conversation:
         entered.set()
         await release.wait()
-        return await start()
+        return await start(home=home)
 
     engine.chat.start = slow_start  # type: ignore[method-assign]
     reading = asyncio.create_task(engine.transcript("c"))

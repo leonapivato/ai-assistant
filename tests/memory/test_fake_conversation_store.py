@@ -20,6 +20,7 @@ from conversation_store_contract import (
 )
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
+from ai_assistant.core.types import RecordHome
 from ai_assistant.testing import FakeConversationStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite, settle
 
@@ -143,7 +144,7 @@ async def test_no_lock_is_kept_for_a_conversation_that_was_dropped() -> None:
     grace = timedelta(hours=1)
     store = FakeConversationStore(now=clock, tombstone_grace=grace)
 
-    conversation = await store.start()
+    conversation = await store.start(home=RecordHome.owners())
     await store.record_turn(conversation.id, episode_id="activation:a-1", occurred_at=clock())
     assert await store.stamp_deleted(conversation.id) is True
     clock.advance(grace)
@@ -210,4 +211,4 @@ async def test_the_fake_refuses_a_clock_that_is_not_a_conforming_reading() -> No
     store = FakeConversationStore(now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001 — the point
 
     with pytest.raises(ConversationStoreError):
-        await store.start()
+        await store.start(home=RecordHome.owners())

@@ -18,7 +18,7 @@ from typing import Final
 import pytest
 from rich.console import Console
 
-from ai_assistant.core.types import MessageAuthor, TranscriptMessage
+from ai_assistant.core.types import MessageAuthor, RecordHome, TranscriptMessage
 from ai_assistant.interfaces import cli
 
 _AT: Final = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
@@ -40,6 +40,7 @@ def _rendered(output: StringIO, text: str) -> str:
         author=MessageAuthor.ASSISTANT,
         written_at=_AT,
         text=text,
+        home=RecordHome.owners(),
     )
     cli._render_chat_entry(message, known={})
     return output.getvalue()

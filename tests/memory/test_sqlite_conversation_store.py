@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     SendOutcome,
 )
 from ai_assistant.memory import conversation_store
@@ -358,7 +359,7 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        await store.start()
+        await store.start(home=RecordHome.owners())
     finally:
         store.close()
 
@@ -506,7 +507,7 @@ async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
 
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         recorded = await store.record_turn(
             conversation.id, episode_id="activation:a", occurred_at=_NOW
         )
@@ -568,7 +569,7 @@ async def test_a_crashed_deletion_is_rediscoverable_across_a_reopen(tmp_path: Pa
 
     store = SqliteConversationStore(path=path, now=clock, tombstone_grace=grace)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.record_turn(conversation.id, episode_id="activation:a", occurred_at=clock())
         assert await store.stamp_deleted(conversation.id) is True
         # ...and here the process dies: no episode purged, no record dropped.
@@ -603,7 +604,7 @@ async def test_a_corrupt_timestamp_is_a_store_fault_on_the_lifecycle_path_too(
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         if column == "deleted_at":
             await store.stamp_deleted(conversation.id)
 
@@ -644,7 +645,7 @@ async def test_a_column_holding_the_wrong_type_is_read_as_corruption(
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.record_turn(conversation.id, episode_id="activation:a", occurred_at=_NOW)
 
         raw = sqlite3.connect(path)
@@ -671,7 +672,7 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
     first = SqliteConversationStore(path=path, now=_fixed_now)
     second = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await first.start()
+        conversation = await first.start(home=RecordHome.owners())
         assert await second.get(conversation.id) is not None, "both see one database"
 
         episodes = [f"activation:{index}" for index in range(8)]
@@ -847,7 +848,7 @@ async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path)
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
     finally:
         store.close()
 
@@ -922,7 +923,7 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
     clock = _Cancelling()
     store = SqliteConversationStore(path=tmp_path / "conversations.db", now=clock)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         # The lever, because the rollback is only half of what this case observes:
         # the other half is that the caller learns *what* failed, and which of
@@ -1035,7 +1036,7 @@ async def test_repeated_cancellation_does_not_consume_the_executor() -> None:
 async def test_a_closed_store_reports_the_seams_own_error(tmp_path: Path) -> None:
     """A backend failure crosses the seam as ``ConversationStoreError``, never raw."""
     store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
-    conversation = await store.start()
+    conversation = await store.start(home=RecordHome.owners())
     store.close()
 
     with pytest.raises(ConversationStoreError):
@@ -1079,7 +1080,7 @@ async def test_a_naive_clock_reading_is_refused_at_the_producer(tmp_path: Path) 
     )
     try:
         with pytest.raises(ConversationStoreError):
-            await store.start()
+            await store.start(home=RecordHome.owners())
     finally:
         store.close()
 
@@ -1111,7 +1112,7 @@ async def test_each_transaction_opens_in_the_form_its_call_site_asked_for() -> N
     store = SqliteConversationStore(path=":memory:", now=_fixed_now)
     try:
         with _traced(store) as opened:
-            conversation = await store.start()
+            conversation = await store.start(home=RecordHome.owners())
         assert opened[0].strip().upper() == "BEGIN IMMEDIATE"
         assert opened[-1].strip().upper() == "COMMIT"
 
@@ -1140,7 +1141,7 @@ async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error() -> 
     store.close()
 
     with pytest.raises(ConversationStoreError, match="failed to start a conversation"):
-        await store.start()
+        await store.start(home=RecordHome.owners())
 
 
 # --- ADR-0285 §4: no observation watermark, and nothing drops an old one ------
@@ -1181,6 +1182,8 @@ def test_a_fresh_file_has_no_watermark_column(tmp_path: Path) -> None:
         "deleted_at",
         "search_calls",
         "all_external_user_chosen",
+        "home_kind",
+        "home_id",
     }
 
 
@@ -1200,7 +1203,7 @@ async def test_a_file_that_holds_the_old_column_opens_keeps_it_and_serves(
     path = tmp_path / "conversations.db"
     first = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        earlier = await first.start()
+        earlier = await first.start(home=RecordHome.owners())
     finally:
         first.close()
     raw = sqlite3.connect(path, isolation_level=None)
@@ -1213,7 +1216,7 @@ async def test_a_file_that_holds_the_old_column_opens_keeps_it_and_serves(
 
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        later = await reopened.start()
+        later = await reopened.start(home=RecordHome.owners())
         await reopened.record_turn(earlier.id, episode_id="activation:a", occurred_at=_NOW)
 
         read = await reopened.get(earlier.id)
@@ -1256,7 +1259,7 @@ async def test_start_writes_neither_vestigial_column_and_both_take_their_default
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
     finally:
         store.close()
 
@@ -1280,7 +1283,8 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
     ``INSERT INTO conversations(...)``. ``NOT NULL DEFAULT 0`` is what keeps that
     build's ``start`` working against an upgraded database — a ``NOT NULL`` column with
     no default would make it fail, which is a refusal to serve arriving through the
-    schema.
+    schema. The insert names a home too, which every row this store reads must carry
+    (ADR-0383 §5:3), so the case is about the two vestigial columns alone.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -1289,7 +1293,8 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
         try:
             raw.execute(
                 "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
-                "deleted_at) VALUES ('older-build', 0, 0, NULL, NULL)"
+                "deleted_at, home_kind, home_id) "
+                "VALUES ('older-build', 0, 0, NULL, NULL, 'person', 'person:owner')"
             )
         finally:
             raw.close()
@@ -1297,6 +1302,75 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
         assert await store.get("older-build") is not None
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "home_id"),
+    [(None, None), ("person", None), ("shared", "person:owner"), ("nobody", None)],
+    ids=["none", "a-person-unnamed", "shared-named", "an-unknown-kind"],
+)
+async def test_a_stored_conversation_or_message_with_no_home_is_no_ones(
+    tmp_path: Path, kind: str | None, home_id: str | None
+) -> None:
+    """ADR-0383 §5:3: a row with no home, or one that does not read as a home, is corrupt.
+
+    It is never read as the owner's or as anyone else's: the read that meets it fails
+    as on any other corrupt row.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = (await store.start(home=RecordHome.owners())).id
+        await store.append_message(
+            conversation,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Hello.", home=RecordHome.owners()),
+        )
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute("UPDATE messages SET home_kind = ?, home_id = ?", (kind, home_id))
+        finally:
+            raw.close()
+        with pytest.raises(ConversationStoreError, match="message could not be decoded"):
+            await store.transcript(conversation)
+
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute("UPDATE conversations SET home_kind = ?, home_id = ?", (kind, home_id))
+        finally:
+            raw.close()
+        with pytest.raises(ConversationStoreError, match="conversation could not be decoded"):
+            await store.get(conversation)
+    finally:
+        store.close()
+
+
+async def test_a_home_is_kept_as_its_kind_and_its_identifier(tmp_path: Path) -> None:
+    """ADR-0383 §2:2: two columns of the record's own row, which the store's query can read.
+
+    So a later read can be narrowed by the home inside the store's own query.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        owners = (await store.start(home=RecordHome.owners())).id
+        shared = (await store.start(home=RecordHome.shared())).id
+        await store.append_message(
+            shared,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Hello.", home=RecordHome.shared()),
+        )
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as raw:
+        conversations = {
+            row[0]: row[1:]
+            for row in raw.execute("SELECT id, home_kind, home_id FROM conversations")
+        }
+        messages = raw.execute(
+            "SELECT conversation_id, home_kind, home_id FROM messages"
+        ).fetchall()
+    assert conversations == {owners: ("person", "person:owner"), shared: ("shared", None)}
+    assert messages == [(shared, "shared", None)]
 
 
 #: Each incompatible shape, as the statement that makes it from a fresh store.
@@ -1313,7 +1387,7 @@ _INCOMPATIBLE_SHAPES: dict[str, str] = {
     "format9": "UPDATE episode_record_format SET version = 9",
     "format10": "UPDATE episode_record_format SET version = 10",
     "format11": "UPDATE episode_record_format SET version = 11",
-    "newer": "UPDATE episode_record_format SET version = 15",
+    "newer": "UPDATE episode_record_format SET version = 16",
     "malformed": "ALTER TABLE episode_record_format RENAME COLUMN version TO invalid",
 }
 
@@ -1389,7 +1463,11 @@ _LAPTOP = ChatDevice(device_id="laptop", access=DeviceAccess.READ)
 
 def _said(text: str, message_id: str) -> NewMessage:
     return NewMessage(
-        author=MessageAuthor.USER, text=text, device_id="phone", message_id=message_id
+        author=MessageAuthor.USER,
+        text=text,
+        device_id="phone",
+        message_id=message_id,
+        home=RecordHome.owners(),
     )
 
 
@@ -1405,7 +1483,7 @@ async def test_the_chat_space_survives_a_reopen_and_its_numbering_goes_on(tmp_pa
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _said("one", "m-1"))
         await store.append_message(conversation, _said("two", "m-2"))
         await store.delete_message(conversation, 2)
@@ -1441,7 +1519,7 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
     finally:
         store.close()
     raw = sqlite3.connect(path)
@@ -1539,7 +1617,7 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _said("hello", "m-1"))
         await store.take_in(conversation, positions=[1], activation_id="a-1")
         store._conn.execute(statement)
@@ -1558,7 +1636,12 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
             "effect_position": lambda: store.effect_position(conversation, "e-1"),
             "repeated_claim": lambda: store.append_message(
                 conversation,
-                NewMessage(author=MessageAuthor.ASSISTANT, text="again", effect_id="e-1"),
+                NewMessage(
+                    author=MessageAuthor.ASSISTANT,
+                    text="again",
+                    effect_id="e-1",
+                    home=RecordHome.owners(),
+                ),
             ),
         }
         with pytest.raises(ConversationStoreError):
@@ -1578,14 +1661,24 @@ async def test_a_claim_survives_a_reopen_and_its_deletion(tmp_path: Path) -> Non
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(
             conversation,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="Time to call Mom.", effect_id="e-1"),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="Time to call Mom.",
+                effect_id="e-1",
+                home=RecordHome.owners(),
+            ),
         )
         await store.append_message(
             conversation,
-            NewMessage(author=MessageAuthor.ASSISTANT, text="And the dentist.", effect_id="e-2"),
+            NewMessage(
+                author=MessageAuthor.ASSISTANT,
+                text="And the dentist.",
+                effect_id="e-2",
+                home=RecordHome.owners(),
+            ),
         )
         assert await store.delete_message(conversation, 2) is True
     finally:
@@ -1615,7 +1708,7 @@ async def test_a_deleted_message_keeps_no_text_in_the_file(tmp_path: Path) -> No
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _said("my PIN is 1234", "m-1"))
         assert await store.delete_message(conversation, 1) is True
         page = await store.transcript(conversation)
@@ -1640,7 +1733,7 @@ async def test_a_repeated_send_over_a_corrupt_position_is_a_store_fault(tmp_path
     store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _said("hello", "m-1"))
         store._conn.execute("UPDATE messages SET position = 0")
         with pytest.raises(ConversationStoreError):
@@ -1664,7 +1757,7 @@ async def test_a_change_that_cannot_be_recorded_leaves_the_transcript_as_it_was(
     store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         if act == "delete":
             await store.append_message(conversation, _said("hello", "m-1"))
         before_page = await store.transcript(conversation)
@@ -1710,7 +1803,7 @@ async def test_a_deletion_recorded_before_its_readers_were_kept_reaches_no_devic
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.stamp_deleted(conversation)
         store._conn.execute(
             "UPDATE chat_changes SET devices = NULL WHERE kind = 'conversation_deleted'"
@@ -1742,8 +1835,8 @@ async def test_a_set_change_recorded_before_its_position_was_kept_snapshots_cons
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        dated = (await store.start()).id
-        undated = (await store.start()).id
+        dated = (await store.start(home=RecordHome.owners())).id
+        undated = (await store.start(home=RecordHome.owners())).id
         for conversation in (dated, undated):
             for index in range(1, 4):
                 await store.append_message(conversation, _said(str(index), f"m-{index}"))
@@ -1794,11 +1887,14 @@ async def test_a_devices_page_is_filled_across_batches_in_one_reading(
     store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         await store.set_my_devices([_PHONE])
-        mine = (await store.start()).id
+        mine = (await store.start(home=RecordHome.owners())).id
         await store.set_my_devices([ChatDevice(device_id="laptop", access=DeviceAccess.READ)])
-        other = (await store.start()).id
+        other = (await store.start(home=RecordHome.owners())).id
         for index in range(3):
-            await store.append_message(other, NewMessage(author=MessageAuthor.ASSISTANT, text="x"))
+            await store.append_message(
+                other,
+                NewMessage(author=MessageAuthor.ASSISTANT, text="x", home=RecordHome.owners()),
+            )
             await store.append_message(mine, _said(str(index), f"m-{index}"))
         head = (await store.changes(after=0)).next_after
 

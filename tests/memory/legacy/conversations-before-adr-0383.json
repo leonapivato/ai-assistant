@@ -1,0 +1,1085 @@
+{
+ "awaiting": [
+  "conv-kept"
+ ],
+ "changes": {
+  "changes": [
+   {
+    "conversation_id": null,
+    "devices": [
+     {
+      "access": "read_write",
+      "device_id": "phone"
+     },
+     {
+      "access": "read",
+      "device_id": "watch"
+     }
+    ],
+    "kind": "devices_changed",
+    "seq": 1
+   },
+   {
+    "conversation_id": "conv-kept",
+    "devices": [
+     {
+      "access": "read_write",
+      "device_id": "phone"
+     },
+     {
+      "access": "read",
+      "device_id": "watch"
+     }
+    ],
+    "kind": "conversation_started",
+    "seq": 2
+   },
+   {
+    "conversation_id": "conv-quiet",
+    "devices": [
+     {
+      "access": "read_write",
+      "device_id": "phone"
+     },
+     {
+      "access": "read",
+      "device_id": "watch"
+     }
+    ],
+    "kind": "conversation_started",
+    "seq": 3
+   },
+   {
+    "conversation_id": "conv-empty",
+    "devices": [
+     {
+      "access": "read_write",
+      "device_id": "phone"
+     },
+     {
+      "access": "read",
+      "device_id": "watch"
+     }
+    ],
+    "kind": "conversation_started",
+    "seq": 4
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "user",
+     "conversation_id": "conv-kept",
+     "cut_off": false,
+     "device_id": "phone",
+     "message_id": "phone-msg-1",
+     "options": [],
+     "position": 1,
+     "replies_to": null,
+     "text": "Shall we go to the lake on Saturday?",
+     "written_at": "2026-11-26T09:00:04Z"
+    },
+    "seq": 6
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "assistant",
+     "conversation_id": "conv-kept",
+     "cut_off": false,
+     "device_id": null,
+     "message_id": null,
+     "options": [
+      "Morning",
+      "Afternoon"
+     ],
+     "position": 2,
+     "replies_to": 1,
+     "text": "Which time suits you?",
+     "written_at": "2026-11-26T09:00:05Z"
+    },
+    "seq": 7
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "user",
+     "came_through": "gateway-1",
+     "conversation_id": "conv-kept",
+     "cut_off": false,
+     "device_id": "phone",
+     "message_id": "phone-msg-2",
+     "options": [],
+     "position": 3,
+     "replies_to": 2,
+     "text": "Morning",
+     "written_at": "2026-11-26T09:00:06Z"
+    },
+    "seq": 8
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "assistant",
+     "conversation_id": "conv-kept",
+     "cut_off": false,
+     "device_id": null,
+     "message_id": null,
+     "options": [],
+     "position": 4,
+     "replies_to": null,
+     "text": "Booked the morning.",
+     "written_at": "2026-11-26T09:00:07Z"
+    },
+    "seq": 9
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "assistant",
+     "conversation_id": "conv-kept",
+     "cut_off": true,
+     "device_id": null,
+     "message_id": null,
+     "options": [],
+     "position": 6,
+     "replies_to": null,
+     "text": "The forecast for Saturday is",
+     "written_at": "2026-11-26T09:00:09Z"
+    },
+    "seq": 11
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "user",
+     "conversation_id": "conv-kept",
+     "cut_off": false,
+     "device_id": "phone",
+     "message_id": "phone-msg-4",
+     "options": [],
+     "position": 7,
+     "replies_to": null,
+     "text": "And the week after?",
+     "written_at": "2026-11-26T09:00:10Z"
+    },
+    "seq": 12
+   },
+   {
+    "kind": "message_deleted",
+    "marker": {
+     "conversation_id": "conv-kept",
+     "deleted": true,
+     "position": 5
+    },
+    "seq": 13
+   },
+   {
+    "kind": "message_added",
+    "message": {
+     "author": "assistant",
+     "conversation_id": "conv-quiet",
+     "cut_off": false,
+     "device_id": null,
+     "message_id": null,
+     "options": [],
+     "position": 1,
+     "replies_to": null,
+     "text": "Good morning.",
+     "written_at": "2026-11-26T09:00:11Z"
+    },
+    "seq": 14
+   },
+   {
+    "conversation_id": "conv-quiet",
+    "devices": [
+     {
+      "access": "read",
+      "device_id": "watch"
+     }
+    ],
+    "kind": "devices_changed",
+    "seq": 15
+   },
+   {
+    "conversation_id": "conv-gone",
+    "kind": "conversation_deleted",
+    "seq": 17
+   }
+  ],
+  "next_after": 17
+ },
+ "device_changes/phone": {
+  "changes": [
+   {
+    "change": {
+     "conversation_id": null,
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "devices_changed",
+     "seq": 1
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-kept",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 2
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "conversation_id": "conv-quiet",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 3
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "conversation_id": "conv-empty",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 4
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-1",
+      "options": [],
+      "position": 1,
+      "replies_to": null,
+      "text": "Shall we go to the lake on Saturday?",
+      "written_at": "2026-11-26T09:00:04Z"
+     },
+     "seq": 6
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [
+       "Morning",
+       "Afternoon"
+      ],
+      "position": 2,
+      "replies_to": 1,
+      "text": "Which time suits you?",
+      "written_at": "2026-11-26T09:00:05Z"
+     },
+     "seq": 7
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "came_through": "gateway-1",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-2",
+      "options": [],
+      "position": 3,
+      "replies_to": 2,
+      "text": "Morning",
+      "written_at": "2026-11-26T09:00:06Z"
+     },
+     "seq": 8
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 4,
+      "replies_to": null,
+      "text": "Booked the morning.",
+      "written_at": "2026-11-26T09:00:07Z"
+     },
+     "seq": 9
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": true,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 6,
+      "replies_to": null,
+      "text": "The forecast for Saturday is",
+      "written_at": "2026-11-26T09:00:09Z"
+     },
+     "seq": 11
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-4",
+      "options": [],
+      "position": 7,
+      "replies_to": null,
+      "text": "And the week after?",
+      "written_at": "2026-11-26T09:00:10Z"
+     },
+     "seq": 12
+    }
+   },
+   {
+    "change": {
+     "kind": "message_deleted",
+     "marker": {
+      "conversation_id": "conv-kept",
+      "deleted": true,
+      "position": 5
+     },
+     "seq": 13
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-quiet",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 1,
+      "replies_to": null,
+      "text": "Good morning.",
+      "written_at": "2026-11-26T09:00:11Z"
+     },
+     "seq": 14
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-quiet",
+     "devices": [
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "devices_changed",
+     "seq": 15
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-gone",
+     "kind": "conversation_deleted",
+     "seq": 17
+    }
+   }
+  ],
+  "next_after": 17
+ },
+ "device_changes/watch": {
+  "changes": [
+   {
+    "change": {
+     "conversation_id": null,
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "devices_changed",
+     "seq": 1
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-kept",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 2
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "conversation_id": "conv-quiet",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 3
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "conversation_id": "conv-empty",
+     "devices": [
+      {
+       "access": "read_write",
+       "device_id": "phone"
+      },
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "conversation_started",
+     "seq": 4
+    },
+    "snapshot": []
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-1",
+      "options": [],
+      "position": 1,
+      "replies_to": null,
+      "text": "Shall we go to the lake on Saturday?",
+      "written_at": "2026-11-26T09:00:04Z"
+     },
+     "seq": 6
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [
+       "Morning",
+       "Afternoon"
+      ],
+      "position": 2,
+      "replies_to": 1,
+      "text": "Which time suits you?",
+      "written_at": "2026-11-26T09:00:05Z"
+     },
+     "seq": 7
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "came_through": "gateway-1",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-2",
+      "options": [],
+      "position": 3,
+      "replies_to": 2,
+      "text": "Morning",
+      "written_at": "2026-11-26T09:00:06Z"
+     },
+     "seq": 8
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 4,
+      "replies_to": null,
+      "text": "Booked the morning.",
+      "written_at": "2026-11-26T09:00:07Z"
+     },
+     "seq": 9
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-kept",
+      "cut_off": true,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 6,
+      "replies_to": null,
+      "text": "The forecast for Saturday is",
+      "written_at": "2026-11-26T09:00:09Z"
+     },
+     "seq": 11
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "user",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "message_id": "phone-msg-4",
+      "options": [],
+      "position": 7,
+      "replies_to": null,
+      "text": "And the week after?",
+      "written_at": "2026-11-26T09:00:10Z"
+     },
+     "seq": 12
+    }
+   },
+   {
+    "change": {
+     "kind": "message_deleted",
+     "marker": {
+      "conversation_id": "conv-kept",
+      "deleted": true,
+      "position": 5
+     },
+     "seq": 13
+    }
+   },
+   {
+    "change": {
+     "kind": "message_added",
+     "message": {
+      "author": "assistant",
+      "conversation_id": "conv-quiet",
+      "cut_off": false,
+      "device_id": null,
+      "message_id": null,
+      "options": [],
+      "position": 1,
+      "replies_to": null,
+      "text": "Good morning.",
+      "written_at": "2026-11-26T09:00:11Z"
+     },
+     "seq": 14
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-quiet",
+     "devices": [
+      {
+       "access": "read",
+       "device_id": "watch"
+      }
+     ],
+     "kind": "devices_changed",
+     "seq": 15
+    }
+   },
+   {
+    "change": {
+     "conversation_id": "conv-gone",
+     "kind": "conversation_deleted",
+     "seq": 17
+    }
+   }
+  ],
+  "next_after": 17
+ },
+ "device_conversations/phone": [
+  {
+   "access": "read_write",
+   "conversation": {
+    "deleted_at": null,
+    "id": "conv-empty",
+    "last_active_at": "2026-11-26T09:00:02Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T09:00:02Z"
+   }
+  },
+  {
+   "access": "read_write",
+   "conversation": {
+    "deleted_at": null,
+    "id": "conv-kept",
+    "last_active_at": "2026-11-26T09:00:00Z",
+    "last_turn_at": "2026-11-26T09:00:00Z",
+    "started_at": "2026-11-26T09:00:00Z"
+   }
+  }
+ ],
+ "device_conversations/watch": [
+  {
+   "access": "read",
+   "conversation": {
+    "deleted_at": null,
+    "id": "conv-empty",
+    "last_active_at": "2026-11-26T09:00:02Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T09:00:02Z"
+   }
+  },
+  {
+   "access": "read",
+   "conversation": {
+    "deleted_at": null,
+    "id": "conv-quiet",
+    "last_active_at": "2026-11-26T09:00:01Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T09:00:01Z"
+   }
+  },
+  {
+   "access": "read",
+   "conversation": {
+    "deleted_at": null,
+    "id": "conv-kept",
+    "last_active_at": "2026-11-26T09:00:00Z",
+    "last_turn_at": "2026-11-26T09:00:00Z",
+    "started_at": "2026-11-26T09:00:00Z"
+   }
+  }
+ ],
+ "devices/conv-empty": [
+  {
+   "access": "read_write",
+   "device_id": "phone"
+  },
+  {
+   "access": "read",
+   "device_id": "watch"
+  }
+ ],
+ "devices/conv-gone": null,
+ "devices/conv-kept": [
+  {
+   "access": "read_write",
+   "device_id": "phone"
+  },
+  {
+   "access": "read",
+   "device_id": "watch"
+  }
+ ],
+ "devices/conv-quiet": [
+  {
+   "access": "read",
+   "device_id": "watch"
+  }
+ ],
+ "effect/effect-1": 4,
+ "effect/effect-2": 6,
+ "export": {
+  "conversations": [
+   {
+    "deleted_at": null,
+    "id": "conv-empty",
+    "last_active_at": "2026-11-26T09:00:02Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T09:00:02Z"
+   },
+   {
+    "deleted_at": null,
+    "id": "conv-quiet",
+    "last_active_at": "2026-11-26T09:00:01Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T09:00:01Z"
+   },
+   {
+    "deleted_at": null,
+    "id": "conv-kept",
+    "last_active_at": "2026-11-26T09:00:00Z",
+    "last_turn_at": "2026-11-26T09:00:00Z",
+    "started_at": "2026-11-26T09:00:00Z"
+   }
+  ],
+  "exported_at": "2026-11-26T10:00:00Z",
+  "messages": [
+   {
+    "author": "assistant",
+    "conversation_id": "conv-quiet",
+    "cut_off": false,
+    "device_id": null,
+    "effect_id": null,
+    "message_id": null,
+    "options": [],
+    "position": 1,
+    "replies_to": null,
+    "text": "Good morning.",
+    "written_at": "2026-11-26T09:00:11Z"
+   },
+   {
+    "author": "user",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "effect_id": null,
+    "message_id": "phone-msg-1",
+    "options": [],
+    "position": 1,
+    "replies_to": null,
+    "text": "Shall we go to the lake on Saturday?",
+    "written_at": "2026-11-26T09:00:04Z"
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": null,
+    "effect_id": null,
+    "message_id": null,
+    "options": [
+     "Morning",
+     "Afternoon"
+    ],
+    "position": 2,
+    "replies_to": 1,
+    "text": "Which time suits you?",
+    "written_at": "2026-11-26T09:00:05Z"
+   },
+   {
+    "author": "user",
+    "came_through": "gateway-1",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "effect_id": null,
+    "message_id": "phone-msg-2",
+    "options": [],
+    "position": 3,
+    "replies_to": 2,
+    "text": "Morning",
+    "written_at": "2026-11-26T09:00:06Z"
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": null,
+    "effect_id": "effect-1",
+    "message_id": null,
+    "options": [],
+    "position": 4,
+    "replies_to": null,
+    "text": "Booked the morning.",
+    "written_at": "2026-11-26T09:00:07Z"
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": true,
+    "device_id": null,
+    "effect_id": "effect-2",
+    "message_id": null,
+    "options": [],
+    "position": 6,
+    "replies_to": null,
+    "text": "The forecast for Saturday is",
+    "written_at": "2026-11-26T09:00:09Z"
+   },
+   {
+    "author": "user",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "effect_id": null,
+    "message_id": "phone-msg-4",
+    "options": [],
+    "position": 7,
+    "replies_to": null,
+    "text": "And the week after?",
+    "written_at": "2026-11-26T09:00:10Z"
+   }
+  ],
+  "schema_version": 7
+ },
+ "get/conv-empty": {
+  "deleted_at": null,
+  "id": "conv-empty",
+  "last_active_at": "2026-11-26T09:00:02Z",
+  "last_turn_at": null,
+  "started_at": "2026-11-26T09:00:02Z"
+ },
+ "get/conv-gone": null,
+ "get/conv-kept": {
+  "deleted_at": null,
+  "id": "conv-kept",
+  "last_active_at": "2026-11-26T09:00:00Z",
+  "last_turn_at": "2026-11-26T09:00:00Z",
+  "started_at": "2026-11-26T09:00:00Z"
+ },
+ "get/conv-quiet": {
+  "deleted_at": null,
+  "id": "conv-quiet",
+  "last_active_at": "2026-11-26T09:00:01Z",
+  "last_turn_at": null,
+  "started_at": "2026-11-26T09:00:01Z"
+ },
+ "my_devices": [
+  {
+   "access": "read_write",
+   "device_id": "phone"
+  },
+  {
+   "access": "read",
+   "device_id": "watch"
+  }
+ ],
+ "recent": [
+  {
+   "deleted_at": null,
+   "id": "conv-empty",
+   "last_active_at": "2026-11-26T09:00:02Z",
+   "last_turn_at": null,
+   "started_at": "2026-11-26T09:00:02Z"
+  },
+  {
+   "deleted_at": null,
+   "id": "conv-quiet",
+   "last_active_at": "2026-11-26T09:00:01Z",
+   "last_turn_at": null,
+   "started_at": "2026-11-26T09:00:01Z"
+  },
+  {
+   "deleted_at": null,
+   "id": "conv-kept",
+   "last_active_at": "2026-11-26T09:00:00Z",
+   "last_turn_at": "2026-11-26T09:00:00Z",
+   "started_at": "2026-11-26T09:00:00Z"
+  }
+ ],
+ "stamped": [
+  "conv-gone"
+ ],
+ "taken_in/conv-empty": {},
+ "taken_in/conv-gone": {},
+ "taken_in/conv-kept": {
+  "1": "act-1",
+  "3": "act-1"
+ },
+ "taken_in/conv-quiet": {},
+ "transcript/conv-empty": {
+  "as_of": 17,
+  "conversation_id": "conv-empty",
+  "entries": []
+ },
+ "transcript/conv-gone": null,
+ "transcript/conv-kept": {
+  "as_of": 17,
+  "conversation_id": "conv-kept",
+  "entries": [
+   {
+    "author": "user",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "message_id": "phone-msg-1",
+    "options": [],
+    "position": 1,
+    "replies_to": null,
+    "text": "Shall we go to the lake on Saturday?",
+    "written_at": "2026-11-26T09:00:04Z"
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": null,
+    "message_id": null,
+    "options": [
+     "Morning",
+     "Afternoon"
+    ],
+    "position": 2,
+    "replies_to": 1,
+    "text": "Which time suits you?",
+    "written_at": "2026-11-26T09:00:05Z"
+   },
+   {
+    "author": "user",
+    "came_through": "gateway-1",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "message_id": "phone-msg-2",
+    "options": [],
+    "position": 3,
+    "replies_to": 2,
+    "text": "Morning",
+    "written_at": "2026-11-26T09:00:06Z"
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": null,
+    "message_id": null,
+    "options": [],
+    "position": 4,
+    "replies_to": null,
+    "text": "Booked the morning.",
+    "written_at": "2026-11-26T09:00:07Z"
+   },
+   {
+    "conversation_id": "conv-kept",
+    "deleted": true,
+    "position": 5
+   },
+   {
+    "author": "assistant",
+    "conversation_id": "conv-kept",
+    "cut_off": true,
+    "device_id": null,
+    "message_id": null,
+    "options": [],
+    "position": 6,
+    "replies_to": null,
+    "text": "The forecast for Saturday is",
+    "written_at": "2026-11-26T09:00:09Z"
+   },
+   {
+    "author": "user",
+    "conversation_id": "conv-kept",
+    "cut_off": false,
+    "device_id": "phone",
+    "message_id": "phone-msg-4",
+    "options": [],
+    "position": 7,
+    "replies_to": null,
+    "text": "And the week after?",
+    "written_at": "2026-11-26T09:00:10Z"
+   }
+  ]
+ },
+ "transcript/conv-quiet": {
+  "as_of": 17,
+  "conversation_id": "conv-quiet",
+  "entries": [
+   {
+    "author": "assistant",
+    "conversation_id": "conv-quiet",
+    "cut_off": false,
+    "device_id": null,
+    "message_id": null,
+    "options": [],
+    "position": 1,
+    "replies_to": null,
+    "text": "Good morning.",
+    "written_at": "2026-11-26T09:00:11Z"
+   }
+  ]
+ },
+ "untaken/conv-empty": [],
+ "untaken/conv-gone": [],
+ "untaken/conv-kept": [
+  {
+   "author": "user",
+   "conversation_id": "conv-kept",
+   "cut_off": false,
+   "device_id": "phone",
+   "message_id": "phone-msg-4",
+   "options": [],
+   "position": 7,
+   "replies_to": null,
+   "text": "And the week after?",
+   "written_at": "2026-11-26T09:00:10Z"
+  }
+ ],
+ "untaken/conv-quiet": []
+}

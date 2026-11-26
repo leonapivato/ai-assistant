@@ -809,6 +809,7 @@ async def test_an_episode_shown_in_the_place_window_renders_once_with_its_unders
                 text="Find a campsite.",
                 device_id="phone",
                 message_id="m-1",
+                home=RecordHome.owners(),
             ),
         ),
         input_messages=(),
@@ -836,6 +837,7 @@ def _said(position: int, author: MessageAuthor, text: str) -> TranscriptMessage:
         text=text,
         device_id="phone" if typed else None,
         message_id=f"m-{position}" if typed else None,
+        home=RecordHome.owners(),
     )
 
 

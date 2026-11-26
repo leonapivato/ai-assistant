@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     Reversibility,
     RiskLevel,
     ToolCost,
@@ -138,6 +139,7 @@ def _message(
         text=text,
         device_id="phone" if author is MessageAuthor.USER else None,
         message_id=f"m-{position}" if author is MessageAuthor.USER else None,
+        home=RecordHome.owners(),
     )
 
 
