@@ -110,9 +110,11 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # episode's sight; and §8:5's budget, a store-wide figure. Its runs read and write
     # through the holder, by each episode's sight (B9a), and its pin pass by the run's
     # sight for each person domain and, before a retiring write, the episode's (ADR-0388
-    # §4, B11e). The stores a holder is built over where the caller hands none are
-    # handed to that holder and read by nothing else.
-    "observer/stage.py:Observer": "§7:12",
+    # §4, B11e). §7:13: in a build whose stores withhold, the finding of what is due
+    # writes, through the same unbound plan store, an episode its sight does not see as
+    # set aside (B11c). The stores a holder is built over where the caller hands none
+    # are handed to that holder and read by nothing else.
+    "observer/stage.py:Observer": "§7:12, §7:13",
     # §7:8: the person-model store handed to the zone picker the Task Scheduler sensor's
     # push reads. A work's block, pins and reads go through the holder (B8e), and the
     # owner's panel through `bound` blocks, the owner's sight's (ADR-0385 §3:1, B10f);
@@ -557,7 +559,7 @@ def test_the_pin_pass_and_the_upcoming_event_producer_hold_no_store() -> None:
     """The pin pass and the upcoming-event producer's reads and writes are a run's
     (ADR-0388 §4, §7, milestone 22's B11e): each takes the holder or a store it bound to
     a run's or an episode's sight alone, so neither is listed, and the observer keeps only
-    what §7:12 and §8:5 name. No holder is left to B9."""
+    what §7:12, §7:13 and §8:5 name. No holder is left to B9."""
     held = unbound_holders()
     for converted in (
         "notifications.py:NotificationWriteStage",
@@ -566,7 +568,7 @@ def test_the_pin_pass_and_the_upcoming_event_producer_hold_no_store() -> None:
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
-    assert NAMED_BY_THE_DECISION["observer/stage.py:Observer"] == "§7:12"
+    assert NAMED_BY_THE_DECISION["observer/stage.py:Observer"] == "§7:12, §7:13"
     assert "observer/stage.py:Observer" not in NOT_YET_CONVERTED
     assert "B9" not in NOT_YET_CONVERTED.values()
 

@@ -117,10 +117,10 @@ async def test_with_the_switch_on_the_store_is_wired_with_the_roots_bounds(
         assert (KEPT_IN_MIND_CHARS, PLANNING_SUGGESTIONS) == (1600, 5)
         store = _store(engine)
         assert store._chars == PROFILE_FIELD_CHARS
-        # ADR-0383 §7:10, §11:1: a binding of it only counts in this build, and the
-        # root hands the block the one holder, over this same store, which binds it
-        # per work (§9:1); the store the root holds is never bound itself.
-        assert store._sight_mode is SightMode.COUNT
+        # ADR-0383 §7:10, §7:2: a binding of it withholds in this build, and the root
+        # hands the block the one holder, over this same store, which binds it per
+        # work (§9:1); the store the root holds is never bound itself.
+        assert store._sight_mode is SightMode.WITHHOLD
         assert store._sight is None
         assert blocks._stores is engine._matters._stores
         assert blocks._stores._people is store
