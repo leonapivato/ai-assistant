@@ -1081,13 +1081,14 @@ class MemoryStore(Protocol):
     nothing: no write changes a record's home. Nor does a write leave a record naming
     a record of another home this store holds, as a lineage or an evidence pointer: a
     memory's support, operation, open question, track-record entry or situation label
-    pointing at an episode, a memory it replaces or names as its successor, and an
-    episode's taker or the activation a joined input was taken over from, each by its
-    episode's id ``activation:<activation_id>`` (ADR-0283 §2). The names are judged
-    over the state the write would leave, so a batch whose own records would cross is
-    refused whole. A name of a record the store does not hold is not judged here
-    (whether a support's episode is held is the writer's check, ADR-0328 §4:7), and no
-    other field of a record is read as a name.
+    pointing at an episode (a confirmation's also at its asking activation's, and the
+    one that ran its ticket), a memory it replaces or names as its successor, and an
+    episode's taker or the activation a joined input was taken over from, each
+    activation by its episode's id ``activation:<activation_id>`` (ADR-0283 §2). The
+    names are judged over the state the write would leave, so a batch whose own
+    records would cross is refused whole. A name of a record the store does not hold is
+    not judged here (whether a support's episode is held is the writer's check,
+    ADR-0328 §4:7), and no other field of a record is read as a name.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
