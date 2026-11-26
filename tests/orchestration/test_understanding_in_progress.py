@@ -48,7 +48,7 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     UnderstandingStage,
 )
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore, default_prompt
 from ai_assistant.testing.parties import ASSISTANTS_WORDS, OWNERS_WORDS, UNIDENTIFIED_WORDS
 
 if TYPE_CHECKING:
@@ -377,7 +377,7 @@ async def test_the_story_links_stage_links_a_running_activation_member(where: st
         )
         held = made.story_id
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await StoryLinksStage(stories=stories, memory=FakeMemoryStore()).record(
         understood.story_links, home=RecordHome.owners(), activation_id=_HOLDER
     )
 

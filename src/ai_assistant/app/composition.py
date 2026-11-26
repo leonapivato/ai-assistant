@@ -2289,7 +2289,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 notes=STORY_SHORT_VIEW_NOTES,
                 episodes=STORY_SHORT_VIEW_EPISODES,
             ),
-            story_links=StoryLinksStage(stories=stories),
+            story_links=StoryLinksStage(stories=stories, memory=memory),
             # ADR-0300 §9:3's matters pass, as ADR-0302 §5 builds it, which the
             # scheduler's `matters_pass` row runs on consolidation's interval. On
             # **consolidation's route**, for the tidy-up's reason: background work over

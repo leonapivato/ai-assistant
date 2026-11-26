@@ -217,7 +217,7 @@ async def _story_read_harness(completer: FakeToolCallingCompleter) -> Harness:
         story_candidates=StoryCandidates(
             stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
         ),
-        story_links=StoryLinksStage(stories=stories),
+        story_links=StoryLinksStage(stories=stories, memory=memory),
         phases=_phases(
             completer,
             digests=FakeModelProvider(reply=_NOTHING_DIGESTED),

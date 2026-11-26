@@ -25,7 +25,7 @@ from story_support import (
     story,
 )
 
-from ai_assistant.core.errors import StoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
     RecordHome,
     StageOutcome,
@@ -45,6 +45,7 @@ from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ai_assistant.core.protocols import StoryStore
     from ai_assistant.core.types import MemoryRecord, StoryHeader, StoryMember, StoryViewPage
 
 BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
@@ -54,6 +55,11 @@ UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset(
 def _stories() -> FakeStoryStore:
     ids = count(1)
     return FakeStoryStore(now=lambda: AT, new_id=lambda: f"{next(ids)}")
+
+
+def _stage(stories: StoryStore, memory: FakeMemoryStore | None = None) -> StoryLinksStage:
+    """The stage over ``stories``, and a memory store holding no episode unless given."""
+    return StoryLinksStage(stories=stories, memory=memory or FakeMemoryStore(now=lambda: AT))
 
 
 async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
@@ -568,7 +574,7 @@ async def test_a_story_link_links_the_activation_with_the_understanding_actor() 
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(trip)], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -596,7 +602,7 @@ async def test_a_link_to_a_merged_story_follows_it_to_where_it_went() -> None:
     await stories.merge(absorbed, middle, actor=StoryActor.OWNER)
     await stories.merge(middle, last, actor=StoryActor.OWNER)
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(absorbed)], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -610,7 +616,7 @@ async def test_every_merge_is_followed_however_long_the_chain() -> None:
     for absorbed, into in itertools.pairwise(chain):
         await stories.merge(absorbed, into, actor=StoryActor.OWNER)
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(chain[0])], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -631,7 +637,7 @@ async def test_two_activations_linking_one_unstoried_episode_start_one_story() -
         return found
 
     stories.stories_of = yielding  # type: ignore[method-assign]  # an interleaving point
-    stage = StoryLinksStage(stories=stories)
+    stage = _stage(stories)
 
     first, second = await asyncio.gather(
         stage.record([activation("e-1")], home=RecordHome.owners(), activation_id="a"),
@@ -652,7 +658,7 @@ async def test_an_earlier_episode_s_stories_take_the_activation() -> None:
     first = await _story(stories, activation("a-1"))
     second = await _story(stories, activation("a-1"), activation("a-2"))
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [activation("a-1"), story(first)], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -664,7 +670,7 @@ async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation(
     stories = _stories()
     trip = await _story(stories, activation("a-9"))
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [activation("a-1"), story(trip), activation("a-2")],
         home=RecordHome.owners(),
         activation_id="now",
@@ -689,9 +695,7 @@ async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHo
     """ADR-0383 §4:1, ADR-0386 §2:2: the home whom the activation's work is for gives."""
     stories = _stories()
 
-    decision = await StoryLinksStage(stories=stories).record(
-        [activation("a-1")], home=home, activation_id="now"
-    )
+    decision = await _stage(stories).record([activation("a-1")], home=home, activation_id="now")
 
     assert decision.started is not None
     header = await stories.header(decision.started)
@@ -702,9 +706,7 @@ async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHo
 async def test_no_links_write_nothing() -> None:
     stories = _stories()
 
-    decision = await StoryLinksStage(stories=stories).record(
-        (), home=RecordHome.owners(), activation_id="now"
-    )
+    decision = await _stage(stories).record((), home=RecordHome.owners(), activation_id="now")
 
     assert (decision.outcome, decision.linked, decision.started) == (StageOutcome.DONE, (), None)
     assert (await stories.stories()).stories == ()
@@ -714,7 +716,7 @@ async def test_a_refused_link_is_recorded_and_the_rest_goes_on() -> None:
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story("story:missing"), story(trip)], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -731,7 +733,7 @@ async def test_a_story_store_error_is_a_failed_decision_carrying_it() -> None:
     assert created.story_id is not None
     stories = failing(stories, "link")
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(created.story_id)], home=RecordHome.owners(), activation_id="now"
     )
 
@@ -749,7 +751,7 @@ async def test_a_link_into_a_story_of_another_home_is_refused_and_the_rest_goes_
     )
     assert shared.story_id is not None
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(owners), activation("a-1"), story(shared.story_id)],
         home=RecordHome.shared(),
         activation_id="now",
@@ -771,7 +773,7 @@ async def test_a_link_to_a_merged_story_is_judged_where_it_went() -> None:
     into = await _story(stories, activation("a-2"))
     await stories.merge(absorbed, into, actor=StoryActor.OWNER)
 
-    decision = await StoryLinksStage(stories=stories).record(
+    decision = await _stage(stories).record(
         [story(absorbed)], home=RecordHome.shared(), activation_id="now"
     )
 
@@ -779,3 +781,56 @@ async def test_a_link_to_a_merged_story_is_judged_where_it_went() -> None:
         (StoryRefusalReason.ANOTHER_HOME, into)
     ]
     assert decision.linked == ()
+
+
+async def test_a_start_holding_an_earlier_episode_of_another_home_starts_nothing() -> None:
+    """ADR-0383 §4:7: the episodes a start holds are named by understanding's output, so
+    one of another home than the activation's refuses the start, and nothing is written;
+    the activation is still linked where the rest of its links go."""
+    stories = _stories()
+    trip = await _story(stories, activation("a-9"))
+    memory = await memory_of(
+        episode("a-1"), episode("s-1").model_copy(update={"home": RecordHome.shared()})
+    )
+
+    decision = await _stage(stories, memory).record(
+        [activation("a-1"), activation("s-1"), story(trip)],
+        home=RecordHome.owners(),
+        activation_id="now",
+    )
+
+    assert decision.outcome is StageOutcome.DONE
+    assert decision.started is None
+    assert [(one.reason, one.story_id) for one in decision.refused] == [
+        (StoryRefusalReason.ANOTHER_HOME, None)
+    ]
+    assert decision.linked == (trip,)
+    assert [header.story_id for header in (await stories.stories()).stories] == [trip]
+
+
+async def test_a_start_of_earlier_episodes_of_its_own_home_starts_as_before() -> None:
+    stories = _stories()
+    memory = await memory_of(episode("a-1"))
+
+    decision = await _stage(stories, memory).record(
+        [activation("a-1"), activation("a-gone")], home=RecordHome.owners(), activation_id="now"
+    )
+
+    assert decision.started is not None
+    assert [entry.member for entry in (await _view(stories, decision.started)).entries] == [
+        activation("a-1"),
+        activation("a-gone"),
+        activation("now"),
+    ]
+
+
+async def test_a_memory_store_error_is_a_failed_decision_carrying_it() -> None:
+    stories = _stories()
+
+    decision = await _stage(stories, FakeMemoryStore(now=lambda: AT, failure="down")).record(
+        [activation("a-1")], home=RecordHome.owners(), activation_id="now"
+    )
+
+    assert decision.outcome is StageOutcome.FAILED
+    assert isinstance(decision.error, MemoryStoreError)
+    assert (await stories.stories()).stories == ()
