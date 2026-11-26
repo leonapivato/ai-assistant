@@ -45,6 +45,7 @@ from memory_store_contract import (
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    CrossHomeWriteError,
     EmbeddingDeadlineExpiredError,
     IncompatibleStateError,
     MemoryStoreConflictError,
@@ -77,6 +78,7 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.memory._sight import home_from_columns, made_by
 from ai_assistant.memory._walk import mint_position
 from ai_assistant.memory.sqlite_store import (
     _VEC_KNN_MAX_K,
@@ -3211,7 +3213,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 29, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 30, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:
@@ -3524,13 +3526,15 @@ async def test_each_label_vector_is_its_own_texts_embedding(
     }
 
 
-# --- a stored home read as the decoder reads it (ADR-0383 §5:3, §7:3, §7:5) ---------
+# --- a stored home, as the upgrade fills its columns (ADR-0383 §5:3, §7:3, §7:5) ----
 
 _OWNERS_STORED = '"home":{"kind":"person","id":"person:owner"}'
 
 #: Stored homes no write leaves, each planted over an owner's episode's home, by the
 #: SQL that plants it, with the home the record decoder reads there (``None`` where
-#: the row has no home it can read, or cannot be decoded at all).
+#: the row has no home it can read, or cannot be decoded at all). Each row's home
+#: columns are then filled as the upgrade to the columns fills them, from the record as
+#: the decoder reads it, so these are the rows an upgraded file can hold.
 _PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
     "none": ("json_remove(data, '$.home')", None),
     "extra-key": (
@@ -3603,7 +3607,8 @@ _PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
 async def _planted(
     make_store: Callable[..., SqliteMemoryStore], planted: str, mode: SightMode
 ) -> tuple[SqliteMemoryStore, MemoryRecord]:
-    """A store holding one owner's episode on ``_CHANNEL_A`` with its home replanted."""
+    """A store holding one owner's episode on ``_CHANNEL_A`` with its home replanted,
+    and its home columns filled from it as the upgrade fills them."""
     store = make_store(name=f"planted-{planted}-{mode}.db", sight_mode=mode)
     await store.add(_on_channel("activation:planted"))
     stored = await store.get("activation:planted")
@@ -3612,7 +3617,29 @@ async def _planted(
         f"UPDATE records SET data = {_PLANTED_HOMES[planted][0]} WHERE id = ?",  # noqa: S608 — module literals
         ("activation:planted",),
     )
+    SqliteMemoryStore._fill_home_columns(store._conn)
     return store, stored
+
+
+def _home_columns(store: SqliteMemoryStore, record_id: str) -> tuple[object, object]:
+    """The row's two home columns, read out of band."""
+    row = store._conn.execute(
+        "SELECT home_kind, home_id FROM records WHERE id = ?", (record_id,)
+    ).fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
+@pytest.mark.parametrize("planted", list(_PLANTED_HOMES))
+async def test_the_upgrade_fills_each_planted_rows_columns_with_the_decoders_home(
+    make_store: Callable[..., SqliteMemoryStore], planted: str
+) -> None:
+    """The fill names the home the decoder reads, and none where it reads none (§5:3)."""
+    store, _ = await _planted(make_store, planted, SightMode.COUNT)
+    home = _PLANTED_HOMES[planted][1]
+    assert _home_columns(store, "activation:planted") == (
+        (None, None) if home is None else (home.kind.value, home.id)
+    )
 
 
 @pytest.mark.parametrize("planted", list(_PLANTED_HOMES))
@@ -3639,8 +3666,8 @@ async def test_a_bound_store_reads_a_planted_home_as_the_decoder_and_the_predica
     make_store: Callable[..., SqliteMemoryStore], planted: str, sight_name: str
 ) -> None:
     """§7:3: the statement's answer equals the predicate's over the decoded home, on
-    every row, a key given twice or in another order included; §5:3: a row with no
-    home the decoder could read is held by no bound store.
+    every row the upgrade filled, a key given twice or in another order included; §5:3:
+    a row with no home the decoder could read is held by no bound store.
 
     Withholding, the row is given back, named and counted exactly where the sight sees
     the decoded home; a row it does not hold is refused to a conditional write and to
@@ -3698,8 +3725,212 @@ async def test_a_works_own_episode_with_no_home_is_held_by_no_bound_store(
     store._conn.execute(
         "UPDATE records SET data = json_remove(data, '$.home') WHERE id = ?", (own,)
     )
+    SqliteMemoryStore._fill_home_columns(store._conn)
     bound = store.bound(SIGHTS["unidentified-senders-work"])
     assert SIGHTS["unidentified-senders-work"].activation == "own"
     assert await bound.channel_episode_ids(_CHANNEL_A, limit=10) == ()
     assert await bound.get(own) is None
     assert await bound.delete(own) is False
+
+
+# --- the home in columns: written with the record, never apart (ADR-0383 §7:3) -------
+
+
+def _columns_disagree(store: SqliteMemoryStore) -> dict[str, tuple[object, object]]:
+    """Every row whose home columns name other than its decoded record's home."""
+    return {
+        str(record_id): (home_kind, home_id)
+        for record_id, data, home_kind, home_id in store._conn.execute(
+            "SELECT id, data, home_kind, home_id FROM records"
+        )
+        if home_from_columns(home_kind, home_id) != SqliteMemoryStore._decode(str(data)).home
+    }
+
+
+def _shared(record: MemoryRecord) -> MemoryRecord:
+    return record.model_copy(update={"home": RecordHome.shared()})
+
+
+async def test_every_door_writes_the_records_home_into_its_columns(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """``add`` and each ``write_atomic`` mode write the record's home into the row's
+    columns in the statement that writes the row, for the owner's domain and the
+    shared things alike."""
+    store = make_store()
+    await store.add(_on_channel("activation:owners"))
+    await store.add(_shared(_on_channel("activation:shared")))
+    await store.write_atomic(
+        [
+            MemoryWrite(
+                record=memory("m-inserted", "inserted"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+            ),
+            MemoryWrite(
+                record=_shared(memory("m-upserted", "upserted")), mode=MemoryWriteMode.UPSERT
+            ),
+        ]
+    )
+    held = await store.get("m-inserted")
+    assert held is not None
+    await store.write_atomic(
+        [
+            MemoryWrite(
+                record=held.model_copy(update={"content": "rewritten"}),
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=held.revision,
+            )
+        ]
+    )
+
+    assert _home_columns(store, "activation:owners") == ("person", OWNER_PERSON_ID)
+    assert _home_columns(store, "activation:shared") == ("shared", None)
+    assert _home_columns(store, "m-inserted") == ("person", OWNER_PERSON_ID)
+    assert _home_columns(store, "m-upserted") == ("shared", None)
+    assert _columns_disagree(store) == {}
+
+
+async def test_no_sequence_of_writes_leaves_a_row_whose_columns_and_record_disagree(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """Item 4's direction: through the Protocol, the columns and the decoded record
+    never disagree, so no bound store gives back a record its sight does not see.
+
+    Every door, both homes, overwrites, a refused change of home (§4:6), a batch that
+    rolls back, a delete and a purge: after each, every row's columns name its decoded
+    record's home, and each sight's withholding store gives back exactly the records
+    whose decoded home it sees.
+    """
+    store = make_store(sight_mode=SightMode.WITHHOLD)
+    await store.add(_on_channel("activation:own"))
+    await store.add(_shared(_on_channel("activation:other")))
+    await store.add(memory("m-owners", "the owner's"))
+    await store.add(_shared(memory("m-shared", "the hub's")))
+    assert _columns_disagree(store) == {}
+
+    # An overwrite, through each door, keeps the home it had.
+    owners = await store.get("m-owners")
+    assert owners is not None
+    await store.add(owners.model_copy(update={"content": "the owner's, again"}))
+    await store.write_atomic(
+        [
+            MemoryWrite(
+                record=_shared(memory("m-shared", "the hub's, again")),
+                mode=MemoryWriteMode.UPSERT,
+            )
+        ]
+    )
+    assert _columns_disagree(store) == {}
+
+    # A change of home is refused by every door, and leaves the row as it was.
+    with pytest.raises(CrossHomeWriteError):
+        await store.add(_shared(memory("m-owners", "moved")))
+    with pytest.raises(CrossHomeWriteError):
+        await store.write_atomic(
+            [
+                MemoryWrite(record=memory("m-new", "new"), mode=MemoryWriteMode.UPSERT),
+                MemoryWrite(record=memory("m-shared", "moved"), mode=MemoryWriteMode.UPSERT),
+            ]
+        )
+    assert await store.get("m-new") is None
+    assert _home_columns(store, "m-owners") == ("person", OWNER_PERSON_ID)
+    assert _home_columns(store, "m-shared") == ("shared", None)
+
+    await store.add(
+        memory("m-expired", "gone").model_copy(update={"expires_at": _WHEN - timedelta(days=1)})
+    )
+    assert await store.purge_expired() == 1
+    assert await store.delete("activation:other") is True
+    assert _columns_disagree(store) == {}
+
+    everything = {record.id: record for record in await store.bound(SIGHTS["owners-work"]).export()}
+    for name, sight in SIGHTS.items():
+        given = await store.bound(sight).export()
+        assert {record.id for record in given} == {
+            record.id
+            for record in everything.values()
+            if sight.sees(record.home, made_by=made_by(record))
+        }, name
+
+
+async def test_a_row_altered_outside_the_store_is_never_read_wider_than_it_is(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """§5:3's rule for a row whose record and columns were made to disagree by hand.
+
+    A row whose columns name a home the sight does not see is withheld, whatever its
+    record says. A row whose columns name a home the sight sees but whose record
+    carries one it does not is refused as a row that does not decode is, never given
+    back. A row whose record and columns name two homes the sight both sees is given
+    back, as it is: nothing wider. The unbound store reads the record as it is stored.
+    """
+    store = make_store(sight_mode=SightMode.WITHHOLD)
+    await store.add(memory("m-record-moved", "the record moved"))
+    await store.add(memory("m-columns-moved", "the columns moved"))
+    store._conn.execute(
+        "UPDATE records SET data = json_set(data, '$.home', json(?)) WHERE id = ?",
+        (RecordHome.shared().model_dump_json(), "m-record-moved"),
+    )
+    store._conn.execute(
+        "UPDATE records SET home_kind = 'shared', home_id = NULL WHERE id = ?",
+        ("m-columns-moved",),
+    )
+    owners_run = store.bound(SIGHTS["run-over-the-owners-domain"])
+    shared_run = store.bound(SIGHTS["run-over-the-shared-things"])
+    owners_work = store.bound(SIGHTS["owners-work"])
+
+    # Columns the sight does not see: withheld, as a record never written.
+    assert await shared_run.get("m-record-moved") is None
+    assert await owners_run.get("m-columns-moved") is None
+    # Columns it sees over a record it does not: refused, never given back.
+    with pytest.raises(MemoryStoreError):
+        await owners_run.get("m-record-moved")
+    with pytest.raises(MemoryStoreError):
+        await shared_run.get("m-columns-moved")
+    with pytest.raises(MemoryStoreError):
+        await shared_run.export()
+    # Both homes seen: given back as the record carries it.
+    moved = await owners_work.get("m-record-moved")
+    assert moved is not None
+    assert moved.home == RecordHome.shared()
+    # The unbound store reads each record as stored.
+    unbound = await store.get("m-columns-moved")
+    assert unbound is not None
+    assert unbound.home == RecordHome.owners()
+
+
+@pytest.mark.parametrize("encoding", ["UTF-16le", "UTF-16be"])
+async def test_a_file_in_another_text_encoding_reads_and_fills_its_homes(
+    tmp_path: Path, encoding: str
+) -> None:
+    """No home is read off a row's bytes in the database's own encoding: a file made
+    by hand in UTF-16 is read, withheld and filled as a UTF-8 one is (#3732)."""
+    path = tmp_path / "memory.db"
+    with sqlite3.connect(path) as conn:
+        # The encoding is fixed when the file is first written, so one table is made
+        # and dropped: the file is then empty, in that encoding, for the store to set up.
+        conn.execute(f"PRAGMA encoding = '{encoding}'")
+        conn.execute("CREATE TABLE made(x)")
+        conn.execute("DROP TABLE made")
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=_fixed_now,
+        sight_mode=SightMode.WITHHOLD,
+    )
+    try:
+        assert store._conn.execute("PRAGMA encoding").fetchone()[0] == encoding
+        await store.add(_on_channel("activation:owners"))
+        await store.add(_shared(_on_channel("activation:shared")))
+        store._conn.execute("UPDATE records SET home_kind = NULL, home_id = NULL")
+        SqliteMemoryStore._fill_home_columns(store._conn)
+
+        assert _home_columns(store, "activation:owners") == ("person", OWNER_PERSON_ID)
+        assert _home_columns(store, "activation:shared") == ("shared", None)
+        owners_run = store.bound(SIGHTS["run-over-the-owners-domain"])
+        held = await owners_run.channel_episode_ids(_CHANNEL_A, limit=10)
+        assert [one.episode_id for one in held] == ["activation:owners"]
+        assert await owners_run.get("activation:owners") is not None
+        assert await owners_run.get("activation:shared") is None
+    finally:
+        store.close()

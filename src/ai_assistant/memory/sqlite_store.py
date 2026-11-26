@@ -95,6 +95,7 @@ from ai_assistant.memory._episode_format import (
     CONTINUING_RECORD_FORMAT,
     EPISODE_RECORD_FORMAT,
     FACTS_RECORD_FORMAT,
+    HOME_RECORD_FORMAT,
     JOINED_RECORD_FORMAT,
     MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
@@ -121,12 +122,12 @@ from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
 from ai_assistant.memory._sight import (
-    STORED_HOME_SQL,
     count_given,
     count_records,
+    home_columns,
+    home_from_columns,
+    made_by,
     made_by_id,
-    read_home,
-    register_home_reader,
     seen_sql,
 )
 from ai_assistant.memory._transactions import transaction
@@ -484,17 +485,27 @@ class SqliteMemoryStore:
     statement that selects its rows, before any ``ORDER BY``, ``LIMIT``, ``COUNT``
     or KNN cut, and every write refuses inside its transaction to change a row the
     sight does not see. Counting, every statement is the unbound one, and each read
-    logs what the sight would have withheld of the rows it gave back. The sight's
-    expression decodes each candidate row to read its home: no column, index or
-    format label is added for it, and the cost of that is #3732's.
+    logs what the sight would have withheld of the rows it gave back.
 
-    Withholding reads each row's home by the store's record decoder itself, which the
-    connection carries as a SQL function
-    (:func:`~ai_assistant.memory._sight.register_home_reader`), so the statement and
-    the predicate over the decoded record agree on every row: a row the decoder
-    refuses has no home and is withheld. Counting classifies each record a read gave
-    back by its decoded home, and :meth:`channel_episode_ids`, which decodes nothing,
-    by the same function.
+    **Each row's home is also kept in two columns**, ``home_kind`` and ``home_id``,
+    beside the record that carries it, and the sight's expression compares those, so
+    no statement decodes a row to apply a sight (#3732). :meth:`_persist_record`, the
+    one body every door that stores a record writes through, writes them in the same
+    statement as the record, from that record's own ``home``; the upgrade to
+    :data:`MEMORY_RECORD_FORMAT` filled them for every row stored before, from the
+    record as :meth:`_decode` reads it, and left them empty on a row it could not read
+    a home from (ADR-0383 §5:3). Nothing else writes them, and no write changes a
+    stored record's home (§4:6), so on every row this store wrote the columns and the
+    decoded record name one home, and the statement answers as the predicate over the
+    decoded record does (§7:3).
+
+    **A row altered outside the store** may hold a record whose home its columns do
+    not name. No read is ever wider for it: a row whose columns name no home is held by
+    no bound store, and a withholding read that decodes a record its sight does not see
+    refuses with ``MemoryStoreError``, as a row that does not decode is refused, rather
+    than give it back (:meth:`_decoded_at`). Counting classifies each record a read
+    gave back by its decoded home, and :meth:`channel_episode_ids`, which decodes
+    nothing, by the columns.
     """
 
     def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
@@ -599,9 +610,6 @@ class SqliteMemoryStore:
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
-            # The record decoder's reading of a home, as a SQL function the sight's
-            # expression calls (ADR-0383 §7:3).
-            register_home_reader(conn, SqliteMemoryStore._decode)
             # Serialize format inspection with initialization by other openers.
             # BEGIN acquires the lock without modifying database pages. Refuse
             # old state before chmod or schema writes, then restrict permissions
@@ -640,13 +648,18 @@ class SqliteMemoryStore:
                 # ``1`` or ``0``, written with every write of the record and indexed
                 # below, so the reads that pass over an open episode, the walk that
                 # stops at one and ``open_episodes`` decode no blob to find it.
+                #
+                # ``home_kind`` and ``home_id`` are the record's home (ADR-0383 §2:2),
+                # written with every write of the record from its own ``home``, so a
+                # bound store's sight is a comparison of columns and decodes no blob
+                # (§7:3). ``NULL`` in both is a row with no home (§5:3).
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
                 "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER, "
                 "channel_type TEXT, channel_instance TEXT, is_open INTEGER NOT NULL DEFAULT 0, "
-                "band TEXT)"
+                "band TEXT, home_kind TEXT, home_id TEXT)"
             )
             self._init_revision_issuer(conn)
             conn.execute(
@@ -714,6 +727,7 @@ class SqliteMemoryStore:
         self._upgrade_to_checked(conn, found)
         self._upgrade_to_came_through(conn, found)
         self._upgrade_to_home(conn, found)
+        self._upgrade_to_home_columns(conn, found)
 
     def _create_label_tables(self, conn: sqlite3.Connection) -> None:
         """Create the tables a memory's labels are embedded into (ADR-0345 §7:4).
@@ -1775,7 +1789,7 @@ class SqliteMemoryStore:
         """Write the owner's domain into every stored record: ADR-0383 §5:1's upgrade.
 
         Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE`` for a file at a label before
-        :data:`MEMORY_RECORD_FORMAT`, and completes or rolls back with the transaction
+        :data:`HOME_RECORD_FORMAT`, and completes or rolls back with the transaction
         (ADR-0326 §4:3). **Every stored record takes the owner's domain**, an episode and
         a memory alike, open or frozen, whatever an episode's facts say of whom its work
         was for (ADR-0383 §5:1): nothing asks the owner anything. The home is set inside
@@ -1798,7 +1812,7 @@ class SqliteMemoryStore:
             found: The label the file held when it was opened; ``None`` for a fresh
                 store, which is already written at the new label.
         """
-        if found is None or found >= MEMORY_RECORD_FORMAT:
+        if found is None or found >= HOME_RECORD_FORMAT:
             return
         conn.execute(
             "UPDATE records SET data = json_set(data, '$.home', json(?)) WHERE kind IN (?, ?)",
@@ -1813,7 +1827,31 @@ class SqliteMemoryStore:
         :meth:`_upgrade_to_came_through` has carried a file to 27, so the upgrades chain
         (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
         :meth:`_write_homes` wrote every record's home at the head of the chain, so
-        **the label alone moves** here.
+        **the label alone moves** here, to :data:`HOME_RECORD_FORMAT`, from which
+        :meth:`_upgrade_to_home_columns` carries it on.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= HOME_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (HOME_RECORD_FORMAT,))
+
+    @classmethod
+    def _upgrade_to_home_columns(cls, conn: sqlite3.Connection, found: int | None) -> None:
+        """Add and fill each row's home columns: the upgrade to :data:`MEMORY_RECORD_FORMAT`.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, last in the chain, so every
+        row it reads is one the chain has carried to this build's record (ADR-0326
+        §4:5), and it completes or rolls back with the transaction (§4:3). It adds
+        ``home_kind`` and ``home_id`` and fills them from each row by
+        :meth:`_fill_home_columns`; **nothing else in any row moves**, not a byte of
+        its record, its ``revision``, its other columns or its vector, and no row is
+        dropped (§4:4). A row whose home cannot be read is kept, with no home in its
+        columns, which withholds it from every sight (ADR-0383 §5:3); the upgrade does
+        not fail on it. Then the label moves.
 
         Args:
             conn: The connection, inside :meth:`_setup`'s transaction.
@@ -1822,7 +1860,53 @@ class SqliteMemoryStore:
         """
         if found is None or found >= MEMORY_RECORD_FORMAT:
             return
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(records)")}
+        for column in ("home_kind", "home_id"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE records ADD COLUMN {column} TEXT")
+        cls._fill_home_columns(conn)
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
+
+    @classmethod
+    def _fill_home_columns(cls, conn: sqlite3.Connection) -> None:
+        """Set every row's home columns from its record, as :meth:`_decode` reads it.
+
+        The upgrade's one body, inside the caller's transaction. Each row is read as
+        bytes, so a payload that is not text the driver reads, the database's own text
+        encoding whatever it is (SQLite hands the bytes over as UTF-8), is a row read
+        here and not an error raised out of the open. A row whose bytes are not UTF-8,
+        or that :meth:`_decode` refuses, is the home of no one (ADR-0383 §5:3): its
+        columns are set to ``NULL``. Every other row's columns name the home its
+        decoded record carries. Read a page of rows at a time in ``rowid`` order, so a
+        large store is never held in memory whole.
+        """
+        factory = conn.text_factory
+        conn.text_factory = bytes
+        try:
+            after = 0
+            while True:
+                rows = conn.execute(
+                    "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                    (after, _BACKFILL_CHUNK),
+                ).fetchall()
+                if not rows:
+                    return
+                conn.executemany(
+                    "UPDATE records SET home_kind = ?, home_id = ? WHERE rowid = ?",
+                    [(*cls._stored_home_columns(data), rowid) for rowid, data in rows],
+                )
+                after = int(rows[-1][0])
+        finally:
+            conn.text_factory = factory
+
+    @classmethod
+    def _stored_home_columns(cls, data: object) -> tuple[str | None, str | None]:
+        """The home columns of one stored payload, read as bytes; both ``NULL`` for none."""
+        try:
+            text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+            return home_columns(cls._decode(text).home)
+        except UnicodeDecodeError, MemoryStoreError:
+            return None, None
 
     @staticmethod
     def _carry_parties(stored: dict[str, Any]) -> bool:
@@ -2293,6 +2377,12 @@ class SqliteMemoryStore:
         # ADR-0100 §8's subject column, an episode's alone: a memory carries no
         # ``about_person`` (ADR-0345 §9:1), and its people are read off the record.
         subject = record.about_person if isinstance(record, EpisodicMemory) else None
+        # ADR-0383 §7:3: the record's home in two columns, from the record this
+        # statement writes, so the sight's expression compares columns and decodes no
+        # row. Written on both branches with every other column; an upsert never moves
+        # them, since :func:`refuse_home_change` below refuses a write that would
+        # change a stored record's home (§4:6).
+        home_kind, home_id = home_columns(record.home)
         row = conn.execute(
             "SELECT rowid, kind, data FROM records WHERE id = ?", (record.id,)
         ).fetchone()
@@ -2315,8 +2405,8 @@ class SqliteMemoryStore:
             cursor = conn.execute(
                 "INSERT INTO records"
                 "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-                "occurred_at, channel_type, channel_instance, is_open, band) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "occurred_at, channel_type, channel_instance, is_open, band, home_kind, home_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -2331,6 +2421,8 @@ class SqliteMemoryStore:
                     channel_instance,
                     int(open_episode),
                     band,
+                    home_kind,
+                    home_id,
                 ),
             )
             rowid = cursor.lastrowid
@@ -2339,7 +2431,8 @@ class SqliteMemoryStore:
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
                 "valid_from = ?, about_person = ?, revision = ?, occurred_at = ?, "
-                "channel_type = ?, channel_instance = ?, is_open = ?, band = ? WHERE rowid = ?",
+                "channel_type = ?, channel_instance = ?, is_open = ?, band = ?, home_kind = ?, "
+                "home_id = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -2353,6 +2446,8 @@ class SqliteMemoryStore:
                     channel_instance,
                     int(open_episode),
                     band,
+                    home_kind,
+                    home_id,
                     rowid,
                 ),
             )
@@ -2671,8 +2766,7 @@ class SqliteMemoryStore:
             msg = f"stored memory could not be decoded: {exc}"
             raise MemoryStoreError(msg) from exc
 
-    @classmethod
-    def _decoded_at(cls, data: str, revision: int) -> MemoryRecord:
+    def _decoded_at(self, data: str, revision: int) -> MemoryRecord:
         """Decode a stored row and put its stored ``revision`` back on the record.
 
         The stamp is held in a column beside the payload rather than inside it
@@ -2683,8 +2777,27 @@ class SqliteMemoryStore:
         through that path would then meet ``MemoryStoreStaleError`` on a write that
         is not stale — which is why the conformance arm is parameterised over all
         six rather than taken on one.
+
+        **Withholding, the record is held to the predicate too** (ADR-0383 §7:3). The
+        statement chose the row by its home columns, which on every row this store
+        wrote name the home the record carries; a row altered outside the store may
+        hold a record of another home. Such a record is refused as a row that does not
+        decode is, never given back (§5:3).
+
+        Raises:
+            MemoryStoreError: If the row does not decode, or, withholding, holds a
+                record the sight does not see.
         """
-        return cls._decode(data).model_copy(update={"revision": revision})
+        record = self._decode(data).model_copy(update={"revision": revision})
+        sight = self._sight
+        if (
+            sight is not None
+            and self._sight_mode is SightMode.WITHHOLD
+            and not sight.sees(record.home, made_by=made_by(record))
+        ):
+            msg = "a stored record's home is not the one its row's home columns name"
+            raise MemoryStoreError(msg)
+        return record
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.
@@ -3460,21 +3573,23 @@ class SqliteMemoryStore:
             count_given(
                 sight,
                 "channel_episode_ids",
-                ((read_home(home), made_by_id(kind, rid)) for _, rid, kind, home in rows),
+                (
+                    (home_from_columns(home_kind, home_id), made_by_id(kind, rid))
+                    for _, rid, kind, home_kind, home_id in rows
+                ),
             )
-        return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid, _, _ in rows)
+        return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid, *_ in rows)
 
     def _channel_episode_ids_sync(
         self, channel: ChannelIdentity, after: int | None, limit: int
-    ) -> list[tuple[int, str, str, object]]:
-        """The page's rows: number and id, and, where counting, kind and stored home.
+    ) -> list[tuple[int, str, str, object, object]]:
+        """The page's rows: number and id, and their kind and home columns.
 
-        The home is read from the blob only where this store counts for a sight, so
-        an unbound enumeration still reads the channel index alone.
+        Read off the row's columns alone, never its record, so a counting store
+        classifies each by the home its columns name (ADR-0383 §11:1).
         """
-        home = STORED_HOME_SQL if self._counting() is not None else "NULL"
         sql = (
-            f"SELECT rowid, id, kind, {home} FROM records "  # noqa: S608 — module text; values bound
+            "SELECT rowid, id, kind, home_kind, home_id FROM records "
             "WHERE channel_type = ? AND channel_instance = ?"
         )
         params: list[object] = [channel.channel_type, channel.instance_id]
@@ -3489,7 +3604,7 @@ class SqliteMemoryStore:
         params.append(limit)
         try:
             return [
-                (int(row[0]), str(row[1]), str(row[2]), row[3])
+                (int(row[0]), str(row[1]), str(row[2]), row[3], row[4])
                 for row in self._conn.execute(sql, params)
             ]
         except sqlite3.Error as exc:

@@ -156,6 +156,8 @@ from ai_assistant.core.types import (
     ScheduledTaskAuthor,
     SecretName,
     SecretScope,
+    Sight,
+    SightMode,
     SituationLabel,
     SourceGrant,
     SourceReadRecord,
@@ -443,10 +445,23 @@ async def _read_traces(directory: Path) -> Records:
 # --- memory.db ------------------------------------------------------------------------
 
 
-def _memory(directory: Path, traces: TraceSink) -> SqliteMemoryStore:
+def _memory(
+    directory: Path, traces: TraceSink, sight_mode: SightMode = SightMode.COUNT
+) -> SqliteMemoryStore:
     return SqliteMemoryStore(
-        path=directory / "memory.db", embedder=HashingEmbedder(), traces_sink=traces
+        path=directory / "memory.db",
+        embedder=HashingEmbedder(),
+        traces_sink=traces,
+        sight_mode=sight_mode,
     )
+
+
+#: The homes a memory store's bound read-back is taken in, each by a run tending it,
+#: whose sight sees that home alone (ADR-0383 §6:8), under the key it is read back at.
+_MEMORY_SEEN_HOMES: Final[dict[str, RecordHome]] = {
+    "seen/owner": RecordHome.owners(),
+    "seen/shared": RecordHome.shared(),
+}
 
 
 def _provenance(moment: Moment, source: MemorySource = MemorySource.OBSERVED) -> Provenance:
@@ -1005,6 +1020,30 @@ def _memory_understood_carry(records: Records) -> Records:
     return carried
 
 
+def _memory_seen_carry(records: Records) -> Records:
+    """What a memory store read back before its home columns reads back after them.
+
+    Every record and read is as it was. The head also reads back, for each home of
+    :data:`_MEMORY_SEEN_HOMES`, the ids a withholding store bound to a run tending that
+    home gives back: exactly the records the base wrote in that home, since the upgrade
+    fills each row's home columns from its record (ADR-0383 §5:3, §7:3). Said here from
+    each record's own home, so a head that left a column empty, and so withheld a record
+    its sight sees, is caught.
+    """
+    carried = dict(records)
+    for key, home in _MEMORY_SEEN_HOMES.items():
+        wanted = to_json(home)
+        ids = sorted(
+            str(value["id"])
+            for name, value in records.items()
+            if name.startswith("record/")
+            and isinstance(value, dict)
+            and value.get("home") == wanted
+        )
+        carried[key] = to_json(ids)
+    return carried
+
+
 def _memory_called_carry(records: Records) -> Records:
     """What a memory store read back before ADR-0356 reads back after it (§13:5).
 
@@ -1033,10 +1072,15 @@ async def _read_memory(directory: Path) -> Records:
     whole and in place, every record is its own nearest.
     """
     traces = _traces(directory)
-    store = _memory(directory, traces)
+    store = _memory(directory, traces, SightMode.WITHHOLD)
     try:
         exported = await store.export()
         records = _keyed("record", exported, _field("id"))
+        # ADR-0383 §7:3: what a store bound to each home's run gives back, read off the
+        # home columns the head's statements compare (``_memory_seen_carry``).
+        for key, home in _MEMORY_SEEN_HOMES.items():
+            seen = await store.bound(Sight.of_run(home)).export()
+            records[key] = to_json(sorted(record.id for record in seen))
         rest = await store.walk_records(_WALK, limit=_PAGE)
         records["walk"] = [record.id for record in rest.records]
         records["channel"] = to_json(await store.channel_episode_ids(_CHANNEL, limit=_PAGE))
@@ -2475,7 +2519,7 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=7,
+        shape=8,
         carries={
             1: _memory_record_carry,
             2: _memory_placed_carry,
@@ -2483,6 +2527,7 @@ STORES: Final[tuple[Store, ...]] = (
             4: _memory_parties_carry,
             5: _memory_understood_carry,
             6: _memory_called_carry,
+            7: _memory_seen_carry,
         },
     ),
     Store(
