@@ -4529,6 +4529,7 @@ class PhasePath:
         activation_id: str,
         trigger: RecordedChannelTrigger | None,
         lineage: Sequence[PlaceItem],
+        owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
         """Start the working set of an activation a scheduled task started (ADR-0350 §6).
@@ -4548,6 +4549,8 @@ class PhasePath:
                 statement, with unknown where its task carries the outside-content mark
                 (ADR-0351 §3:6).
             lineage: The schedule's place window, the lineage as steps (§6:5).
+            owner_records: Whether a record placed for the owner alone may be shown,
+                made from the pass's posture (ADR-0383 §10:3): the schedule is private.
             labels: The labels the episode already records.
 
         Returns:
@@ -4560,19 +4563,20 @@ class PhasePath:
             ),
             conversation_id=None,
             trigger=trigger,
-            owner_records=True,
+            owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
             activation=active_state(),
         )
 
-    def begin_approval(
+    def begin_approval(  # noqa: PLR0913 — the activation, its trigger, its context, where it was asked, its audience and its recorded labels
         self,
         *,
         activation_id: str,
         trigger: RecordedChannelTrigger | None,
         context: Sequence[PlaceItem],
         asked_from: AskedFrom,
+        owner_records: bool,
         labels: Sequence[PlanningLabel] = (),
     ) -> PhaseWorking:
         """Start the working set of an activation an approval's outcome started (ADR-0361 §6).
@@ -4590,6 +4594,8 @@ class PhasePath:
             trigger: The activation's recorded trigger, whose parties are empty.
             context: The context its input brings, as place items.
             asked_from: Where its request was asked, as the engine read it (ADR-0382 §2:2).
+            owner_records: Whether a record placed for the owner alone may be shown,
+                made from the pass's posture (ADR-0383 §10:3): the approvals are private.
             labels: The labels the episode already records.
 
         Returns:
@@ -4602,7 +4608,7 @@ class PhasePath:
             ),
             conversation_id=None,
             trigger=trigger,
-            owner_records=True,
+            owner_records=owner_records,
             round_limit=self._round_limit,
             labels=labels,
         )
