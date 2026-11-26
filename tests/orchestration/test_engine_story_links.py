@@ -46,7 +46,7 @@ def test_the_two_story_pieces_are_wired_together_and_beside_understanding() -> N
             memory=memory,
             stories=stories,
             story_candidates=candidates,
-            story_links=StoryLinksStage(stories=stories),
+            story_links=StoryLinksStage(stories=stories, memory=memory),
         )
 
 

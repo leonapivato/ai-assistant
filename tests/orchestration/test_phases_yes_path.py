@@ -372,7 +372,9 @@ class _Hub:
             )
             if stories_shown
             else None,
-            story_links=StoryLinksStage(stories=self.stories) if stories_shown else None,
+            story_links=StoryLinksStage(stories=self.stories, memory=self.memory)
+            if stories_shown
+            else None,
             telegram=telegram,
             # ADR-0338 §7:1, §8:4: the person block's assembly over the hub's memory
             # store, where a case wires a person-model store.

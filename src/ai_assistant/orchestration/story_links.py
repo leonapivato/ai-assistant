@@ -33,10 +33,12 @@ is linked into every story a linked earlier episode belongs to by then; and the 
 episodes that belong to no story by then start one new story, holding them and the
 activation. One activation's links are recorded at a time, so two activations linking
 the same unstoried episode start one story, not two. It is failure-tolerant: a
-``StoryStoreError`` records the decision ``failed``. A link into a standing story of
-another home than the activation's, which its work gives, writes nothing and is recorded
-as an ``another_home`` refusal (ADR-0383 §4:7): the story names the episode in another
-store file, so the stage is the writer that refuses it. What it records is bookkeeping, as
+``StoryStoreError``, or a ``MemoryStoreError`` reading the earlier episodes' homes,
+records the decision ``failed``. A link into a standing story of another home than the
+activation's, which its work gives, and a start holding an earlier episode of another
+home, write nothing and are recorded as ``another_home`` refusals (ADR-0383 §4:7): a
+story names an episode in another store file, so the stage is the writer that refuses
+it. What it records is bookkeeping, as
 the hub records understanding's own record, and not an action planning chooses (§6:14).
 
 Neither is saved with the episode (§12:3): the candidates are the understanding phase's
@@ -54,7 +56,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ai_assistant.core.errors import StoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, StoryStoreError
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     EpisodicMemory,
@@ -67,7 +69,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import admits_owner_placed, admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
-from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.stories import episode_address, of_another_home
 from ai_assistant.orchestration.story_privacy import SummaryVisibility, activation_of
 
 if TYPE_CHECKING:
@@ -469,28 +471,39 @@ class StoryLinksDecision:
     links are kept in the understanding record and in the story store's change log.
 
     Attributes:
-        outcome: ``done``, or ``failed`` where the story store raised.
+        outcome: ``done``, or ``failed`` where the story store or the memory store
+            raised.
         linked: The stories the activation was linked into, in the order linked,
             each once, a story it already belonged to included.
         started: The story the rule start minted, where it started one.
         refused: The refusals the store answered, each an outcome rather than an
             error: what the store refused, it wrote nothing for.
-        error: The ``StoryStoreError`` a ``failed`` decision carries; never recorded.
+        error: The ``StoryStoreError`` or ``MemoryStoreError`` a ``failed`` decision
+            carries; never recorded.
     """
 
     outcome: StageOutcome
     linked: tuple[str, ...] = ()
     started: str | None = None
     refused: tuple[StoryRefusal, ...] = ()
-    error: StoryStoreError | None = None
+    error: StoryStoreError | MemoryStoreError | None = None
 
 
 class StoryLinksStage:
     """Record an understanding's story links in the story store (ADR-0300 §6:12).
 
-    It holds the story store and nothing else; what it writes, it writes with the
+    It holds the story store, and the memory store it reads the homes of the earlier
+    episodes a start would hold from (ADR-0383 §4:7); what it writes, it writes with the
     actor ``understanding`` and the activation as trigger (ADR-0289 §4:4 as ADR-0300
-    supersedes it).
+    supersedes it). A later lane replaces the stores a stage holds with a holder that
+    gives them for a sight (ADR-0383 §9:1); a memory store held beside the story store is
+    the same kind of thing the stage already does.
+
+    **A start holding an episode of another home starts nothing.** The earlier episodes a
+    start would hold are named by understanding's output, its ``story_links``, not picked
+    by the stage, so one of another home than the activation's is refused as such: the
+    start is recorded as an ``another_home`` refusal and nothing of it is written. An
+    episode the memory store no longer holds is not judged.
 
     **One activation's links are recorded at a time.** "The earlier episodes that
     belong to no story by then" (§6:12) is a read and then a create, two transactions;
@@ -501,13 +514,15 @@ class StoryLinksStage:
     whole of the serialization the rule needs.
     """
 
-    def __init__(self, *, stories: StoryStore) -> None:
-        """Wire the stage to the story store it writes.
+    def __init__(self, *, stories: StoryStore, memory: MemoryStore) -> None:
+        """Wire the stage to the story store it writes and the memory store it reads.
 
         Args:
             stories: The story store the engine surface writes too.
+            memory: The memory store the earlier episodes' homes are read from.
         """
         self._stories = stories
+        self._memory = memory
         self._serial = asyncio.Lock()
 
     async def record(
@@ -523,10 +538,10 @@ class StoryLinksStage:
 
         Returns:
             The decision: ``done`` with what was linked, started and refused, or
-            ``failed`` carrying the ``StoryStoreError`` the store raised. Writes made
-            before a failure stand, each its own transaction.
+            ``failed`` carrying the ``StoryStoreError`` or ``MemoryStoreError`` a store
+            raised. Writes made before a failure stand, each its own transaction.
         """
-        writes = _Writes(self._stories, activation_id, home)
+        writes = _Writes(self._stories, self._memory, activation_id, home)
         try:
             async with self._serial:
                 unstoried: list[StoryMember] = []
@@ -541,7 +556,7 @@ class StoryLinksStage:
                         await writes.link(header.story_id)
                 if unstoried:
                     await writes.start(unstoried)
-        except StoryStoreError as exc:
+        except (StoryStoreError, MemoryStoreError) as exc:
             _log.warning("story_links_failed", stage="story_links")
             return writes.decision(StageOutcome.FAILED, error=exc)
         _log.info(
@@ -558,8 +573,11 @@ class StoryLinksStage:
 class _Writes:
     """One stage run's writes, and what they did."""
 
-    def __init__(self, stories: StoryStore, activation_id: str, home: RecordHome) -> None:
+    def __init__(
+        self, stories: StoryStore, memory: MemoryStore, activation_id: str, home: RecordHome
+    ) -> None:
         self._stories = stories
+        self._memory = memory
         self._trigger = activation_id
         self._home = home
         self._activation = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
@@ -617,7 +635,14 @@ class _Writes:
         return header is not None and header.merged_into is None and header.home != self._home
 
     async def start(self, members: Sequence[StoryMember]) -> None:
-        """Start one story holding the earlier episodes in no story, and the activation."""
+        """Start one story holding the earlier episodes in no story, and the activation.
+
+        Refused, with nothing written, where an earlier episode held is of another home
+        than the activation's (ADR-0383 §4:7).
+        """
+        if await of_another_home(self._memory, members, self._home) is not None:
+            self.refused.append(StoryRefusal(reason=StoryRefusalReason.ANOTHER_HOME))
+            return
         outcome = await self._stories.create(
             [*members, self._activation],
             home=self._home,
@@ -630,7 +655,7 @@ class _Writes:
         self.started = outcome.story_id
 
     def decision(
-        self, outcome: StageOutcome, *, error: StoryStoreError | None = None
+        self, outcome: StageOutcome, *, error: StoryStoreError | MemoryStoreError | None = None
     ) -> StoryLinksDecision:
         """What the run did, as the stage's decision."""
         return StoryLinksDecision(

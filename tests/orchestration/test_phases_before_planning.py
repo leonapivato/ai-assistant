@@ -316,7 +316,7 @@ def _linked(
         )
         if wired
         else None,
-        story_links=StoryLinksStage(stories=stories) if wired else None,
+        story_links=StoryLinksStage(stories=stories, memory=memory) if wired else None,
     )
 
 
@@ -489,7 +489,7 @@ def _recalling(
         story_candidates=StoryCandidates(
             stories=stories, memory=memory, limit=5, lines=3, notes=2, episodes=2
         ),
-        story_links=StoryLinksStage(stories=stories),
+        story_links=StoryLinksStage(stories=stories, memory=memory),
     )
 
 
