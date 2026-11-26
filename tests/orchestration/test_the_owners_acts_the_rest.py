@@ -33,7 +33,16 @@ import pytest
 from approvals_panel_contract import APPROVALS_AT, hold_asking_episode, hold_request
 from sight_support import holder, sight_of
 from structlog.testing import capture_logs
-from task_support import LIMITS, OWNERS_SIGHT, activation, write_task
+from task_support import (
+    CHAT,
+    LIMITS,
+    LINE,
+    OWNERS_SIGHT,
+    activation,
+    message,
+    schedule_episode,
+    write_task,
+)
 from test_engine import (
     RETENTION,
     TRACE_RETENTION,
@@ -58,6 +67,7 @@ from ai_assistant.core.types import (
     RecordHome,
     SightMode,
     SuggestionKind,
+    ToolOutcome,
 )
 from ai_assistant.memory.notification_store import SqliteNotificationStore
 from ai_assistant.memory.person_model_store import SqlitePersonModelStore
@@ -67,7 +77,7 @@ from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.orchestration.task_manager import TaskManager
+from ai_assistant.orchestration.task_manager import TaskManager, TaskManagerLimits
 from ai_assistant.orchestration.task_rules import PersonZones
 from ai_assistant.planning.sqlite_store import SqlitePlanStore
 from ai_assistant.testing import (
@@ -572,10 +582,27 @@ class _Tasks:
     def rows(self) -> list[tuple[object, ...]]:
         return _dump(self.plans._conn, "scheduled_tasks")
 
+    def alter(self, store: str, table: str, ids: Sequence[str], home: Any) -> None:
+        """Set the home columns of ``ids``' rows, outside the store (ADR-0383 §5:3)."""
+        conn: sqlite3.Connection = getattr(self, store)._conn
+        kind, home_id = home
+        marks = ", ".join("?" for _ in ids)
+        conn.execute(
+            f"UPDATE {table} SET home_kind = ?, home_id = ? WHERE id IN ({marks})",  # noqa: S608 — the case's own names
+            (kind, home_id, *ids),
+        )
+        conn.commit()
 
-@pytest.fixture
-async def tasks_world(request: pytest.FixtureRequest) -> AsyncIterator[_Tasks]:
-    mode: SightMode = request.param
+    def close(self) -> None:
+        for store in (self.plans, self.memory, self.people):
+            store.close()
+
+
+#: A listing bound of two, so an unseen episode that took a slot would push one out.
+_TWO: Final = TaskManagerLimits(chain_limit=10, pending_limit=50, listing_bound=2)
+
+
+def _tasks(mode: SightMode, *, limits: TaskManagerLimits = LIMITS) -> _Tasks:
     plans = SqlitePlanStore(path=":memory:", now=lambda: NOW, sight_mode=mode)
     memory_store = SqliteMemoryStore(
         path=":memory:",
@@ -584,7 +611,9 @@ async def tasks_world(request: pytest.FixtureRequest) -> AsyncIterator[_Tasks]:
         now=lambda: NOW,
         sight_mode=mode,
     )
-    people = SqlitePersonModelStore(path=":memory:", field_chars=200, now=lambda: NOW)
+    people = SqlitePersonModelStore(
+        path=":memory:", field_chars=200, now=lambda: NOW, sight_mode=mode
+    )
     stores = holder(plans=plans, memory=memory_store, people=people)
     manager = TaskManager(
         stores=stores,
@@ -593,28 +622,31 @@ async def tasks_world(request: pytest.FixtureRequest) -> AsyncIterator[_Tasks]:
         is_running=lambda _one: False,
         starting=lambda _one: False,
         wake=lambda: None,
-        limits=LIMITS,
+        limits=limits,
         zones=PersonZones(default=ZoneInfo("UTC"), people=people, stores=stores),
         now=lambda: NOW,
     )
-    yield _Tasks(manager, plans, memory_store, people)
-    for store in (plans, memory_store, people):
-        store.close()
+    return _Tasks(manager, plans, memory_store, people)
 
 
-_TASK_MODES: Final = pytest.mark.parametrize(
-    "tasks_world", list(SightMode), ids=lambda one: one.value, indirect=True
-)
+@pytest.fixture
+async def task_worlds() -> AsyncIterator[list[_Tasks]]:
+    """Every Task Manager world a case opens, closed after it."""
+    opened: list[_Tasks] = []
+    yield opened
+    for one in opened:
+        one.close()
 
 
-@_TASK_MODES
+@_MODES
 async def test_the_operations_from_outside_read_and_write_by_the_sight_they_are_handed(
-    tasks_world: _Tasks,
+    mode: SightMode, task_worlds: list[_Tasks]
 ) -> None:
     """§3:1, §8:2: the owner's task is listed, replaced and cancelled; a task of another
     person's is listed nowhere, and replacing or cancelling it is answered as for one
     never written, with nothing changed; no count is written."""
-    world = tasks_world
+    world = _tasks(mode)
+    task_worlds.append(world)
     own = await write_task(world.plans, activation(), at=NOW)
     sams = await write_task(world.plans, activation(), at=NOW)
     world.plans._conn.execute("UPDATE scheduled_tasks SET person = ? WHERE id = ?", (_SAM, sams.id))
@@ -625,9 +657,6 @@ async def test_the_operations_from_outside_read_and_write_by_the_sight_they_are_
     with capture_logs() as logs:
         listed = await manager.scheduled_outside_a_work(OWNER_PERSON_ID, sight=OWNERS_SIGHT)
         sams_listed = await manager.scheduled_outside_a_work(_SAM, sight=OWNERS_SIGHT)
-        recent = await manager.recent_outside_a_work(
-            OWNER_PERSON_ID, sight=OWNERS_SIGHT, supply=None
-        )
         before = world.rows()
         unseen = await manager.cancel_outside_a_work(sams.id, sight=OWNERS_SIGHT)
         never = await manager.cancel_outside_a_work("task:never", sight=OWNERS_SIGHT)
@@ -643,11 +672,62 @@ async def test_the_operations_from_outside_read_and_write_by_the_sight_they_are_
 
     assert [one.task_id for one in listed] == [own.id]
     assert sams_listed == ()
-    assert recent == ()
     assert (unseen.task, unseen.reason) == (never.task, never.reason)
     assert unchanged == before
-    assert replaced.task is not None
     assert cancelled.task is not None
+    assert _counted(logs) == []
+
+
+async def _ran_lately(world: _Tasks, *, others: bool) -> None:
+    """Two of the owner's finished schedule episodes, the first with a message done into
+    the chat; where ``others``, newer episodes of Sam's and of no home, each with a message
+    done, and messages of Sam's and of no home beside the owner's first episode."""
+    for one in ("a-ran-1", "a-ran-2"):
+        await world.memory.add(schedule_episode(one))
+    await message(world.plans, "a-ran-1", CHAT, outcome=ToolOutcome.SUCCEEDED)
+    if not others:
+        return
+    # Each altered once every row is written: the helper reads its activation's effects
+    # back unbound, which an altered row beside them would fail as corrupt.
+    altered: list[tuple[str, str, str, Any]] = []
+    for home in (_SAMS, _NOBODYS):
+        beside = await message(world.plans, "a-ran-1", LINE, outcome=ToolOutcome.SUCCEEDED)
+        altered.append(("plans", "activation_effects", beside.id, home))
+    for one, home in (("a-ran-sam", _SAMS), ("a-ran-nobody", _NOBODYS)):
+        await world.memory.add(schedule_episode(one))
+        done = await message(world.plans, one, LINE, outcome=ToolOutcome.SUCCEEDED)
+        altered.append(("memory", "records", f"activation:{one}", home))
+        altered.append(("plans", "activation_effects", done.id, home))
+    for store, table, record_id, home in altered:
+        world.alter(store, table, [record_id], home)
+
+
+@_MODES
+async def test_what_ran_lately_shows_no_episode_or_message_the_sight_does_not_see(
+    mode: SightMode, task_worlds: list[_Tasks]
+) -> None:
+    """§3:1, §4:2, ADR-0383 §8:1: the owner's finished schedule episodes are listed, each
+    with where its messages went; a newer episode of another home takes no slot under the
+    listing bound, and a message of another home beside the owner's episode is not said to
+    have gone anywhere."""
+    clean = _tasks(mode, limits=_TWO)
+    crowded = _tasks(mode, limits=_TWO)
+    task_worlds.extend((clean, crowded))
+    await _ran_lately(clean, others=False)
+    await _ran_lately(crowded, others=True)
+
+    with capture_logs() as logs:
+        shown = await crowded.manager.recent_outside_a_work(
+            OWNER_PERSON_ID, sight=OWNERS_SIGHT, supply=None
+        )
+
+    assert shown == await clean.manager.recent_outside_a_work(
+        OWNER_PERSON_ID, sight=OWNERS_SIGHT, supply=None
+    )
+    assert {one.activation_id: one.wrote_into for one in shown} == {
+        "a-ran-1": (f"{CHAT.channel_type}:{CHAT.instance_id}",),
+        "a-ran-2": (),
+    }
     assert _counted(logs) == []
 
 
