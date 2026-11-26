@@ -17,6 +17,23 @@ written through ``answers`` or ``leave_flag``, so it and the change it records s
 or fall together, and the store refuses a second answer to one flag whatever the
 timing.
 
+**A run for each domain** (ADR-0384 §4, §5). One run of the pass tends one domain, and
+one firing of its row runs it once for each domain
+:data:`~ai_assistant.orchestration.upkeep.UPKEEP_DOMAINS` names, the owner's first, the
+runs sharing one budget, each with its own bound on completions. A run decides only the
+flags every story of which, followed through merges, is of its domain: a flag one of
+whose stories is of another domain is decided by no run, with no completion and nothing
+written for it, no ``decided`` or ``not_applied`` line and no flag left (§5:3). It
+changes only stories of its domain, since it names only the stories the flag concerns,
+and a story its grouping mints takes its domain (§4:1, ADR-0383 §4:5). A split or a
+move naming a member episode of another home is a change naming a record of another
+domain, refused before the write as a check refuses a reply, with nothing written
+(§4:2): ADR-0303 §8's ``not_applied`` records a change *the store* refused, and no clause
+lets the pass's own refusal be recorded as one. What a run reads is unchanged until
+ADR-0369 §10's filter decides reads (§1:2): the episodes it shows and the decisions it
+is shown are read as before. A story store's refusal of the change, ``another_home``
+included, is recorded ``not_applied`` as every refusal other than the two below is.
+
 **Its stories as they now stand.** Each flag's stories, and the stories of the
 decisions it is shown, are followed through merges by every story's header read when
 the flag is decided, not by the run's first read, so a merge landing meanwhile neither
@@ -96,7 +113,6 @@ a note, an episode's content or the reply's own text (ADR-0275 §8).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -140,6 +156,7 @@ from ai_assistant.orchestration.story_flags import (
     reread,
 )
 from ai_assistant.orchestration.story_privacy import activation_of
+from ai_assistant.orchestration.upkeep import UPKEEP_DOMAINS, FiringBudget
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -164,12 +181,6 @@ __all__ = ["MATTERS_PASS_PROMPT", "MattersPass", "MattersPassReply", "MattersPas
 _log = structlog.get_logger(__name__)
 
 _ACTOR: Final = StoryActor.MATTERS_PASS
-
-#: The domain the pass tends, whose home a story its group mints takes (ADR-0383 §4:5,
-#: ADR-0384 §4:1): today the owner's, the one domain whose records it reads. A story its
-#: split mints takes the home of the story it was split from, in the store (ADR-0386
-#: §2:3). Running once per domain is a later lane's.
-_TENDS: Final = RecordHome.owners()
 
 #: The two refusals on which the pass writes nothing more for a flag (§5:6): the store
 #: holds no such flag, or a decision already answers it.
@@ -264,8 +275,9 @@ class _Result(StrEnum):
 
 @dataclass(slots=True)
 class _Run:
-    """One run's state: the records as last read, its counts and its completions."""
+    """One run's state: the domain it tends, the records as last read, counts and calls."""
 
+    tends: RecordHome
     records: StoryRecords
     tally: _Tally = field(default_factory=_Tally)
     calls: int = 0
@@ -457,6 +469,7 @@ class _Episode:
     """
 
     activation_id: str
+    home: RecordHome
     linked: tuple[tuple[str, str], ...]
     projection: EpisodeProjection
 
@@ -527,6 +540,7 @@ class _Reading:
     """
 
     flag: RaisedFlag
+    tends: RecordHome
     stories: dict[str, _Story]
     episodes: dict[str, _Episode]
     decisions: tuple[RecordedDecision, ...]
@@ -721,6 +735,11 @@ def _episodes_of(reading: _Reading, story_id: str, labels: Sequence[str]) -> tup
         if episode is None or not episode.held_by(story_id):
             msg = "the reply names an episode this run did not show held by that story"
             raise _Refused(msg)
+        if episode.home != reading.tends:
+            # ADR-0384 §4:2: a change naming a record of another domain is refused, and
+            # nothing of it is written.
+            msg = "the reply names an episode of another domain than the run tends"
+            raise _Refused(msg)
         chosen.setdefault(episode.activation_id)
     return tuple(chosen)
 
@@ -805,13 +824,14 @@ class MattersPass:
             stories: The story store it reads and writes.
             memory: The store the episodes it shows are read from.
             excerpt_chars: The bound, in characters, on each episode's input and reply.
-            flags_per_run: The most completions one run makes.
+            flags_per_run: The most completions one run makes, each domain's run its own.
             decisions: The most recorded decisions one flag's completion is shown
                 (ADR-0302 §5:4).
             episodes: The most member episodes shown of each story, its latest links.
             notes: The most notes shown of each story, its newest, each under a label
                 a split or a move may name (ADR-0303 §8:7).
-            budget: How long one run may spend before it starts no new flag.
+            budget: How long one firing's runs, one for each domain, may spend together
+                before they start no new flag but each run's first.
             prompt: The template of :data:`MATTERS_PASS_PROMPT`, default or override, as
                 the composition root read it at start (ADR-0334 §3:5).
 
@@ -842,41 +862,40 @@ class MattersPass:
         self._episodes = episodes
         self._notes = notes
         self._budget = budget
-        self._failures: dict[StoryFlagName, int] = {}
+        # Each domain's run's own failures: one run never forgets another's.
+        self._failures: dict[RecordHome, dict[StoryFlagName, int]] = {}
 
     async def run(self) -> MattersPassReport:
-        """Decide the flags no decision answers, one bounded run.
+        """Decide the flags no decision answers, a bounded run for each domain.
 
-        **Discovery, then deciding.** The store's records are read, version logs
-        included, where a tidy-up's flags are recorded. Only then does the budget
-        start, so a store whose reading outlasts the budget still decides a flag on
-        every run, and the first flag is always started.
+        One run for each of :data:`~ai_assistant.orchestration.upkeep.UPKEEP_DOMAINS`,
+        in that order, each deciding only the flags of its domain (ADR-0384 §5).
+        **Discovery, then deciding.** A run reads the store's records, version logs
+        included, where a tidy-up's flags are recorded. Only then does the firing's
+        budget start, so a store whose reading outlasts the budget still decides a flag
+        on every run, each run's first flag is always started, and a run that finds no
+        flag of its domain spends none of it and makes no completion.
 
         Returns:
-            What the run did.
+            What the runs did, their counts added together.
 
         Raises:
             StoryStoreError: If the story store cannot be read or written.
             MemoryStoreError: If the memory store cannot be read.
             ModelError: Propagated unwrapped from the provider.
         """
-        run = _Run(records=await read_records(self._stories, versions=True))
-        answered = run.records.decided()
-        undecided = [flag for flag in run.records.flags() if flag.name not in answered]
-        # A flag decided elsewhere, or by an earlier run, is forgotten here too.
-        names = {flag.name for flag in undecided}
-        self._failures = {name: n for name, n in self._failures.items() if name in names}
-        # Stable: the raised order holds among flags that have failed equally often.
-        undecided.sort(key=lambda flag: self._failures.get(flag.name, 0))
-        run.tally.flags = len(undecided)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._budget.total_seconds()
-        for index, flag in enumerate(undecided):
-            if index and loop.time() >= deadline:
-                run.tally.exhausted = False
-                break
-            await self._one(run, flag)
-        report = run.tally.report()
+        budget = FiringBudget(self._budget)
+        runs = [await self._tend(domain, budget) for domain in UPKEEP_DOMAINS]
+        report = MattersPassReport(
+            flags=sum(run.flags for run in runs),
+            left_by_rule=sum(run.left_by_rule for run in runs),
+            decided=sum(run.decided for run in runs),
+            left_after_refusal=sum(run.left_after_refusal for run in runs),
+            refused=sum(run.refused for run in runs),
+            raced=sum(run.raced for run in runs),
+            notes_dropped=sum(run.notes_dropped for run in runs),
+            exhausted=all(run.exhausted for run in runs),
+        )
         _log.info(
             "matters_pass",
             stage="matters_pass",
@@ -891,6 +910,32 @@ class MattersPass:
         )
         return report
 
+    async def _tend(self, tends: RecordHome, budget: FiringBudget) -> MattersPassReport:
+        """One run, tending ``tends``: the flags of its domain, under the firing's budget."""
+        run = _Run(tends=tends, records=await read_records(self._stories, versions=True))
+        answered = run.records.decided()
+        undecided = [
+            flag
+            for flag in run.records.flags()
+            if flag.name not in answered
+            and _within(run.records, run.records.concerned(flag.name), tends)
+        ]
+        # A flag decided elsewhere, or by an earlier run, is forgotten here too.
+        names = {flag.name for flag in undecided}
+        failures = {name: n for name, n in self._failures.get(tends, {}).items() if name in names}
+        self._failures[tends] = failures
+        # Stable: the raised order holds among flags that have failed equally often.
+        undecided.sort(key=lambda flag: failures.get(flag.name, 0))
+        run.tally.flags = len(undecided)
+        if undecided:
+            budget.start()
+        for index, flag in enumerate(undecided):
+            if index and budget.spent():
+                run.tally.exhausted = False
+                break
+            await self._one(run, flag)
+        return run.tally.report()
+
     async def _one(self, run: _Run, flag: RaisedFlag) -> None:
         """Decide one flag, by rule or by a completion.
 
@@ -901,6 +946,12 @@ class MattersPass:
         """
         tally = run.tally
         concerned = await self._concerned(run, flag)
+        if not _within(run.records, concerned, run.tends):
+            # ADR-0384 §5:3: one of its stories is now of another domain, so this run
+            # decides nothing of it and writes nothing for it. The store refuses a merge
+            # across homes, so only a record already in error reaches here.
+            tally.count(_Result.RACED)
+            return
         if _together(flag.name, concerned):
             left = await self._stories.leave_flag(flag.name, actor=_ACTOR)
             tally.count(_Result.LEFT_BY_RULE if left.refusal is None else _Result.RACED)
@@ -915,10 +966,11 @@ class MattersPass:
         run.records = await reread(run.records, self._stories, concerned)
         result, touched = await self._decide(run, flag, concerned)
         tally.count(result)
+        failures = self._failures.setdefault(run.tends, {})
         if result is _Result.REFUSED:
-            self._failures[flag.name] = self._failures.get(flag.name, 0) + 1
+            failures[flag.name] = failures.get(flag.name, 0) + 1
         else:
-            self._failures.pop(flag.name, None)
+            failures.pop(flag.name, None)
         if touched:
             run.records = await reread(run.records, self._stories, touched)
 
@@ -939,7 +991,7 @@ class MattersPass:
         Returns:
             What it came to, and the stories whose records it changed, to read again.
         """
-        reading = await self._reading(run.records, flag, concerned)
+        reading = await self._reading(run.records, flag, concerned, run.tends)
         if reading is None:
             return _Result.RACED, ()
         reply = await self._model.complete_structured(
@@ -970,7 +1022,9 @@ class MattersPass:
             )
             return _Result.REFUSED, ()
         run.tally.notes_dropped += choice.notes_dropped
-        return await self._settled(flag.name, concerned, await self._apply(flag.name, choice))
+        return await self._settled(
+            flag.name, concerned, await self._apply(flag.name, choice, run.tends)
+        )
 
     async def _settled(
         self, flag: StoryFlagName, concerned: Sequence[str], outcome: StoryOutcome
@@ -990,11 +1044,14 @@ class MattersPass:
             return _Result.RACED, ()
         return _Result.NOT_APPLIED, tuple(concerned)
 
-    async def _apply(self, flag: StoryFlagName, choice: _Choice) -> StoryOutcome:
+    async def _apply(self, flag: StoryFlagName, choice: _Choice, tends: RecordHome) -> StoryOutcome:
         """Write the checked decision through the store, answering the flag.
 
         A split or a move carries exactly the notes the reply named and the hub kept
-        (ADR-0303 §6:2, §8:8); a merge names none and carries every note (§6:3).
+        (ADR-0303 §6:2, §8:8); a merge names none and carries every note (§6:3). A story
+        a grouping mints takes the domain the run tends (ADR-0384 §4:1, ADR-0383 §4:5);
+        one a split mints takes the home of the story it was split from, in the store
+        (ADR-0386 §2:3).
         """
         stories = self._stories
         match choice.decision:
@@ -1028,12 +1085,16 @@ class MattersPass:
                     for story_id in choice.stories
                 ]
                 if choice.to is None:
-                    return await stories.create(members, home=_TENDS, actor=_ACTOR, answers=flag)
+                    return await stories.create(members, home=tends, actor=_ACTOR, answers=flag)
                 return await stories.link(choice.to, members, actor=_ACTOR, answers=flag)
         return await stories.leave_flag(flag, actor=_ACTOR)
 
     async def _reading(
-        self, records: StoryRecords, flag: RaisedFlag, concerned: Sequence[str]
+        self,
+        records: StoryRecords,
+        flag: RaisedFlag,
+        concerned: Sequence[str],
+        tends: RecordHome,
     ) -> _Reading | None:
         """What one flag's completion is shown, or ``None`` where a story moved on.
 
@@ -1070,6 +1131,7 @@ class MattersPass:
         decisions = _decisions_shown(records, flag.name, concerned, self._decisions)
         return _Reading(
             flag=flag,
+            tends=tends,
             stories={f"S{index}": story for index, story in enumerate(read, start=1)},
             episodes=await self._shown_episodes(read),
             decisions=decisions,
@@ -1112,7 +1174,9 @@ class MattersPass:
         with every story read that holds it, so one input in two stories is visibly
         one input (#2775). An open episode is never shown (ADR-0286 §6:4), nor one the
         memory store no longer holds, and an outside episode's raw input is never
-        rendered (§4).
+        rendered (§4). An episode of another home than the run's domain is still shown,
+        since what a run reads is unchanged until the filter decides reads (ADR-0384
+        §1:2); a change naming it is refused (:func:`_episodes_of`).
         """
         chosen: dict[str, None] = {}
         for story in stories:
@@ -1132,6 +1196,7 @@ class MattersPass:
                 continue
             shown[f"E{len(shown) + 1}"] = _Episode(
                 activation_id=activation_id,
+                home=record.home,
                 linked=tuple(
                     (story.story_id, entry.linked_at.isoformat())
                     for story in stories
@@ -1141,6 +1206,21 @@ class MattersPass:
                 projection=project_episode(record, excerpt_chars=self._excerpt_chars),
             )
         return shown
+
+
+def _within(records: StoryRecords, concerned: Sequence[str], tends: RecordHome) -> bool:
+    """ADR-0384 §5:3: whether every story ``concerned`` names is of the domain ``tends``.
+
+    Read by each story's header as ``records`` hold it. A story they hold no header of
+    is left to the reading, which finds it gone; at least one must be held, so a flag
+    of no story read is of no run.
+    """
+    homes = [
+        header.home
+        for story_id in concerned
+        if (header := records.headers.get(story_id)) is not None
+    ]
+    return bool(homes) and all(home == tends for home in homes)
 
 
 def _together(flag: StoryFlagName, concerned: Sequence[str]) -> bool:

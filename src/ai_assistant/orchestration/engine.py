@@ -347,6 +347,7 @@ from ai_assistant.orchestration.understanding import (
     fetch_held,
     place_window_links,
 )
+from ai_assistant.orchestration.upkeep import RECONSIDERED
 from ai_assistant.orchestration.work_facts import (
     chat_sender_of,
     chat_senders_of,
@@ -2892,11 +2893,13 @@ class Engine:
 
         **The engine tidies nothing itself.** It delegates to
         :class:`~ai_assistant.orchestration.story_tidy_up.ScheduledTidyUp`, which runs
-        the one tidy-up planning's call runs (§4:5). A scheduled tidy-up is background
-        maintenance of the assistant's own records, not an action under ADR-0292
-        §12:1-§12:2 (§4:7): planning does not choose it, authorizing does not check it,
-        and it runs directly on no channel, starting no activation, recording no
-        episode and telling nobody.
+        the one tidy-up planning's call runs (§4:5), once for each domain, each run
+        handed the domain it tends and writing only there (ADR-0384 §4, §5:1). A
+        scheduled tidy-up is background maintenance of the assistant's own records, not
+        an action under ADR-0292 §12:1-§12:2 (§4:7): planning does not choose it,
+        authorizing does not check it, and it runs directly on no channel, starting no
+        activation, recording no episode and telling nobody. Tending a domain changes
+        none of that (ADR-0384 §3:3).
 
         Tracked like every other public method, so shutdown drains the write it is in
         the middle of before closing the stores it writes through (ADR-0042 §2).
@@ -2936,7 +2939,8 @@ class Engine:
 
         **The engine decides nothing itself.** It delegates to
         :class:`~ai_assistant.orchestration.matters_pass.MattersPass`, which writes
-        each decision through the story store with the actor ``matters_pass``. Its
+        each decision through the story store with the actor ``matters_pass``, in a run
+        for each domain that decides only that domain's flags (ADR-0384 §5). Its
         changes are background maintenance, not actions under ADR-0292 §12:1-§12:2,
         in the scope ADR-0300's header gives.
 
@@ -4668,6 +4672,17 @@ class Engine:
         (ADR-0338 §3:6, :class:`~ai_assistant.orchestration.notifications.RulingPolicy`),
         so a zone changed mid-drain governs the records ruled after it.
 
+        **The run tends the owner's domain alone** (ADR-0384 §3:4,
+        :data:`~ai_assistant.orchestration.upkeep.RECONSIDERED`). A held notification
+        of another domain is left as it is: not re-ruled, not dropped, and not handed
+        off, for the decision that rules whom it goes to. It stays due, so the drain
+        reads past it: each page starts after the records of another domain this run
+        has passed, which stay at the front of the due order, and a page counts as
+        progress where it passed a record of another domain not passed before, so a
+        page of them alone does not end the drain before the owner's records behind
+        them. Tending the domain makes the run no work (§3:3): it records no fact,
+        starts no activation and makes no call the check runs.
+
         Args:
             page: How many due records one store read takes.
 
@@ -4678,19 +4693,23 @@ class Engine:
         assert self._notification_policies is not None  # noqa: S101 — wired together (see __init__)
         policies = self._notification_policies
         seen: set[str] = set()
+        passed = 0
         ruled = 0
-        while due := await store.due(limit=page):
+        while due := await store.due(limit=page, offset=passed):
             fresh = [record for record in due if record.id not in seen]
             if not fresh:
                 break
-            before = ruled
+            before = (ruled, passed)
             for record in fresh:
                 seen.add(record.id)
+                if record.home != RECONSIDERED:
+                    passed += 1
+                    continue
                 ruling = await store.reconsider(record.id, policy=await policies.pick())
                 if ruling is not None:
                     ruled += 1
                     await self._hand_off(ruling, record.candidate)
-            if ruled == before:
+            if (ruled, passed) == before:
                 break
         return ruled
 

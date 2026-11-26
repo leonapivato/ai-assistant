@@ -98,6 +98,52 @@ async def test_it_runs_the_pass_and_answers_its_report() -> None:
     assert (decided.outcome, decided.actor) == (StoryDecision.LEFT, StoryActor.MATTERS_PASS)
 
 
+async def _flagged(stories: FakeStoryStore, home: RecordHome, activation_id: str) -> str:
+    """A story of ``home`` holding ``activation_id``, whose tidy-up raised two matters."""
+    created = await stories.create([activation(activation_id)], home=home, actor=StoryActor.OWNER)
+    story_id = created.story_id
+    assert story_id is not None
+    note = await stories.append_note(story_id, "Riverside.", author=StoryNoteAuthor.OWNER)
+    assert note.note is not None
+    state = await stories.current_summary(story_id)
+    assert state is not None
+    written = await stories.write_summary(
+        story_id,
+        StorySummaryDraft(
+            lines=(StorySummaryLine(text="Riverside."),),
+            took_in_notes=(note.note.note_id,),
+            flags=(StoryFlag(kind=StoryFlagKind.TWO_MATTERS),),
+            outside=False,
+        ),
+        as_of=state.as_of,
+    )
+    assert written.version is not None
+    return story_id
+
+
+async def test_a_run_for_each_domain_is_still_no_work() -> None:
+    """ADR-0384 §3:3: tending a domain records no fact, starts no activation, records no
+    episode and makes no call the check runs; the firing's one trace is the operation's.
+    """
+    stories = _stories()
+    memory = await memory_of(
+        episode("a-1"), episode("s-1").model_copy(update={"home": RecordHome.shared()})
+    )
+    await _flagged(stories, RecordHome.owners(), "a-1")
+    await _flagged(stories, RecordHome.shared(), "s-1")
+    model = FakeModelProvider(json.dumps({"decision": "leave"}))
+    harness = Harness(memory=memory, stories=stories, matters_pass=_pass(model, stories, memory))
+    held = await memory.export()
+
+    report = await harness.engine.decide_story_flags()
+
+    assert (report.flags, report.decided) == (2, 2)
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "decide_story_flags"
+    assert await memory.export() == held
+    assert await harness.trail.recent() == []
+
+
 async def test_it_refuses_where_no_pass_is_wired() -> None:
     harness = Harness(memory=await memory_of(), stories=_stories())
 

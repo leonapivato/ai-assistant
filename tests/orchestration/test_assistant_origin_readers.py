@@ -140,7 +140,7 @@ def test_the_matters_pass_and_the_tidy_up_attribute_it_and_never_show_it_as_the_
     projection = _projection()
 
     passed = matters_pass._Episode(
-        activation_id="step", linked=(), projection=projection
+        activation_id="step", home=RecordHome.owners(), linked=(), projection=projection
     ).rendering("E1", {})
     tidied = story_tidy_up._Episode(activation_id="step", projection=projection).rendering("E1")
 

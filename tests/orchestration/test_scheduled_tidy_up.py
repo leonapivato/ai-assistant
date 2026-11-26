@@ -9,10 +9,11 @@ and in what order. What a tidy-up reads, renders, checks and writes is
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from story_support import AT, EVENTS, activation, episode, failing, memory_of
@@ -339,6 +340,120 @@ async def test_a_failure_is_held_until_a_run_on_the_story_writes() -> None:
     assert (await tidy_up.run(trip)).result is TidyUpResult.NOTHING_TO_READ
     assert tidy_up.last_failure(trip) is None
     assert tidy_up.last_failure(other) == second
+
+
+# --- a run for each domain (ADR-0384 §4, §5:1, §10) -----------------------------------
+
+_SHARED: Final = RecordHome.shared()
+
+
+async def _shared(stories: FakeStoryStore, note: str, member: str) -> str:
+    """A story of the hub's shared things, of ``member``, with ``note`` pending on it."""
+    created = await stories.create(
+        [activation(member)], home=_SHARED, actor=StoryActor.UNDERSTANDING
+    )
+    assert created.story_id is not None
+    await stories.append_note(
+        created.story_id, note, author=StoryNoteAuthor.PLANNING, written_during="s-0"
+    )
+    return created.story_id
+
+
+async def test_one_firing_tidies_each_domain_in_its_own_run_the_owners_first() -> None:
+    """§5:1: a run for each domain; each finds due only its own domain's stories."""
+    clock = _Clock()
+    stories = _stories(clock)
+    memory = await _memory(episode("s-1").model_copy(update={"home": _SHARED}))
+    model = _Model()
+    ours = await _shared(stories, "ours", "s-1")
+    clock.at = AT + timedelta(minutes=1)
+    mine = await _story(stories, "mine")
+    tidy_up = _tidy_up(model, stories, memory)
+
+    report = await _scheduled(tidy_up, stories, clock, threshold=1).run()
+
+    # The shared story's pending is older, and still the owner's run goes first.
+    assert model.seen == ["mine", "ours"]
+    assert report == ScheduledTidyUpReport(due=2, tidied=2, written=2)
+    assert [await _pending(stories, one) for one in (mine, ours)] == [0, 0]
+
+
+async def test_a_run_takes_in_no_member_episode_of_another_home() -> None:
+    """The paragraph under §5:3: the shared story's owner-home member stays pending."""
+    clock = _Clock()
+    stories = _stories(clock)
+    model = _Model()
+    ours = await _shared(stories, "ours", _HELD[0])
+    tidy_up = _tidy_up(model, stories, await _memory())
+
+    report = await _scheduled(tidy_up, stories, clock, threshold=1).run()
+
+    assert report == ScheduledTidyUpReport(due=1, tidied=1, written=1)
+    state = await stories.current_summary(ours)
+    assert state is not None
+    assert (state.pending_notes, state.pending_episodes) == ((), (_HELD[0],))
+
+
+async def test_each_run_keeps_its_own_bound_and_starts_its_first_whatever_the_budget() -> None:
+    """§10: the runs share one budget, each its own bound, and neither starves the other."""
+    clock = _Clock()
+    stories = _stories(clock)
+    memory = await _memory(
+        *(episode(f"s-{n}").model_copy(update={"home": _SHARED}) for n in (1, 2))
+    )
+    model = _Model()
+    for minute, name in enumerate(("first", "second")):
+        clock.at = AT + timedelta(minutes=minute)
+        await _story(stories, name)
+    for n in (1, 2):
+        clock.at = AT + timedelta(minutes=n)
+        await _shared(stories, f"ours-{n}", f"s-{n}")
+    clock.at = AT + timedelta(minutes=3)
+    tidy_up = _tidy_up(model, stories, memory)
+
+    bounded = await _scheduled(tidy_up, stories, clock, threshold=1, per_run=1).run()
+
+    assert model.seen == ["first", "ours-1"]
+    assert bounded == ScheduledTidyUpReport(due=4, tidied=2, written=2, exhausted=False)
+
+    spent = await _scheduled(
+        tidy_up, stories, clock, threshold=1, budget=timedelta(microseconds=1)
+    ).run()
+
+    assert model.seen[2:] == ["second", "ours-2"]
+    assert spent == ScheduledTidyUpReport(due=2, tidied=2, written=2)
+
+
+async def test_a_domain_with_nothing_due_makes_no_completion_and_spends_no_budget() -> None:
+    """An empty run of the owner's domain leaves the whole budget to the shared things'.
+
+    Each run's finding of what is due outlasts the budget. Had the owner's empty run
+    started it, the shared things' run would find it spent and start only its first.
+    """
+    clock = _Clock()
+    stories = _stories(clock)
+    memory = await _memory(
+        *(episode(f"s-{n}").model_copy(update={"home": _SHARED}) for n in (1, 2))
+    )
+    model = _Model()
+    for n in (1, 2):
+        clock.at = AT + timedelta(minutes=n)
+        await _shared(stories, f"ours-{n}", f"s-{n}")
+    tidy_up = _tidy_up(model, stories, memory)
+    read = stories.stories
+
+    async def slow(**kwargs: Any) -> Any:
+        await asyncio.sleep(0.2)
+        return await read(**kwargs)
+
+    stories.stories = slow  # type: ignore[method-assign]  # the store's reading, slowed
+
+    report = await _scheduled(
+        tidy_up, stories, clock, threshold=1, budget=timedelta(milliseconds=150)
+    ).run()
+
+    assert model.seen == ["ours-1", "ours-2"]
+    assert report == ScheduledTidyUpReport(due=2, tidied=2, written=2)
 
 
 # --- what it raises and logs ---------------------------------------------------------

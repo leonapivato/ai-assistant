@@ -87,6 +87,33 @@ async def test_it_runs_the_scheduled_tidy_up_and_answers_its_report() -> None:
     assert trace.seam == "tidy_stories"
 
 
+async def test_a_run_for_each_domain_is_still_no_work() -> None:
+    """ADR-0384 §3:3: tending a domain records no fact, starts no activation, records no
+    episode and makes no call the check runs; the firing's one trace is the operation's.
+    """
+    stories = _stories()
+    shared = RecordHome.shared()
+    memory = await memory_of(episode("a-1"), episode("s-1").model_copy(update={"home": shared}))
+    for home, member in ((RecordHome.owners(), "a-1"), (shared, "s-1")):
+        created = await stories.create(
+            [activation(member)], home=home, actor=StoryActor.UNDERSTANDING
+        )
+        assert created.story_id is not None
+    model = FakeModelProvider(json.dumps({"lines": ["A matter."], "flags": []}))
+    harness = Harness(
+        memory=memory, stories=stories, scheduled_tidy_up=_scheduled(model, stories, memory)
+    )
+    held = await memory.export()
+
+    report = await harness.engine.tidy_stories()
+
+    assert report == ScheduledTidyUpReport(due=2, tidied=2, written=2)
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "tidy_stories"
+    assert await memory.export() == held
+    assert await harness.trail.recent() == []
+
+
 async def test_it_refuses_where_no_scheduled_tidy_up_is_wired() -> None:
     harness = Harness(memory=await memory_of(), stories=_stories())
 
