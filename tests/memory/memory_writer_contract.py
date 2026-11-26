@@ -4752,10 +4752,11 @@ class MemoryWriterContract:
     # A bound writer makes every read it makes for a write through its store bound to the
     # same sight, and every write through it. ``MemoryWriter`` has no read member, so
     # §9:3's obligation is stated on what its members do: bound, each gives the same
-    # result or raises the same error class, asks the policy the same rulings on the same
-    # conflicts, and leaves the same records, as the same writer over the same store
-    # holding only the records the sight sees. A record the sight does not see is one
-    # never written (§4:8, §7:5, §8:2), save a write's own checks (§7:11).
+    # result or raises the same error with the same message, asks the policy the same
+    # rulings on the same conflicts, and leaves the same records, as the same writer
+    # over the same store holding only the records the sight sees. A record the sight
+    # does not see is one never written (§4:8, §7:5, §8:2), save a write's own checks
+    # (§7:11).
 
     @pytest.mark.parametrize("call_name", _BOUND_CALL_NAMES)
     @pytest.mark.parametrize("sight_name", list(SIGHTS))
@@ -5885,7 +5886,7 @@ async def _written_through(
 ) -> _Written:
     """What ``call`` gives and leaves, through a writer over ``store``, bound where given.
 
-    The outcome, a raised error by its class (ADR-0383 §8:2's "same outcome"); each
+    The outcome, a raised error by its class and message (ADR-0383 §4:8, §8:2); each
     ruling the policy was asked, with the conflicts and relations it was handed; and the
     records the call wrote or removed, read from the store unbound, so a change to a
     record the sight does not see is seen too.
@@ -5899,7 +5900,7 @@ async def _written_through(
     try:
         outcome = ("returned", await call.run(writer))
     except (AssistantError, ValueError) as exc:
-        outcome = ("raised", type(exc))
+        outcome = ("raised", (type(exc), str(exc)))
     after = {one.id: one for one in await store.export()}
     changed = {key: one for key, one in after.items() if before.get(key) != one}
     asked: list[object] = [(one.proposal, one.conflicts, one.relations) for one in policy.calls]

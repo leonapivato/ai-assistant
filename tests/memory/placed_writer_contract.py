@@ -1734,8 +1734,9 @@ class PlacedWriterContract:
         The fetch of a placed proposal's memories and of the numbers of the episodes it
         orders are reads through the bound store, and its write and a label write go
         through it. So the writer bound to a sight gives the same result or the same
-        error class, asks the policy the same, and leaves the same records as the same
-        writer over the same history less every record the sight does not see: a
+        error with the same message, asks the policy the same, and leaves the same
+        records as the same writer over the same history less every record the sight
+        does not see: a
         placement naming a memory the sight does not see is stale, as one naming a memory
         never written is (§4:8), and never refused across homes.
         """
@@ -2852,9 +2853,10 @@ async def _written_through(
 ) -> _Written:
     """What ``call`` gives and leaves, through a writer over ``store``, bound where given.
 
-    The outcome, a raised error by its class; each ruling the policy was asked, with the
-    conflicts it was handed; and the records the call wrote or removed, read from the
-    store unbound, so a change to a record the sight does not see is seen too.
+    The outcome, a raised error by its class and message (ADR-0383 §4:8); each ruling
+    the policy was asked, with the conflicts it was handed; and the records the call
+    wrote or removed, read from the store unbound, so a change to a record the sight
+    does not see is seen too.
     """
     policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
     writer = make(store, policy, labels=(_BOUNDS, FakeEmbedder(dimensions=256)))
@@ -2865,7 +2867,7 @@ async def _written_through(
     try:
         outcome = ("returned", await call.run(writer))
     except (AssistantError, ValueError) as exc:
-        outcome = ("raised", type(exc))
+        outcome = ("raised", (type(exc), str(exc)))
     after = {one.id: one for one in await store.export()}
     changed = {key: one for key, one in after.items() if before.get(key) != one}
     asked: list[object] = [(one.proposal, one.conflicts, one.relations) for one in policy.calls]
