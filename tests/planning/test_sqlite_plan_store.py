@@ -2486,3 +2486,91 @@ async def test_a_home_held_as_text_that_is_not_utf8_is_no_home_to_its_own_activa
             assert conn.execute("SELECT id FROM approval_requests").fetchall() == [("q-own",)]
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "held"),
+    [(OWN_ACTIVATION, "other", False), ("other", OWN_ACTIVATION, True)],
+)
+async def test_a_request_naming_its_asker_twice_is_held_as_its_decoder_reads_it(
+    tmp_path: Path, first: str, last: str, held: bool
+) -> None:
+    """§7:3, §7:4, §7:5: the statement reads the asker as the decoder does, the last named.
+
+    A request of another person's whose record an outside writer made name two askers is
+    held by the own activation's binding exactly where the decoded record's asker is that
+    activation: its reads give it back, and its ``clear`` removes it, only then.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        await _asked(store, _request("q-bob", person="person:bob", activation=first))
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE approval_requests SET data = replace(data, ?, ?) WHERE id = 'q-bob'",
+                (
+                    f'"activation_id":"{first}"',
+                    f'"activation_id":"{first}","activation_id":"{last}"',
+                ),
+            )
+            (data,) = conn.execute("SELECT data FROM approval_requests").fetchone()
+        assert data.count('"activation_id"') == 2
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        given = await own.approval_requests(["q-bob"])
+        assert [one.id for one in given] == (["q-bob"] if held else [])
+        assert [one.activation_id for one in given] == ([OWN_ACTIVATION] if held else [])
+        cleared = await own.clear()
+        with sqlite3.connect(path) as conn:
+            left = conn.execute("SELECT id FROM approval_requests").fetchall()
+        assert left == ([] if held else [("q-bob",)])
+        assert cleared >= int(held)
+    finally:
+        store.close()
+
+
+async def test_a_key_check_fetches_nothing_of_a_row_the_binding_does_not_hold(
+    tmp_path: Path,
+) -> None:
+    """§7:11: a part or a ticket key spent by a row not held refuses, and none of it is read.
+
+    A shared effect spending a part, and one spending the owner's ticket, whose home ids
+    an outside writer made text that is not UTF-8: through a binding over the owner's
+    domain, a claim of the same part answers ``ALREADY_USED`` and one under the ticket
+    ``USED``, rather than failing on the withheld row's columns.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        part = QuestionPart(round="q-shared", part=1)
+        spent = _effect("e-spent", activation="act-s").model_copy(
+            update={"home": RecordHome.shared(), "part": part}
+        )
+        assert (
+            await store.claim_activation_effect(spent, match=None) is ActivationEffectClaim.CLAIMED
+        )
+        await _approved(store, "q-owner")
+        ticket = _spending_ticket("e-ticket", "q-owner").model_copy(
+            update={"home": RecordHome.shared()}
+        )
+        assert await store.claim_ticket_call(ticket, match=None) is TicketClaim.CLAIMED
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE activation_effects SET home_id = CAST(x'41' || x'80' AS TEXT) "
+                "WHERE id IN ('e-spent', 'e-ticket')"
+            )
+            conn.execute(
+                "UPDATE approval_requests SET data = json_set(data, '$.ticket', 'held', "
+                "'$.spent_by', json('null')) WHERE id = 'q-owner'"
+            )
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        again = _effect("e-again", activation="act-o").model_copy(update={"part": part})
+        assert (
+            await owners.claim_activation_effect(again, match=None)
+            is ActivationEffectClaim.ALREADY_USED
+        )
+        assert (
+            await owners.claim_ticket_call(_spending_ticket("e-ticket-2", "q-owner"), match=None)
+            is TicketClaim.USED
+        )
+    finally:
+        store.close()

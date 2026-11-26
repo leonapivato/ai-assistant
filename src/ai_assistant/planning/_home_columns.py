@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import ValidationError
 
-from ai_assistant.core.types import RecordHome, RecordHomeKind
+from ai_assistant.core.types import ApprovalRequest, RecordHome, RecordHomeKind
 
 if TYPE_CHECKING:
     import sqlite3
@@ -69,6 +69,12 @@ HOME_READER: Final = "plan_home_readable"
 #: The SQL function :func:`register_readers` gives a connection: ``1`` where a person
 #: column holds a person :func:`person_home` reads, ``0`` otherwise.
 PERSON_READER: Final = "plan_person_readable"
+
+#: The activation a stored approval request records as having asked it (ADR-0383 §7:4),
+#: as an SQL expression over its row: the record decoded exactly as the store decodes it,
+#: or ``NULL`` where it does not decode. The connection must carry
+#: :func:`register_readers`'s functions.
+REQUEST_ASKER: Final = "plan_request_asker(typeof(data), CAST(data AS BLOB))"
 
 
 def stored_home(kind: object, home_id: object) -> RecordHome | None:
@@ -154,6 +160,23 @@ def _person_readable(person_type: object, person: object) -> int:
     return int(person_home(_stored_value(person_type, person)) is not None)
 
 
+def _request_asker(storage: object, raw: object) -> str | None:
+    """The asking activation a stored request's record names, decoded as the store decodes it.
+
+    By :meth:`~ai_assistant.core.types.ApprovalRequest.model_validate_json`, the reading
+    every read of a request makes, so the statement and the decoder agree on a record
+    altered outside the store too: one naming its asker twice names the one the decoder
+    keeps. A record that does not decode names none.
+    """
+    text = _stored_value(storage, raw)
+    if not isinstance(text, str):
+        return None
+    try:
+        return ApprovalRequest.model_validate_json(text).activation_id
+    except ValidationError:
+        return None
+
+
 def register_readers(conn: sqlite3.Connection) -> None:
     """Give ``conn`` :data:`HOME_READER` and :data:`PERSON_READER`, the one reading in SQL.
 
@@ -170,6 +193,7 @@ def register_readers(conn: sqlite3.Connection) -> None:
     """
     conn.create_function(HOME_READER, 4, _home_readable, deterministic=True)
     conn.create_function(PERSON_READER, 2, _person_readable, deterministic=True)
+    conn.create_function("plan_request_asker", 2, _request_asker, deterministic=True)
 
 
 def _reader_args(*columns: str) -> str:
