@@ -10,9 +10,10 @@ the round's scope and holding what it read for the glue.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Self
 
 from test_planning import _earlier, _episode, _relayed
+from understanding_support import OWNERS_SIGHT, bound_stores, owners_sight
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -40,6 +41,7 @@ from ai_assistant.core.types import (
     RecordHome,
     ShownRecord,
     ShownRecordKind,
+    Sight,
     StoryHeader,
     StoryMember,
     StorySummary,
@@ -90,6 +92,11 @@ def _scored(record: EpisodicMemory, score: float | None) -> EpisodicMemory:
 class _Memory:
     """A ``MemoryStore`` stub: each band's search, the records by id, a channel's tail."""
 
+    def bound(self, sight: Sight) -> Self:
+        """The stub holds every record any sight here sees."""
+        del sight
+        return self
+
     def __init__(
         self,
         *,
@@ -136,6 +143,11 @@ class _Memory:
 
 class _Stories:
     """A ``StoryStore`` stub: the stories each activation is in, and their summaries."""
+
+    def bound(self, sight: Sight) -> Self:
+        """The stub holds every record any sight here sees."""
+        del sight
+        return self
 
     def __init__(
         self,
@@ -197,6 +209,11 @@ def _message(position: int, author: MessageAuthor, text: str) -> TranscriptMessa
 class _Conversations:
     """A ``ConversationStore`` stub: a transcript and which activation took each in."""
 
+    def bound(self, sight: Sight) -> Self:
+        """The stub holds every record any sight here sees."""
+        del sight
+        return self
+
     def __init__(
         self,
         entries: Sequence[TranscriptMessage | DeletedMessage],
@@ -220,11 +237,15 @@ class _Conversations:
         return {one: self.taken[one] for one in positions if one in self.taken}
 
 
-def _reads(memory_store: Any = None, **fields: Any) -> EpisodeLookUpReads:
+def _reads(
+    memory_store: Any = None, *, stories: Any = None, conversations: Any = None, **fields: Any
+) -> EpisodeLookUpReads:
+    """The reads over the stubs, through the holder; an empty stub where none is named."""
+    memory: Any = memory_store if memory_store is not None else _Memory()
+    matters: Any = stories if stories is not None else _Stories({}, {})
+    chat: Any = conversations if conversations is not None else _Conversations([])
     values: dict[str, Any] = {
-        "memory": memory_store if memory_store is not None else _Memory(),
-        "stories": None,
-        "conversations": None,
+        "stores": bound_stores(memory, matters, conversations=chat),
         "threshold": 0.5,
         "limit": 6,
         "search_page": 2,
@@ -249,7 +270,9 @@ async def test_a_search_asks_each_band_for_episodes_and_keeps_what_clears_the_th
         bands={BeliefBand.ASSERTED: (kept, low, unscored), BeliefBand.DERIVED: (later,)}
     )
 
-    found = await _reads(store).search("dentist", 1, audience=BOUNDED, owner_records=True)
+    found = await _reads(store).search(
+        "dentist", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
 
     assert [one.record.id for one in found.episodes] == ["activation:kept", "activation:later"]
     assert store.searched == [
@@ -264,8 +287,12 @@ async def test_a_search_comes_in_pages() -> None:
     records = [_scored(_episode(f"activation:{at}"), 0.9) for at in range(3)]
     store = _Memory(bands={BeliefBand.ASSERTED: records})
 
-    first = await _reads(store).search("x", 1, audience=BOUNDED, owner_records=True)
-    second = await _reads(store).search("x", 2, audience=BOUNDED, owner_records=True)
+    first = await _reads(store).search(
+        "x", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
+    second = await _reads(store).search(
+        "x", 2, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
 
     assert [one.record.id for one in first.episodes] == ["activation:0", "activation:1"]
     assert first.more
@@ -277,7 +304,9 @@ async def test_a_search_on_an_unbounded_pass_asks_for_no_episode() -> None:
     """§7:3, ADR-0281 §4:2."""
     store = _Memory(bands={BeliefBand.ASSERTED: (_scored(_episode("activation:a"), 0.9),)})
 
-    found = await _reads(store).search("x", 1, audience=UNBOUNDED, owner_records=True)
+    found = await _reads(store).search(
+        "x", 1, sight=OWNERS_SIGHT, audience=UNBOUNDED, owner_records=True
+    )
 
     assert found == EpisodesFound(unbounded=True)
     assert store.searched == []
@@ -301,8 +330,12 @@ async def test_each_episode_found_names_its_matters_as_the_audience_may_see_them
     )
     reads = _reads(store, stories=stories)
 
-    (shown,) = (await reads.search("x", 1, audience=BOUNDED, owner_records=True)).episodes
-    (hidden,) = (await reads.search("x", 1, audience=BOUNDED, owner_records=False)).episodes
+    (shown,) = (
+        await reads.search("x", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True)
+    ).episodes
+    (hidden,) = (
+        await reads.search("x", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=False)
+    ).episodes
 
     dentist, new = shown.matters
     assert (dentist.story_id, dentist.summary_version, dentist.first_line) == (
@@ -320,7 +353,9 @@ async def test_each_episode_found_names_its_matters_as_the_audience_may_see_them
 
 async def test_a_place_with_no_window_has_no_older_history_to_read() -> None:
     """§9:4: an event's place has no window."""
-    assert await _reads().older(None, 1, audience=BOUNDED) == OlderHistory(readable=False)
+    assert await _reads().older(None, 1, sight=OWNERS_SIGHT, audience=BOUNDED) == OlderHistory(
+        readable=False
+    )
 
 
 async def test_a_conversations_older_history_is_its_transcript_before_the_window() -> None:
@@ -339,9 +374,9 @@ async def test_a_conversations_older_history_is_its_transcript_before_the_window
     source = OlderSource(conversation_id="conv-1", before=5, shown=frozenset({4, 5}))
     reads = _reads(conversations=conversations)
 
-    first = await reads.older(source, 1, audience=BOUNDED)
-    second = await reads.older(source, 2, audience=BOUNDED)
-    third = await reads.older(source, 3, audience=BOUNDED)
+    first = await reads.older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
+    second = await reads.older(source, 2, sight=OWNERS_SIGHT, audience=BOUNDED)
+    third = await reads.older(source, 3, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     assert first.items == ()
     assert first.more
@@ -359,7 +394,7 @@ async def test_a_lines_older_history_is_its_earlier_episodes_on_the_channel() ->
     store = _Memory(channel=channel)
     source = OlderSource(channel=LINE, episodes=frozenset({"activation:2", "activation:3"}))
 
-    older = await _reads(store).older(source, 1, audience=BOUNDED)
+    older = await _reads(store).older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     assert [one.id for one in older.episodes] == ["activation:1", "activation:0"]
     assert not older.more
@@ -371,7 +406,7 @@ async def test_a_lines_older_history_past_what_can_be_read_says_it_cannot() -> N
     store = _Memory(channel=channel)
     source = OlderSource(channel=LINE, episodes=frozenset({"activation:never-there"}))
 
-    older = await _reads(store).older(source, 1, audience=BOUNDED)
+    older = await _reads(store).older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     assert older == OlderHistory(readable=False)
     assert store.limits[-1] == 1000
@@ -418,7 +453,9 @@ async def test_the_full_view_reads_each_record_it_names_again_as_held_now() -> N
     stories = _Stories(of={}, summaries={"story:dentist": _summary("The dentist now.", version=2)})
     reads = _reads(_Memory(held=(record, said)), stories=stories)
 
-    read = await reads.full("activation:full", 1, audience=BOUNDED, owner_records=True)
+    read = await reads.full(
+        "activation:full", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
 
     assert read.projection is not None
     assert read.projection.full_view
@@ -429,7 +466,9 @@ async def test_the_full_view_reads_each_record_it_names_again_as_held_now() -> N
 
 async def test_an_episode_the_store_no_longer_holds_is_no_longer_kept() -> None:
     """§10:9."""
-    read = await _reads().full("activation:gone", 1, audience=BOUNDED, owner_records=True)
+    read = await _reads().full(
+        "activation:gone", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
 
     assert read == EpisodeRead(episode_id="activation:gone", page_size=20)
 
@@ -451,7 +490,7 @@ async def test_an_open_episode_is_still_running() -> None:
     live = frozen.model_copy(update={"processing_record": open_record, "outcome": None})
 
     read = await _reads(_Memory(held=(live,))).full(
-        "activation:live", 1, audience=BOUNDED, owner_records=True
+        "activation:live", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
     )
 
     assert read.running
@@ -488,10 +527,14 @@ def test_the_episode_look_ups_read_own_records_and_return_no_outside_text() -> N
 async def test_each_episode_look_up_reads_under_the_scope_and_holds_what_it_read() -> None:
     """§6:2: under the pass's audience; what it read held by its decision for the glue."""
     store = _Memory(bands={BeliefBand.ASSERTED: (_scored(_episode("activation:a"), 0.9),)})
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5, episodes=_reads(store))
+    look_ups = LookUps(
+        stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5, episodes=_reads(store)
+    )
     source = OlderSource(conversation_id="conv-1", before=None)
 
-    with LookUps.scope(audience=BOUNDED, owner_records=True, older=source) as scope:
+    with LookUps.scope(
+        audience=BOUNDED, owner_records=True, sight=owners_sight, older=source
+    ) as scope:
         searched = await look_ups.run(_call(SEARCH_EPISODES, decision="d1", query="dentist"))
         older = await look_ups.run(_call(READ_OLDER_HISTORY, decision="d2"))
         full = await look_ups.run(_call(READ_EPISODE, decision="d3", episode="activation:a"))
@@ -507,7 +550,9 @@ async def test_each_episode_look_up_reads_under_the_scope_and_holds_what_it_read
 async def test_an_episode_look_up_outside_a_scope_reads_nothing_and_is_not_done() -> None:
     """§6:2."""
     store = _Memory()
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5, episodes=_reads(store))
+    look_ups = LookUps(
+        stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5, episodes=_reads(store)
+    )
 
     answer = await look_ups.run(_call(SEARCH_EPISODES, query="dentist"))
 
@@ -521,9 +566,11 @@ async def test_an_episode_look_up_outside_a_scope_reads_nothing_and_is_not_done(
 async def test_a_blank_query_is_not_done() -> None:
     """A search names what it searches for; a blank query reads nothing."""
     store = _Memory()
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5, episodes=_reads(store))
+    look_ups = LookUps(
+        stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5, episodes=_reads(store)
+    )
 
-    with LookUps.scope(audience=BOUNDED, owner_records=True):
+    with LookUps.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_EPISODES, query="   "))
 
     assert isinstance(answer, ToolResult)
@@ -534,9 +581,11 @@ async def test_a_blank_query_is_not_done() -> None:
 
 async def test_an_unreadable_store_makes_an_episode_look_up_not_done() -> None:
     reads = _reads(_Memory(raises=MemoryStoreError("down")))
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5, episodes=reads)
+    look_ups = LookUps(
+        stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5, episodes=reads
+    )
 
-    with LookUps.scope(audience=BOUNDED, owner_records=True) as scope:
+    with LookUps.scope(audience=BOUNDED, owner_records=True, sight=owners_sight) as scope:
         answer = await look_ups.run(_call(SEARCH_EPISODES, query="x"))
 
     assert isinstance(answer, ToolResult)
@@ -559,7 +608,7 @@ async def test_an_older_message_of_a_relayed_input_is_marked_from_its_held_episo
     reads = _reads(_Memory(held=(relayed,)), conversations=conversations)
     source = OlderSource(conversation_id="conv-1", before=2, shown=frozenset({2}))
 
-    older = await reads.older(source, 1, audience=BOUNDED)
+    older = await reads.older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     (item,) = older.items
     assert item.episode_id == "activation:relay"
@@ -575,7 +624,9 @@ async def test_the_full_view_reads_the_matters_its_episode_belongs_to() -> None:
     )
     reads = _reads(_Memory(held=(record,)), stories=stories)
 
-    read = await reads.full("activation:full", 1, audience=BOUNDED, owner_records=True)
+    read = await reads.full(
+        "activation:full", 1, sight=OWNERS_SIGHT, audience=BOUNDED, owner_records=True
+    )
 
     (matter,) = read.matters
     assert (matter.story_id, matter.first_line) == ("story:dentist", "The dentist.")
@@ -587,7 +638,7 @@ async def test_a_lines_older_history_reads_further_back_until_its_page_is_there(
     store = _Memory(channel=channel)
     source = OlderSource(channel=LINE, episodes=frozenset({"activation:18", "activation:19"}))
 
-    older = await _reads(store).older(source, 1, audience=BOUNDED)
+    older = await _reads(store).older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:17", "activation:16"]
@@ -610,7 +661,9 @@ async def test_a_lines_older_history_reads_back_past_episodes_the_audience_refus
     channel = [_episode(f"activation:{at}") for at in range(20)]
     source = OlderSource(channel=LINE, episodes=frozenset({"activation:18", "activation:19"}))
 
-    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=UNBOUNDED)
+    older = await _reads(_Memory(channel=channel)).older(
+        source, 1, sight=OWNERS_SIGHT, audience=UNBOUNDED
+    )
 
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:14", "activation:13"]
@@ -649,7 +702,7 @@ async def test_an_older_message_of_a_relayed_input_still_running_is_withheld() -
     reads = _reads(_Memory(held=(running,)), conversations=conversations)
     source = OlderSource(conversation_id="conv-1", before=2, shown=frozenset({2}))
 
-    older = await reads.older(source, 1, audience=BOUNDED)
+    older = await reads.older(source, 1, sight=OWNERS_SIGHT, audience=BOUNDED)
 
     (item,) = older.items
     assert older.relayed == frozenset({"activation:relay"})
@@ -662,7 +715,9 @@ async def test_a_lines_older_history_cannot_be_read_once_the_windows_episodes_ar
     channel = [_episode(f"activation:{at}") for at in (0, 1, 4, 5)]
     source = OlderSource(channel=LINE, episodes=frozenset({"activation:2", "activation:3"}))
 
-    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=BOUNDED)
+    older = await _reads(_Memory(channel=channel)).older(
+        source, 1, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert older == OlderHistory(readable=False)
 
@@ -689,8 +744,12 @@ async def test_a_lines_older_history_where_the_window_showed_none_started_before
     channel = [_at(_episode("activation:old"), -10), _at(_episode("activation:new"), 5)]
     store = _Memory(channel=channel)
 
-    older = await _reads(store).older(OlderSource(channel=LINE, started=_AT), 1, audience=BOUNDED)
-    unknown = await _reads(store).older(OlderSource(channel=LINE), 1, audience=BOUNDED)
+    older = await _reads(store).older(
+        OlderSource(channel=LINE, started=_AT), 1, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
+    unknown = await _reads(store).older(
+        OlderSource(channel=LINE), 1, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:old"]
@@ -704,7 +763,9 @@ async def test_a_whole_channel_of_the_largest_page_is_read_whole() -> None:
     channel = [_at(_episode(f"activation:{at}"), at - 1000) for at in range(1000)]
     source = OlderSource(channel=LINE, started=_AT)
 
-    older = await _reads(_Memory(channel=channel)).older(source, 1, audience=BOUNDED)
+    older = await _reads(_Memory(channel=channel)).older(
+        source, 1, sight=OWNERS_SIGHT, audience=BOUNDED
+    )
 
     assert older.readable
     assert [one.id for one in older.episodes] == ["activation:999", "activation:998"]

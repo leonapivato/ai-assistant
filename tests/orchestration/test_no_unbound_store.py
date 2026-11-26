@@ -120,10 +120,6 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     "engine.py:approval_panel": "B10",
     "engine.py:episode_card_facts": "B10",
     "engine.py:tap_on_approval_panel": "B10",
-    "episode_lookups.py:EpisodeLookUpReads": "B8c",
-    "lookups.py:ConnectionSearch": "B8c",
-    "lookups.py:LookUps": "B8c",
-    "matters.py:Matters": "B8c",
     "matters_pass.py:MattersPass": "B9",
     # The upcoming-event producer's writer and the reconsideration's policy.
     "notifications.py:NotificationWriteStage": "B9",
@@ -139,9 +135,10 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # Its runs' reads (B9); its finding of what is due is §7:12's.
     "observer/stage.py:Observer": "B9",
     "observer/writing.py:FindingWriter": "B9",
-    # The person block (B8c) and the person panel (B10).
+    # A work's block, pins and person-model reads and writes are bound (B8e); the owner's
+    # panel's pins, unpins and walks, and the unbound stores handed to the zone pickers
+    # (`RulingPolicy` B9, `PersonZones` B8d), are the person panel's (B10).
     "person_block.py:PersonBlocks": "B10",
-    "person_block.py:still_held": "B8c",
     # Its four `fetch_held` calls (`_found`, `_searched`, `_digest_recall`, `_digested`)
     # still pass its unbound memory store to a parameter marked `Bound`: B8d binds them.
     "phase_path.py:PhasePath": "B8d",
@@ -353,6 +350,23 @@ def test_the_stages_this_lane_converted_hold_no_store() -> None:
         "recall.py:RecallStage",
         "understanding.py:WindowsStage",
         "understanding.py:fetch_held",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+
+
+def test_the_holders_b8e_converted_hold_no_store() -> None:
+    """The look-ups, the person block's check and matters (milestone 22's B8e) read
+    through the holder alone; ``PersonBlocks`` keeps the owner's panel's unbound reads."""
+    held = unbound_holders()
+    for converted in (
+        "lookups.py:LookUps",
+        "lookups.py:ConnectionSearch",
+        "episode_lookups.py:EpisodeLookUpReads",
+        "matters.py:Matters",
+        "matter_calls.py:MatterCalls",
+        "person_block.py:still_held",
+        "person_calls.py:PersonModelCalls",
     ):
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED

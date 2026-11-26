@@ -13,6 +13,7 @@ from typing import Any, Final
 
 import pytest
 from test_lookups import BOUNDED, UNBOUNDED, _Down, _fact, _Searched, _store
+from understanding_support import bound_stores, owners_sight
 
 from ai_assistant.core.types import (
     ActionRequest,
@@ -273,9 +274,9 @@ def test_only_a_candidates_result_reads_as_one() -> None:
 async def test_the_lookup_is_one_search_by_relevance_alone() -> None:
     """§4:1, ADR-0328 §7:12: one search, no band searched on its own."""
     store = _Searched()
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         await look_ups.similar("window seats", limit=4)
 
     (search,) = store.searches
@@ -291,9 +292,9 @@ async def test_the_lookup_keeps_no_memory_resting_on_outside_content() -> None:
         _fact("said", "window seats on long flights"),
         _fact("reported", "window seats booked by the airline", outside=True),
     )
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         found = await look_ups.similar("window seats", limit=5)
 
     assert found is not None
@@ -306,9 +307,9 @@ async def test_the_lookup_reads_under_the_rounds_audience() -> None:
         _fact("said", "window seats please"),
         _fact("about-sam", "window seats for Sam", subjects=("Sam",)),
     )
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
-    with look_ups.scope(audience=UNBOUNDED, owner_records=False):
+    with look_ups.scope(audience=UNBOUNDED, owner_records=False, sight=owners_sight):
         found = await look_ups.similar("window seats", limit=5)
 
     assert found is not None
@@ -317,11 +318,11 @@ async def test_the_lookup_reads_under_the_rounds_audience() -> None:
 
 async def test_a_lookup_that_cannot_read_answers_none() -> None:
     """§4:4: no scope, or a store that cannot be searched, is a lookup that failed."""
-    look_ups = LookUps(memory=_Down(), views=None, search_limit=5)
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    look_ups = LookUps(stores=bound_stores(_Down()), views=None, search_limit=5)
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         assert await look_ups.similar("window seats", limit=5) is None
 
     unscoped = LookUps(
-        memory=await _store(_fact("said", "window seats")), views=None, search_limit=5
+        stores=bound_stores(await _store(_fact("said", "window seats"))), views=None, search_limit=5
     )
     assert await unscoped.similar("window seats", limit=5) is None

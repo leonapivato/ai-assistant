@@ -62,7 +62,7 @@ from m23_harness import (
     plant,
 )
 from structured_support import structured
-from understanding_support import TextAsStructured
+from understanding_support import TextAsStructured, bound_stores
 
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
@@ -369,7 +369,8 @@ def build_phases_world(
             own_records=OwnRecordsByCapability(
                 {
                     REMEMBER_CAPABILITY: CandidateCalls(
-                        similar=LookUps(memory=store, views=None, search_limit=5), limit=5
+                        similar=LookUps(stores=bound_stores(store), views=None, search_limit=5),
+                        limit=5,
                     )
                 }
             ),

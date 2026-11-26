@@ -61,6 +61,18 @@ and the take or decline of an offer (§7:21-§7:23).
 Nothing here is persisted: the takeover decision is the working set's (§10:4), and the
 episode records only the :class:`~ai_assistant.core.types.JoinedInput` an absorption or
 a take appends (§10:7).
+
+**Through the sight of the work that reads** (ADR-0383 §7:7, §9:1). The peer view reads
+the memory and plan stores the composition root's
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to the sight the
+reading work carries, handed to each read and never made here (§9:2): an activation
+whose episode that sight does not see has no peer view, as one with no episode, and its
+effect records not held are not shown. A stop record a merge or a take writes is written
+through the plan store bound to the same sight; a stop record carries no home, so a bound
+store writes it whatever the sight sees, as the unbound store does, and no member of one
+gives it back (§3:3, §7:11). The stop planning's stop call runs is the Task Manager's
+(``stop``), and what it set up still live is its read (``set_up``), each the engine's
+closure: milestone 22's B8d binds them.
 """
 
 from __future__ import annotations
@@ -93,17 +105,18 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.protocols import MemoryStore, PlanStore
     from ai_assistant.core.types import (
         ActivationEffect,
         ActivationStop,
         ActivationUnderstanding,
         InputSender,
         PeerView,
+        Sight,
         ToolDefinition,
         WorkFacts,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.bound_stores import BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.task_scheduler import StillLive
 
@@ -779,12 +792,11 @@ class Matters:
     on an older activation, and the answer call for a take or a decline.
     """
 
-    def __init__(  # noqa: PLR0913 — the engine's account, the two stores, the stop and its read, the two limits
+    def __init__(  # noqa: PLR0913 — the engine's account, the holder, the stop and its read, the two limits
         self,
         *,
         running: Callable[[], Iterable[ActivationState]],
-        plans: PlanStore,
-        memory: MemoryStore,
+        stores: BoundStores,
         stop: Callable[[str], Awaitable[ActivationStop]],
         held_input_limit: int,
         in_progress_limit: int,
@@ -794,9 +806,11 @@ class Matters:
 
         Args:
             running: The activations the engine holds as running.
-            plans: The plan store an absorbed or handed-over activation's stop record is
-                written in, and the effect records a peer view reads.
-            memory: The store a peer view reads an activation's episode from.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1): its plan
+                store, which an absorbed or handed-over activation's stop record is
+                written in and the effect records a peer view reads, and its memory
+                store, which a peer view reads an activation's episode from, each bound
+                to the sight of the work that reads or writes.
             stop: The Task Manager's stop, which planning's stop call runs (§4:7):
                 ``stop_activation``'s one implementation, which stops only the activation
                 it names (ADR-0352 §2:1).
@@ -812,8 +826,7 @@ class Matters:
             msg = "held_input_limit and in_progress_limit are each at least 1 (ADR-0349 §9)"
             raise ValueError(msg)
         self._running = running
-        self._plans = plans
-        self._memory = memory
+        self._stores = stores
         self._stop = stop
         self._set_up = set_up
         self.held_input_limit = held_input_limit
@@ -1323,17 +1336,24 @@ class Matters:
 
     # --- the stops a merge makes, and the peer view ---
 
-    async def record_stop(self, activation_id: str, *, deadline: float | None, stage: str) -> None:
+    async def record_stop(
+        self, activation_id: str, *, deadline: float | None, stage: str, sight: Sight
+    ) -> None:
         """Write a merge's stop record, after its step, inside ``deadline`` (§4:5).
 
         Internal: it stops only that activation, as every stop does (ADR-0352 §2:1). A
         record that cannot be written is logged: the marks are set, so the other
         activation runs no further stage and commits nothing. ``None`` writes it to its
         end.
+
+        Written through the plan store bound to ``sight``, the sight of the work whose
+        step or take stops it (ADR-0383 §7:7). A stop record carries no home and no
+        sight holds one (§3:3): the bound store writes it as the unbound store does,
+        whatever activation it names, and a write's own checks still read it (§7:11).
         """
         try:
             async with asyncio.timeout_at(deadline):
-                await self._plans.record_stop(activation_id)
+                await self._stores.plans(sight).record_stop(activation_id)
         except Exception as exc:  # the marks hold it: logged, never the pass's failure
             if is_defect(exc):
                 log_defect("merge_stop_unrecorded", exc, stage=stage, activation_id=activation_id)
@@ -1361,17 +1381,23 @@ class Matters:
             activation_id, person=person, viewer=viewer.activation_id, supply=supply
         )
 
-    async def peer(self, activation_id: str, *, owner_records: bool) -> PeerView | None:
+    async def peer(
+        self, activation_id: str, *, owner_records: bool, sight: Sight
+    ) -> PeerView | None:
         """``activation_id``'s own work through the peer view, read fresh (§6:7-§6:10).
 
         Its episode as stored, open or frozen, and its effect records, read now. ``None``
         where no episode with a processing record stands at its address.
+
+        Each read is of the store bound to ``sight``, the reading work's (ADR-0383 §7:7):
+        an episode that sight does not see is ``None``, as one never written (§8:2), and
+        an effect record it does not see is not shown.
         """
         address = f"activation:{activation_id}"
-        record = await self._memory.get(address)
+        record = await self._stores.memory(sight).get(address)
         if not isinstance(record, EpisodicMemory) or record.processing_record is None:
             return None
-        effects: tuple[ActivationEffect, ...] = await self._plans.activation_effects(
+        effects: tuple[ActivationEffect, ...] = await self._stores.plans(sight).activation_effects(
             [activation_id]
         )
         return project_episode(

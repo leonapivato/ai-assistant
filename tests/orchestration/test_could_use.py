@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.types import (
     APPROVALS_CONNECTION,
@@ -54,7 +55,7 @@ from ai_assistant.orchestration.permission_check import CheckSubject
 from ai_assistant.orchestration.planning import ConnectionShown
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.task_scheduler import TASK_SCHEDULER_CALLS
-from ai_assistant.testing import FakeConversationStore
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 from ai_assistant.testing.searching import FAKE_WEB_SEARCH
 from ai_assistant.tools.send_email import EMAIL
 
@@ -444,13 +445,15 @@ async def test_a_connections_search_finds_only_what_the_work_could_use() -> None
     store = FakeConversationStore()
     first = await store.start(home=RecordHome.owners())
     second = await store.start(home=RecordHome.owners())
-    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+    search = ConnectionSearch(
+        stores=bound_stores(FakeMemoryStore(), conversations=store), scan=10, page_size=5
+    )
     own_place = f"conversation:{first.id}"
     at_none = CouldUse(connections=frozenset(), own=frozenset({own_place}))
     owners = CouldUse(connections=frozenset({OWN_CHAT_CONNECTION}), own=frozenset())
 
-    narrowed = await search.search("text messages", 1, shows=at_none.shows)
-    whole = await search.search("text messages", 1, shows=owners.shows)
+    narrowed = await search.search("text messages", 1, sight=OWNERS_SIGHT, shows=at_none.shows)
+    whole = await search.search("text messages", 1, sight=OWNERS_SIGHT, shows=owners.shows)
 
     assert [one.place for one in narrowed.connections] == [own_place]
     assert {one.place for one in whole.connections} == {own_place, f"conversation:{second.id}"}
@@ -485,12 +488,14 @@ async def test_a_connections_search_finds_where_an_approvals_request_was_asked()
     store = FakeConversationStore()
     asked = await store.start(home=RecordHome.owners())
     await store.start(home=RecordHome.owners())
-    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+    search = ConnectionSearch(
+        stores=bound_stores(FakeMemoryStore(), conversations=store), scan=10, page_size=5
+    )
     place = f"conversation:{asked.id}"
     approvals = CouldUse(
         connections=frozenset(), own=frozenset({APPROVALS_CONNECTION}), asked=frozenset({place})
     )
 
-    found = await search.search("text messages", 1, shows=approvals.shows)
+    found = await search.search("text messages", 1, sight=OWNERS_SIGHT, shows=approvals.shows)
 
     assert [one.place for one in found.connections] == [place]

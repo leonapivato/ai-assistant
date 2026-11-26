@@ -2078,8 +2078,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # ADR-0383 §9:1: the one holder that binds stores for a pass, over the very stores
         # every other reader holds. A converted stage holds it and never a store, and asks
         # it for a store only for the sight its pass carries; whether a bound store
-        # withholds or counts is each store's construction (§7:10), not the holder's.
-        pass_stores = BoundStores(memory=memory, stories=stories)
+        # withholds or counts is each store's construction (§7:10), not the holder's. The
+        # person-model store is in it where the switch is on.
+        pass_stores = BoundStores(
+            memory=memory,
+            stories=stories,
+            people=person_model,
+            conversations=conversations,
+            plans=plans,
+        )
         # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
         # routes, the commit step's carrying framing and placement (ADR-0346 §10:2), the
         # one memory store, the write stage over the writer persisting to that store
@@ -2145,6 +2152,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 tidy_up=tidy_up,
                 lines=permission_lines,
                 things=thing_records,
+                pass_stores=pass_stores,
             ),
             planning_prompt=prompts[PLANNING_PROMPT.name],
             digesting_prompt=prompts[DIGESTING_PROMPT.name],
@@ -2440,6 +2448,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the hub comes to hold while running, is recorded as the owner's before the
             # event is read. The engine reads no record (§6:4).
             things=thing_records,
+            # ADR-0383 §9:1: the one holder, which the running-work coordinator's peer
+            # view and a merge's stop record go through, bound to the work's sight.
+            stores=pass_stores,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,
@@ -2454,6 +2465,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     memory=memory,
                     budget_chars=KEPT_IN_MIND_CHARS,
                     suggestions=PLANNING_SUGGESTIONS,
+                    # ADR-0383 §9:1: a work's block, pins and person-model calls read
+                    # and write through the one holder, bound to the work's sight.
+                    stores=pass_stores,
                 )
             ),
             # The capture/lifecycle stage, holding *both* durable stores — the same
@@ -2930,7 +2944,8 @@ class _PhaseSeams:
     most one run is on a story at a time (ADR-0300 §5:10). ``lines`` is the one line
     store, whose standing lines the authorizer's check reads (ADR-0367 §3:6, §4:1), and
     ``things`` the one store of whose each thing is, which it reads for whose yes a grant
-    that asks needs (ADR-0381 §6:1).
+    that asks needs (ADR-0381 §6:1). ``pass_stores`` is the one holder that binds stores
+    for a pass (ADR-0383 §9:1), over these same stores, which the look-ups read through.
     """
 
     model: RoutingProvider
@@ -2946,6 +2961,7 @@ class _PhaseSeams:
     forecaster: Forecaster | None
     booking_configured: bool
     tidy_up: StoryTidyUp
+    pass_stores: BoundStores
     diagnostics: DiagnosticSink | None = None
     lines: PermissionLineStore | None = None
     things: ThingRecordStore | None = None
@@ -3043,17 +3059,17 @@ def _build_phase_path(
     # ADR-0307 §6:6: planning's look-ups, a memory search over the one memory store and
     # a story's full view through the same story reads, and the follow-up, which acting
     # runs against the activation's held results (ADR-0308 §6:6).
+    # ADR-0383 §9:1: the one holder, which every look-up reads through by its work's sight.
+    pass_stores = seams.pass_stores
     look_ups = LookUps(
-        memory=seams.memory,
+        stores=pass_stores,
         views=story_reads,
         search_limit=PHASES_MEMORY_SEARCH_LIMIT,
         # ADR-0358 §7-§10: the episode look-ups, over the one memory store, story store
         # and conversation store, a search kept under recall's threshold for the embedder
         # the deployment wires (§7:1, ADR-0281 §3).
         episodes=EpisodeLookUpReads(
-            memory=seams.memory,
-            stories=seams.stories,
-            conversations=seams.chat,
+            stores=pass_stores,
             threshold=RECALL_THRESHOLDS[settings.embedder],
             limit=PLANNING_EPISODE_SEARCH_LIMIT,
             search_page=PLANNING_EPISODE_SEARCH_PAGE,
@@ -3064,7 +3080,7 @@ def _build_phase_path(
         # ADR-0364 §3:7-§3:8: the connections search, over the one conversation store's
         # existing reads.
         connections=ConnectionSearch(
-            conversations=seams.chat,
+            stores=pass_stores,
             scan=CONNECTION_SEARCH_SCAN,
             page_size=CONNECTION_SEARCH_PAGE,
         ),

@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import Memory, Message, PersonModel
+    from ai_assistant.core.types import Memory, Message, PersonModel, Sight
 
 pytestmark = pytest.mark.anyio
 
@@ -64,15 +64,25 @@ DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=A
 
 
 class _Counting:
-    """The person-model store, counting its reads: the block is assembled once."""
+    """The person-model store, counting its reads: the block is assembled once.
 
-    def __init__(self, store: FakePersonModelStore) -> None:
+    A copy bound to a sight counts into the same tally (ADR-0383 §7:7).
+    """
+
+    def __init__(self, store: FakePersonModelStore, tally: list[int] | None = None) -> None:
         self.store = store
-        self.reads = 0
+        self._tally = [0] if tally is None else tally
+
+    @property
+    def reads(self) -> int:
+        return self._tally[0]
 
     async def read(self, person_id: str) -> PersonModel | None:
-        self.reads += 1
+        self._tally[0] += 1
         return await self.store.read(person_id)
+
+    def bound(self, sight: Sight) -> _Counting:
+        return _Counting(self.store.bound(sight), self._tally)
 
 
 async def _wired(pinned: Memory = DIET) -> tuple[FakeMemoryStore, _Counting, PersonBlocks]:
@@ -210,7 +220,9 @@ async def test_an_understanding_run_again_is_given_no_memory_forgotten_since() -
     memory_store, counting, blocks = await _wired()
     harness = phases_harness(memory=memory_store, person_blocks=blocks)
     state = _admitted()
-    working = SimpleNamespace(supply=BoundedAudienceSupply(speakable_attested_sources=frozenset()))
+    working = SimpleNamespace(
+        supply=BoundedAudienceSupply(speakable_attested_sources=frozenset()), sight=state.sight
+    )
     first = await harness.engine._person_block(state, working)  # type: ignore[arg-type]
 
     await memory_store.delete(DIET.id)

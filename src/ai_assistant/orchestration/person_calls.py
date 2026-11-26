@@ -48,6 +48,12 @@ memory's wording in place of its label: :func:`worded_argument` names the argume
 memory is shown by its wording, and the phases' glue reads that wording from the memory
 store for the round that asks.
 
+**Through the work's sight** (ADR-0383 §7:5, §7:7). Every read and write a call makes
+is of the person-model and memory stores bound to the sight the running work carries,
+read from its admission and never made here (§9:2): a person, or a memory, its sight does
+not see is one the store does not hold, so a call naming it is answered as for one never
+written (§8:2).
+
 **It logs stage and code-owned reason only**, never a field's value or a memory's words
 (ADR-0275 §8).
 """
@@ -86,7 +92,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
-from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.activation_state import active_state, work_sight
 from ai_assistant.orchestration.person_block import PinRefusal
 from ai_assistant.orchestration.renames import current_name
 from ai_assistant.orchestration.stories import episode_address
@@ -99,6 +105,7 @@ if TYPE_CHECKING:
         FrozenJson,
         PersonModelWrite,
         RequestedCall,
+        Sight,
         ToolCall,
     )
     from ai_assistant.orchestration.person_block import PersonBlocks
@@ -440,9 +447,11 @@ class PersonModelCalls:
         person = None if state is None else persons_work(state.work_facts, state.held_senders)
         if person is None:
             return _not_done(_NO_PERSON, "no_person")
+        # ADR-0383 §7:5, §7:7: every read and write is bound to the work's sight.
+        sight = work_sight()
         capability = str(call.request.tool.capability)
         if capability == UNPIN_CAPABILITY:
-            return await self._unpin(person, _memory_id(call.request.parameters))
+            return await self._unpin(person, _memory_id(call.request.parameters), sight)
         if self._requests is None:
             return _not_done(_UNAPPROVED, "no_request_reader")
         found = await self._requests([str(tap.request)])
@@ -462,39 +471,54 @@ class PersonModelCalls:
             request=request.id,
             episode_id=episode_address(str(request.pushed_to)),
         )
-        return await self._ran(call, person, act)
+        return await self._ran(call, person, act, sight)
 
-    async def _ran(self, call: ToolCall, person: str, act: PersonModelAct) -> ToolResult | NotDone:
-        """The call run against the store, by its capability."""
+    async def _ran(
+        self, call: ToolCall, person: str, act: PersonModelAct, sight: Sight
+    ) -> ToolResult | NotDone:
+        """The call run against the stores bound to ``sight``, by its capability."""
         capability = str(call.request.tool.capability)
         parameters = call.request.parameters
         if capability == SET_PROFILE_CAPABILITY:
-            return await self._set(person, parameters, act)
+            return await self._set(person, parameters, act, sight)
         if capability == PIN_CAPABILITY:
-            return await self._pin(person, _memory_id(parameters), act)
+            return await self._pin(person, _memory_id(parameters), act, sight)
         if capability == UNPIN_CAPABILITY:
-            return await self._unpin(person, _memory_id(parameters))
+            return await self._unpin(person, _memory_id(parameters), sight)
         return _not_done(_MALFORMED, "not_a_person_model_call")
 
     async def _set(
-        self, person: str, parameters: Mapping[str, FrozenJson], act: PersonModelAct
+        self,
+        person: str,
+        parameters: Mapping[str, FrozenJson],
+        act: PersonModelAct,
+        sight: Sight,
     ) -> ToolResult | NotDone:
-        """Set one field, or clear it; the store validates the value (ADR-0338 §3:2-§3:3)."""
+        """Set one field, or clear it; the store validates the value (ADR-0338 §3:2-§3:3).
+
+        Written through the person-model store bound to the work's ``sight`` (ADR-0383
+        §7:5): a person it does not see is refused ``unknown_person``, as one never held.
+        """
         field = ProfileField(str(parameters.get(FIELD_ARGUMENT)))
         value = parameters.get(VALUE_ARGUMENT)
         if value is not None and not isinstance(value, str):
             msg = "a field's value is text, or null to clear it"
             raise ValueError(msg)
-        written = await self._blocks.store.set_field(person, field, value, act=act)
+        written = await self._blocks.people(sight).set_field(person, field, value, act=act)
         if written.kind is PersonModelWriteKind.REFUSED:
             return _refused(written)
         if written.kind is PersonModelWriteKind.UNCHANGED:
             return _done(_ALREADY_SET)
         return _done(_CLEARED if value is None else _SET)
 
-    async def _pin(self, person: str, memory_id: str, act: PersonModelAct) -> ToolResult | NotDone:
-        """Pin through the person block's assembly, which checks and writes it (§4:2, §6:3)."""
-        pinned = await self._blocks.pin(person, memory_id, act=act)
+    async def _pin(
+        self, person: str, memory_id: str, act: PersonModelAct, sight: Sight
+    ) -> ToolResult | NotDone:
+        """Pin through the person block's assembly, which checks and writes it (§4:2, §6:3).
+
+        Bound to the work's ``sight`` (ADR-0383 §7:5, §7:7).
+        """
+        pinned = await self._blocks.pin(person, memory_id, act=act, sight=sight)
         if pinned.refused is PinRefusal.NOT_CURRENT:
             return _not_done(_NOT_CURRENT, "not_current")
         if pinned.refused is PinRefusal.OVER_BUDGET:
@@ -508,14 +532,15 @@ class PersonModelCalls:
             return _done(_ALREADY_PINNED)
         return _done(_PINNED)
 
-    async def _unpin(self, person: str, memory_id: str) -> ToolResult | NotDone:
+    async def _unpin(self, person: str, memory_id: str, sight: Sight) -> ToolResult | NotDone:
         """Unpin through the person block's assembly, which finds every pin showing it (§4:7).
 
         Where more than one pin shows it and one cannot be removed after another was, the
         call is not done, since a pin still shows the memory, and its reason says that
-        some were removed; an unpin is safe to repeat, so asking again finishes it.
+        some were removed; an unpin is safe to repeat, so asking again finishes it. Bound
+        to the work's ``sight`` (ADR-0383 §7:5, §7:7).
         """
-        unpinned = await self._blocks.unpin(person, memory_id)
+        unpinned = await self._blocks.unpin(person, memory_id, sight=sight)
         if unpinned.unknown_person:
             return _not_done(_UNKNOWN_PERSON, "unknown_person")
         if unpinned.removed < unpinned.showing:

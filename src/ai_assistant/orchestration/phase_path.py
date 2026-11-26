@@ -425,7 +425,6 @@ from ai_assistant.orchestration.message_tools import (
 )
 from ai_assistant.orchestration.outside_content import joined_parties, rests_on_outside_content
 from ai_assistant.orchestration.permission_check import CheckSubject, place_connection
-from ai_assistant.orchestration.person_block import still_held
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
     PERSON_MODEL_CAPABILITIES,
@@ -540,6 +539,7 @@ if TYPE_CHECKING:
         RequestedCall,
         ScheduledTask,
         SearchOutcome,
+        Sight,
         StoryNote,
         StoryStanding,
         StorySummaryState,
@@ -3701,7 +3701,7 @@ def _unfinished(working: PhaseWorking, state: ActivationState | None) -> bool:
 
 
 async def place_name(
-    blocks: PersonBlocks | None, facts: WorkFacts | None, *, stage: str
+    blocks: PersonBlocks | None, facts: WorkFacts | None, *, sight: Sight, stage: str
 ) -> str | None:
     """The name alone of the person whose place a work that is no person's is at.
 
@@ -3717,9 +3717,14 @@ async def place_name(
     read, a person it does not hold or a name not set gives ``None``, and ADR-0353 §4:1's
     words stand.
 
+    **Bound to the work's sight** (ADR-0383 §7:7): the read is of the person-model store
+    bound to ``sight``, so a person whose domain the sight does not see is one the store
+    does not hold, and gives ``None`` as one never written.
+
     Args:
         blocks: The person blocks, whose store is read; ``None`` where none is wired.
         facts: The work's facts as they stand; ``None`` where none were recorded.
+        sight: The sight the work carries, which binds the read.
         stage: The stage asking, named in the log entry of a read that failed.
 
     Returns:
@@ -3731,7 +3736,7 @@ async def place_name(
     if person_id is None or not served(person_id):
         return None
     try:
-        model = await blocks.store.read(person_id)
+        model = await blocks.people(sight).read(person_id)
     except PersonModelStoreError:
         _log.warning("place_name_unread", stage=stage)
         return None
@@ -4885,7 +4890,9 @@ class PhasePath:
             # ADR-0375 §6:3: in a work that is no person's, the name alone of the person
             # whose place it is.
             place_name=(
-                await place_name(self._person_blocks, state.work_facts, stage="planning")
+                await place_name(
+                    self._person_blocks, state.work_facts, sight=work_sight(), stage="planning"
+                )
                 if state is not None and no_persons
                 else None
             ),
@@ -5008,7 +5015,8 @@ class PhasePath:
         reaches, each memory once (§4:2), under the slot's rules: none resting on outside
         content, and the pass's audience applied (ADR-0338 §6:4-§6:5); those the slot
         would show are the oldest pins' within its budget (§6:1-§6:2). ``None`` for an
-        activation the block does not reach, or a store that could not be read.
+        activation the block does not reach, or a store that could not be read. Every
+        read is of the stores bound to the work's sight (ADR-0383 §7:7).
         """
         blocks = self._person_blocks
         if blocks is None or state is None or state.person_block is None:
@@ -5016,11 +5024,14 @@ class PhasePath:
         person_id = persons_work(state.work_facts, state.held_senders)
         if person_id is None:
             return None
+        sight = work_sight()
         try:
-            model = await blocks.store.read(person_id)
+            model = await blocks.people(sight).read(person_id)
             if model is None:
                 return None
-            reached = await blocks.current_ends(pin.memory_id for pin in model.standing_pins)
+            reached = await blocks.current_ends(
+                (pin.memory_id for pin in model.standing_pins), sight=sight
+            )
         except PersonModelStoreError, MemoryStoreError:
             _log.warning("planning_person_unread", stage="planning")
             return None
@@ -5199,7 +5210,9 @@ class PhasePath:
             return ()
         shown: list[PeerShown] = []
         for activation_id in dict.fromkeys((*state.merged, *working.waited)):
-            view = await matters.peer(activation_id, owner_records=working.owner_records)
+            view = await matters.peer(
+                activation_id, owner_records=working.owner_records, sight=work_sight()
+            )
             running = matters.state_of(activation_id)
             shown.append(
                 PeerShown(
@@ -5247,9 +5260,11 @@ class PhasePath:
         dropped later.
         """
         state = active_state()
-        if state is None or state.person_block is None:
+        blocks = self._person_blocks
+        if state is None or state.person_block is None or blocks is None:
             return None
-        state.person_block = await still_held(state.person_block, self._memory)
+        # ADR-0383 §7:7: through the memory store bound to the work's sight.
+        state.person_block = await blocks.still_held(state.person_block, sight=work_sight())
         state.gave_person_memories(state.person_block.memories)
         working.supplied.obtained(state.person_given)
         return state.person_block
@@ -6224,6 +6239,9 @@ class PhasePath:
             with self._look_ups.scope(
                 audience=given.supply,
                 owner_records=working.owner_records,
+                # ADR-0383 §6:6, §7:7: each look-up reads by the work's sight as it then
+                # stands, so a join that narrows it in the round narrows the next read.
+                sight=work_sight,
                 older=working.older,
                 # ADR-0368 §8:2: a connections search finds only what the work could use.
                 shows=None if working.could_show is None else working.could_show.shows,

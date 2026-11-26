@@ -10,8 +10,9 @@ are not done with the reason (§8:7); a pending suggestion is accepted in the sa
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Self, cast
 
 import pytest
 from test_activation_state import _admitted
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         PersonModel,
         PersonModelWrite,
+        Sight,
         ToolDefinition,
         ToolResult,
     )
@@ -440,7 +442,15 @@ class _Wrapped:
         self.store = FakePersonModelStore(now=lambda: NOW)
 
     def __getattr__(self, name: str) -> Any:
+        if name == "store":  # not yet set, as on a copy being made
+            raise AttributeError(name)
         return getattr(self.store, name)
+
+    def bound(self, sight: Sight) -> Self:
+        """This wrapper over the fake bound to ``sight`` (ADR-0383 §7:7), its overrides kept."""
+        view = copy.copy(self)
+        view.store = self.store.bound(sight)
+        return view
 
 
 class _Yielding(_Wrapped):

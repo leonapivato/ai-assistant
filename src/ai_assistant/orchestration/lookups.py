@@ -77,6 +77,15 @@ pass's audience, which a call does not carry, so the phases' glue opens a
 :meth:`LookUps.scope` around acting for the round. A look-up run outside one reads
 nothing and is not done.
 
+**Through the work's sight** (ADR-0383 §7:7, §9:1). The scope also carries how to read
+the sight the pass's work carries, which no look-up makes (§9:2): each read asks it
+afresh, so a join that narrows the sight within the round narrows the next read (§6:6).
+The memory search, the candidate's lookup, the episode look-ups and the connections search
+read the stores the composition root's
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to that sight, and
+nothing else: what each finds is what the sight sees, and in the counting build each read
+answers as today and writes its count (§11:1).
+
 **A candidate's lookup** (ADR-0329 §4:1-§4:2). Where ``remember`` records a candidate,
 its runner asks :meth:`LookUps.similar` for the memories similar to the fact: one search
 by relevance alone, no band searched on its own, under the same scope and the same
@@ -147,8 +156,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
     from ai_assistant.core.protocols import ConversationStore, MemoryStore
-    from ai_assistant.core.types import FrozenJson, ToolCall
+    from ai_assistant.core.types import FrozenJson, Sight, ToolCall
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.episode_lookups import EpisodeLookUpReads, OlderSource
     from ai_assistant.orchestration.planning import PlanningStory
@@ -548,13 +558,18 @@ class ConnectionSearch:
     conversation store's existing reads alone: its recent conversations, then each one's
     recent transcript. Best first, by how many of the query's words it holds, the more
     recent first among equals, a page at a time. It shows no text it matched against.
+
+    Every read is of the conversation store bound to the sight the search is handed
+    (ADR-0383 §7:7, ADR-0387 §4:3): a conversation, and a transcript's message, its sight
+    does not see is one the store does not hold.
     """
 
-    def __init__(self, *, conversations: ConversationStore, scan: int, page_size: int) -> None:
-        """Wire the search to the conversation store.
+    def __init__(self, *, stores: BoundStores, scan: int, page_size: int) -> None:
+        """Wire the search to the holder that binds the conversation store for a pass.
 
         Args:
-            conversations: The chat space, whose conversations are places.
+            stores: The holder, whose conversation store is the chat space, whose
+                conversations are places; asked for it bound to each search's sight.
             scan: How many conversations, or a transcript's entries, one read of the
                 store takes; a search reads them all, that many at a time.
             page_size: How many connections one page shows.
@@ -565,18 +580,25 @@ class ConnectionSearch:
         if scan < 1 or page_size < 1:
             msg = "a connections search reads one conversation and shows one at least"
             raise ValueError(msg)
-        self._conversations = conversations
+        self._stores = stores
         self._scan = scan
         self._page_size = page_size
 
     async def search(
-        self, query: str, page: int, *, shows: Callable[[str], bool] | None = None
+        self,
+        query: str,
+        page: int,
+        *,
+        sight: Sight,
+        shows: Callable[[str], bool] | None = None,
     ) -> ConnectionsFound:
         """One page of the conversations ``query`` matches, best first.
 
         Args:
             query: What to match.
             page: Which page, the first 1.
+            sight: The sight the work carries, which every read of the search is bound
+                by (ADR-0383 §7:7).
             shows: Whether a place may be found at all, by its place: a work is found
                 only connections its authority could use (ADR-0368 §8:2), and one it may
                 not be shown is passed over before its transcript is read. ``None`` for
@@ -592,11 +614,17 @@ class ConnectionSearch:
         kind = CONNECTION_KINDS["conversation"]
         scored: list[tuple[int, int, ConnectionShown]] = []
         order = 0
-        async for conversation in self._every_conversation():
+        conversations = self._stores.conversations(sight)
+        async for conversation in _every_conversation(conversations, self._scan):
             place = place_of(conversation_channel(conversation))
             if shows is not None and not shows(place):
                 continue
-            texts = [kind.is_a, kind.group or "", kind.can, *await self._texts(conversation)]
+            texts = [
+                kind.is_a,
+                kind.group or "",
+                kind.can,
+                *await _texts(conversations, conversation, self._scan),
+            ]
             held = " ".join(texts).casefold()
             score = sum(1 for word in words if word in held)
             if score:
@@ -609,33 +637,35 @@ class ConnectionSearch:
             page=page, connections=shown, more=len(scored) > start + self._page_size
         )
 
-    async def _every_conversation(self) -> AsyncIterator[str]:
-        """Every conversation's id, most recent first, ``scan`` of them a read."""
-        offset = 0
-        while True:
-            batch = await self._conversations.recent(limit=self._scan, offset=offset)
-            for one in batch:
-                yield one.id
-            if len(batch) < self._scan:
-                return
-            offset += len(batch)
 
-    async def _texts(self, conversation_id: str) -> list[str]:
-        """Every message's text in one conversation's transcript, ``scan`` of them a read."""
-        texts: list[str] = []
-        before: int | None = None
-        while True:
-            page = await self._conversations.transcript(
-                conversation_id, before=before, limit=self._scan
-            )
-            if page is None or not page.entries:
-                return texts
-            texts.extend(
-                entry.text for entry in page.entries if isinstance(entry, TranscriptMessage)
-            )
-            if len(page.entries) < self._scan:
-                return texts
-            before = page.entries[0].position
+async def _every_conversation(
+    conversations: Bound[ConversationStore], scan: int
+) -> AsyncIterator[str]:
+    """Every conversation's id the bound store holds, most recent first, ``scan`` a read."""
+    offset = 0
+    while True:
+        batch = await conversations.recent(limit=scan, offset=offset)
+        for one in batch:
+            yield one.id
+        if len(batch) < scan:
+            return
+        offset += len(batch)
+
+
+async def _texts(
+    conversations: Bound[ConversationStore], conversation_id: str, scan: int
+) -> list[str]:
+    """Every message's text in one conversation's transcript, ``scan`` of them a read."""
+    texts: list[str] = []
+    before: int | None = None
+    while True:
+        page = await conversations.transcript(conversation_id, before=before, limit=scan)
+        if page is None or not page.entries:
+            return texts
+        texts.extend(entry.text for entry in page.entries if isinstance(entry, TranscriptMessage))
+        if len(page.entries) < scan:
+            return texts
+        before = page.entries[0].position
 
 
 def searched_ids(output: object) -> tuple[str, ...]:
@@ -685,6 +715,9 @@ class LookUpScope:
     Attributes:
         audience: The pass's audience posture, which the memory search and the story
             views are read under (ADR-0282 §2:8).
+        sight: The sight the pass's work carries, read afresh at each read, which binds
+            every store a look-up reads (ADR-0383 §6:6, §7:7); the scope holds how to
+            read it and never makes one (§9:2).
         owner_records: Whether a record placed for the owner alone may be shown on this
             pass, which decides a story view's summary and notes (ADR-0307 §6:4).
         views: The story views the round's story reads read, by the deciding decision's
@@ -698,6 +731,7 @@ class LookUpScope:
 
     audience: TurnSupply
     owner_records: bool
+    sight: Callable[[], Sight]
     views: dict[str, PlanningStory] = field(default_factory=dict)
     older: OlderSource | None = None
     found: dict[str, EpisodeLookedUp] = field(default_factory=dict)
@@ -722,7 +756,7 @@ class LookUps:
     def __init__(
         self,
         *,
-        memory: MemoryStore,
+        stores: BoundStores,
         views: StoryViews | None,
         search_limit: int,
         episodes: EpisodeLookUpReads | None = None,
@@ -731,7 +765,8 @@ class LookUps:
         """Wire the runner to the stores it reads.
 
         Args:
-            memory: The memory store a memory search searches.
+            stores: The holder that binds stores for a pass, whose memory store a memory
+                search and a candidate's lookup search, bound to the scope's sight.
             views: The story views a story read reads, or ``None`` where no story store
                 is wired, which makes every story read not done.
             search_limit: The most records one memory search keeps (#2589's number).
@@ -746,7 +781,7 @@ class LookUps:
         if search_limit < 1:
             msg = "a memory search keeps at least one record"
             raise ValueError(msg)
-        self._memory = memory
+        self._stores = stores
         self._views = views
         self._search_limit = search_limit
         self._episodes = episodes
@@ -758,6 +793,7 @@ class LookUps:
         *,
         audience: TurnSupply,
         owner_records: bool,
+        sight: Callable[[], Sight],
         older: OlderSource | None = None,
         shows: Callable[[str], bool] | None = None,
     ) -> Iterator[LookUpScope]:
@@ -766,6 +802,8 @@ class LookUps:
         Args:
             audience: The pass's audience posture.
             owner_records: Whether a record placed for the owner alone may be shown.
+            sight: Reads the sight the pass's work carries, at each read (ADR-0383
+                §6:6, §7:7).
             older: Where the place window came from, which the older history reads.
             shows: Whether a connections search may find a place; ``None`` for any.
 
@@ -774,7 +812,7 @@ class LookUps:
             ``found`` holds what the episode look-ups read.
         """
         opened = LookUpScope(
-            audience=audience, owner_records=owner_records, older=older, shows=shows
+            audience=audience, owner_records=owner_records, sight=sight, older=older, shows=shows
         )
         token = _SCOPE.set(opened)
         try:
@@ -827,7 +865,7 @@ class LookUps:
             _log.warning("look_up_not_done", stage="acting", reason="no_scope")
             return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
         try:
-            admitted = await self._banded(query, scope.audience)
+            admitted = await self._banded(query, scope.audience, self._stores.memory(scope.sight()))
         except MemoryStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="search_failed")
             return _not_done(ToolFailureKind.UNAVAILABLE, "memory could not be searched")
@@ -837,7 +875,9 @@ class LookUps:
         output: dict[str, FrozenJson] = {RECORDS_KEY: list(shown)}
         return HeldByIds(output=output, outside=outside)
 
-    async def _banded(self, query: str, audience: TurnSupply) -> list[Memory]:
+    async def _banded(
+        self, query: str, audience: TurnSupply, memory: Bound[MemoryStore]
+    ) -> list[Memory]:
         """The facts kept: each band searched on its own, kept in precedence order.
 
         ADR-0072 §5: a band-neutral top-k lets a flood of derived beliefs displace an
@@ -845,7 +885,7 @@ class LookUps:
         then ``ATTESTED``, then ``DERIVED``, and the limit is filled in that order, as
         recall's band searches fill theirs (ADR-0281 §3:2). ADR-0282 §2:8: a record is
         kept only once the audience predicate has admitted it; each fetch applies it
-        again.
+        again. ``memory`` is the store bound to the work's sight (ADR-0383 §7:7).
 
         Raises:
             MemoryStoreError: If the store cannot be searched.
@@ -854,7 +894,7 @@ class LookUps:
         for band in _BANDS:
             if len(kept) >= self._search_limit:
                 break
-            found = await self._memory.search(
+            found = await memory.search(
                 query, limit=self._search_limit, kinds=(MemoryKind.MEMORY,), bands=(band,)
             )
             for record in admitted_to_understanding(audience, found.records):
@@ -870,7 +910,8 @@ class LookUps:
         """The memories most similar to ``fact``, for a candidate's lookup (ADR-0329 §4).
 
         One search by relevance alone (ADR-0328 §7:12), with no band searched on its own,
-        under the round's scope: of what it returns, the memories the audience admits
+        under the round's scope, of the memory store bound to the work's sight (ADR-0383
+        §7:7): of what it returns, the memories the audience admits
         (ADR-0282 §2:8) that do not rest on outside content (ADR-0329 §4:2), best first.
         They are at most ``limit``, and fewer where the search's best include records it
         does not keep.
@@ -888,7 +929,8 @@ class LookUps:
             _log.warning("look_up_not_done", stage="acting", reason="no_scope")
             return None
         try:
-            found = await self._memory.search(fact, limit=limit, kinds=(MemoryKind.MEMORY,))
+            memory = self._stores.memory(scope.sight())
+            found = await memory.search(fact, limit=limit, kinds=(MemoryKind.MEMORY,))
         except MemoryStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="search_failed")
             return None
@@ -920,16 +962,25 @@ class LookUps:
             return _not_done(ToolFailureKind.INTERNAL, _NOT_IN_SCOPE)
         reads = self._episodes
         try:
+            sight = scope.sight()
             if capability == SEARCH_EPISODES_CAPABILITY:
                 found: EpisodeLookedUp = await reads.search(
-                    named, page, audience=scope.audience, owner_records=scope.owner_records
+                    named,
+                    page,
+                    sight=sight,
+                    audience=scope.audience,
+                    owner_records=scope.owner_records,
                 )
             elif capability == READ_EPISODE_CAPABILITY:
                 found = await reads.full(
-                    named, page, audience=scope.audience, owner_records=scope.owner_records
+                    named,
+                    page,
+                    sight=sight,
+                    audience=scope.audience,
+                    owner_records=scope.owner_records,
                 )
             else:
-                found = await reads.older(scope.older, page, audience=scope.audience)
+                found = await reads.older(scope.older, page, sight=sight, audience=scope.audience)
         except MemoryStoreError, StoryStoreError, ConversationStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="unreadable")
             return _not_done(ToolFailureKind.UNAVAILABLE, "the records could not be read")
@@ -963,7 +1014,9 @@ class LookUps:
             found = ConnectionsFound(page=page)
         else:
             try:
-                found = await self._connections.search(query, page, shows=scope.shows)
+                found = await self._connections.search(
+                    query, page, sight=scope.sight(), shows=scope.shows
+                )
             except ConversationStoreError:
                 _log.warning("look_up_not_done", stage="acting", reason="unreadable")
                 return _not_done(ToolFailureKind.UNAVAILABLE, "the records could not be read")

@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from exchange_support import section, tags
-from understanding_support import Rendered
+from understanding_support import OWNERS_SIGHT, Rendered
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -620,7 +620,7 @@ async def _people(**fields: str) -> FakePersonModelStore:
 
 async def _read(people: FakePersonModelStore, whom: str | None) -> str | None:
     blocks = PersonBlocks(store=people, memory=FakeMemoryStore())
-    return await place_name(blocks, _facts(whom), stage="understanding")
+    return await place_name(blocks, _facts(whom), sight=OWNERS_SIGHT, stage="understanding")
 
 
 async def test_the_read_keeps_the_name_alone() -> None:
@@ -654,7 +654,10 @@ async def test_the_read_gives_none_where_no_name_may_be_shown(
 
 async def test_no_read_is_made_where_no_person_block_store_is_wired() -> None:
     """The read is the person-model store's; with none wired it reads nothing."""
-    assert await place_name(None, _facts(OWNER_PERSON_ID), stage="planning") is None
+    assert (
+        await place_name(None, _facts(OWNER_PERSON_ID), sight=OWNERS_SIGHT, stage="planning")
+        is None
+    )
 
 
 def test_only_a_person_the_system_serves_is_named() -> None:

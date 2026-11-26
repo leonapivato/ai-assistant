@@ -29,7 +29,7 @@ from structured_support import structured
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from test_planning import _recorded_trigger
-from understanding_support import TextAsStructured, recall_stage, windows_stage
+from understanding_support import TextAsStructured, bound_stores, recall_stage, windows_stage
 
 from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
@@ -383,7 +383,7 @@ class _Hub:
             searcher=self.searcher,
             search_query="query",
         )
-        similar = LookUps(memory=harness.memory, views=None, search_limit=5)
+        similar = LookUps(stores=bound_stores(harness.memory), views=None, search_limit=5)
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=self.planner,

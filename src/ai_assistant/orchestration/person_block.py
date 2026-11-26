@@ -42,6 +42,16 @@ store no longer holds (§7:10), which is one the history read no longer returns
 **A store that cannot be read gives no block**, and the activation goes on without one:
 the fault is logged under a fixed event name with a code-owned reason, and never a
 field's value or a memory's words (ADR-0275 §8).
+
+**A work's reads and writes go through its sight** (ADR-0383 §7:5, §7:7, §9:1). The
+block's assembly, the check before each planning round, a pin or an unpin a work's call
+makes, and the person-model store a work reads or writes otherwise, are each of the
+stores the composition root's :class:`~ai_assistant.orchestration.bound_stores.BoundStores`
+binds to the sight the work carries, handed to each call and never made here (§9:2): a
+person, or a memory, its sight does not see is one the store does not hold (§7:2, §8:2).
+The owner's panel (ADR-0385, milestone 22's B10) still pins, unpins and walks chains over
+the unbound stores, a call that names no sight, and :attr:`PersonBlocks.store` still
+hands the unbound person-model store to the zone pickers (B8d, B9).
 """
 
 from __future__ import annotations
@@ -62,6 +72,7 @@ from ai_assistant.core.types import (
     RecordHome,
     SuggestionKind,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 
 if TYPE_CHECKING:
@@ -78,8 +89,10 @@ if TYPE_CHECKING:
         Pin,
         Profile,
         ProfileField,
+        Sight,
         StyleMark,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = [
@@ -255,7 +268,15 @@ class Unpinned:
 
 
 class PersonBlocks:
-    """Assemble an activation's person block, with no model call (ADR-0338 §7:1)."""
+    """Assemble an activation's person block, with no model call (ADR-0338 §7:1).
+
+    **Bound for a work, unbound for the owner's panel** (ADR-0383 §7:7, §9:1). Every call
+    that takes a ``sight`` reads and writes the stores the holder binds to it: the
+    block's assembly, :meth:`still_held`, :meth:`people`, and a pin, an unpin or a walk a
+    work makes. The same calls with no sight, and :attr:`store` and :attr:`memory`, are
+    the unbound stores the owner's panel (milestone 22's B10) and the zone pickers (B8d,
+    B9) still read, until their lanes bind them.
+    """
 
     def __init__(
         self,
@@ -264,6 +285,7 @@ class PersonBlocks:
         memory: MemoryStore,
         budget_chars: int = KEPT_IN_MIND_CHARS,
         suggestions: int = PLANNING_SUGGESTIONS,
+        stores: BoundStores | None = None,
     ) -> None:
         """Wire the assembly to the two stores it reads and its two bounds.
 
@@ -272,6 +294,9 @@ class PersonBlocks:
             memory: The memory store the slot's memories are read from.
             budget_chars: ``KEPT_IN_MIND_CHARS``, §6:1's budget.
             suggestions: ``PLANNING_SUGGESTIONS``, §7:3's count.
+            stores: The holder that binds stores for a pass, over these same two stores,
+                which a work's calls read through (ADR-0383 §9:1); ``None`` builds one
+                over ``store`` and ``memory``, which binds them alike.
 
         Raises:
             ValueError: If ``budget_chars`` is below 1 or ``suggestions`` below 0.
@@ -284,26 +309,47 @@ class PersonBlocks:
             raise ValueError(msg)
         self._store = store
         self._memory = memory
+        self._stores = stores if stores is not None else BoundStores(memory=memory, people=store)
         self._budget = budget_chars
         self._suggestions = suggestions
         self._pinning: dict[str, asyncio.Lock] = {}
 
     @property
     def store(self) -> PersonModelStore:
-        """The person-model store the block is read from, which planning's calls write."""
+        """The person-model store, unbound: the owner's panel's and the zone pickers'.
+
+        A work reads and writes it through :meth:`people` (ADR-0383 §7:5, §7:7).
+        """
         return self._store
 
     @property
     def memory(self) -> MemoryStore:
-        """The memory store the slot's memories are read from."""
+        """The memory store the slot's memories are read from, unbound: the panel's."""
         return self._memory
+
+    def people(self, sight: Sight) -> Bound[PersonModelStore]:
+        """The person-model store bound to ``sight``, a work's (ADR-0383 §7:5, §7:7).
+
+        What a work reads of the person model, and the field a work's ``set_profile``
+        writes, through the holder: a person its sight does not see is one the store
+        does not hold, read ``None`` and written ``unknown_person``.
+        """
+        return self._stores.people(sight)
+
+    def _stores_for(self, sight: Sight | None) -> tuple[PersonModelStore, MemoryStore]:
+        """The two stores bound to a work's ``sight``; the unbound ones for the owner's act."""
+        if sight is None:
+            return self._store, self._memory
+        return self._stores.people(sight), self._stores.memory(sight)
 
     @property
     def budget_chars(self) -> int:
         """The kept-in-mind slot's budget, which a pin is checked against (ADR-0338 §6:3)."""
         return self._budget
 
-    async def pin(self, person_id: str, memory_id: str, *, act: PersonModelAct) -> Pinned:
+    async def pin(
+        self, person_id: str, memory_id: str, *, act: PersonModelAct, sight: Sight | None = None
+    ) -> Pinned:
         """Pin a current memory where the pins' wordings stay within the budget (§4:2, §6:3).
 
         The one place a pin is checked and written, for every caller: planning's ``pin``
@@ -331,6 +377,11 @@ class PersonBlocks:
             person_id: Whose pin.
             memory_id: The memory, by id.
             act: Who pinned it, and how: on the panel, or by a yes.
+            sight: The sight of the work whose call pins it, which binds every read
+                and the write (ADR-0383 §7:5, §7:7): a memory it does not see is one
+                not held, refused ``not_current``, and a person it does not see is
+                ``unknown_person``. ``None`` for the owner's own act on the panel,
+                which reads unbound until milestone 22's B10 binds it.
 
         Returns:
             The store's write, or why the pin was refused before any write.
@@ -340,25 +391,28 @@ class PersonBlocks:
             MemoryStoreError: If the memory store cannot be read.
             ValueError: If ``memory_id`` is blank.
         """
+        people, memory = self._stores_for(sight)
         async with self._pinning.setdefault(person_id, asyncio.Lock()):
-            live = await self._memory.get_many([memory_id])
+            live = await memory.get_many([memory_id])
             record = live.get(memory_id)
             if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
                 return Pinned(refused=PinRefusal.NOT_CURRENT)
-            model = await self._store.read(person_id)
+            model = await people.read(person_id)
             if model is None:
                 return Pinned(refused=PinRefusal.UNKNOWN_PERSON)
             if record.home != RecordHome.person(person_id):
                 _log.info("person_pin_refused", stage="person_block", reason="another_home")
                 return Pinned(refused=PinRefusal.NOT_CURRENT)
-            ends = await self._reached(pin.memory_id for pin in model.standing_pins)
+            ends = await self._reached(memory, (pin.memory_id for pin in model.standing_pins))
             shown = {end.id: end for end in ends.values() if not end.rests_on_outside_content}
             shown.setdefault(record.id, record)
             if sum(len(one.content) for one in shown.values()) > self._budget:
                 return Pinned(refused=PinRefusal.OVER_BUDGET)
-            return Pinned(write=await self._store.add_pin(person_id, memory_id, act=act))
+            return Pinned(write=await people.add_pin(person_id, memory_id, act=act))
 
-    async def unpin(self, person_id: str, memory_id: str) -> Unpinned:
+    async def unpin(
+        self, person_id: str, memory_id: str, *, sight: Sight | None = None
+    ) -> Unpinned:
         """Remove every standing pin that shows the memory, erasing nothing (§4:7).
 
         The one place an unpin is resolved and written, for every caller. A memory a pin
@@ -370,6 +424,9 @@ class PersonBlocks:
         Args:
             person_id: Whose pins.
             memory_id: The memory, by id.
+            sight: The sight of the work whose call unpins it, which binds every read
+                and write (ADR-0383 §7:5, §7:7); ``None`` for the owner's own act on the
+                panel, unbound until milestone 22's B10.
 
         Returns:
             How many pins showed the memory, how many were removed, and the store's
@@ -380,12 +437,13 @@ class PersonBlocks:
                 before any pin is removed.
             MemoryStoreError: If the memory store cannot be read.
         """
+        people, memory = self._stores_for(sight)
         async with self._pinning.setdefault(person_id, asyncio.Lock()):
-            model = await self._store.read(person_id)
+            model = await people.read(person_id)
             if model is None:
                 return Unpinned(unknown_person=True)
             standing = model.standing_pins
-            ends = await self._reached(pin.memory_id for pin in standing)
+            ends = await self._reached(memory, (pin.memory_id for pin in standing))
             showing = [
                 pin
                 for pin in standing
@@ -394,7 +452,7 @@ class PersonBlocks:
             ]
             for removed, pin in enumerate(showing):
                 try:
-                    written = await self._store.remove_pin(person_id, pin.id)
+                    written = await people.remove_pin(person_id, pin.id)
                 except PersonModelStoreError:
                     if not removed:
                         raise
@@ -403,7 +461,9 @@ class PersonBlocks:
                     return Unpinned(showing=len(showing), removed=removed, refused=written)
             return Unpinned(showing=len(showing), removed=len(showing))
 
-    async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
+    async def current_ends(
+        self, memory_ids: Iterable[str], *, sight: Sight | None = None
+    ) -> dict[str, Memory]:
         """Each memory's chain's current end, where it has one (ADR-0338 §4:8).
 
         What a pin or a mark on each of ``memory_ids`` shows, walked as the block walks
@@ -413,6 +473,8 @@ class PersonBlocks:
 
         Args:
             memory_ids: The memories pins or marks were made on.
+            sight: The sight of the work that walks them, which binds every read
+                (ADR-0383 §7:7); ``None`` for the owner's panel, unbound until B10.
 
         Returns:
             Each one's current end, by the memory it starts from.
@@ -420,9 +482,23 @@ class PersonBlocks:
         Raises:
             MemoryStoreError: If the memory store cannot be read.
         """
-        return await self._reached(memory_ids)
+        return await self._reached(self._stores_for(sight)[1], memory_ids)
 
-    async def assemble(self, person_id: str | None, *, supply: TurnSupply) -> PersonBlock | None:
+    async def still_held(self, block: PersonBlock, *, sight: Sight) -> PersonBlock:
+        """:func:`still_held`, over the memory store bound to the work's ``sight`` (§7:10).
+
+        Args:
+            block: The work's block, as it stood before this round.
+            sight: The sight the work carries (ADR-0383 §7:7).
+
+        Returns:
+            The block, its slot and its pin suggestions those still held.
+        """
+        return await still_held(block, self._stores.memory(sight))
+
+    async def assemble(
+        self, person_id: str | None, *, supply: TurnSupply, sight: Sight
+    ) -> PersonBlock | None:
         """The block for ``person_id``, or ``None`` where there is none to give.
 
         Args:
@@ -432,6 +508,9 @@ class PersonBlocks:
                 (§2:3).
             supply: The pass's audience posture, whose predicate the slot's memories
                 and a pin suggestion's pass (§6:5).
+            sight: The sight the work carries, which binds every read the assembly
+                makes (ADR-0383 §7:7): a person it does not see is one the store does
+                not hold, and a memory it does not see is shown nowhere (§8:2).
 
         Returns:
             The block; ``None`` for no person, a person the store does not hold, or a
@@ -439,12 +518,13 @@ class PersonBlocks:
         """
         if person_id is None:
             return None
+        people, memory = self._stores_for(sight)
         try:
-            model = await self._store.read(person_id)
+            model = await people.read(person_id)
             if model is None:
                 _log.warning("person_block_unread", stage="person_block", reason="no_person")
                 return None
-            block = await self._assembled(model, supply)
+            block = await self._assembled(model, supply, memory)
         except PersonModelStoreError:
             _log.warning("person_block_unread", stage="person_block", reason="store_fault")
             return None
@@ -461,7 +541,9 @@ class PersonBlocks:
         )
         return block
 
-    async def _assembled(self, model: PersonModel, supply: TurnSupply) -> PersonBlock:
+    async def _assembled(
+        self, model: PersonModel, supply: TurnSupply, store: Bound[MemoryStore]
+    ) -> PersonBlock:
         # The store reads each in the order made, so its position breaks a tie in time:
         # oldest pin first, and the most recent mark and suggestion first (§6:2, §7:3).
         pins = [pin for _, pin in sorted(enumerate(model.standing_pins), key=_made(_pinned))]
@@ -479,9 +561,9 @@ class PersonBlocks:
             if one.proposed.kind is SuggestionKind.PIN and one.proposed.memory_id is not None
         ]
         reached = await self._reached(
-            [*(pin.memory_id for pin in pins), *(mark.memory_id for mark in marks)]
+            store, [*(pin.memory_id for pin in pins), *(mark.memory_id for mark in marks)]
         )
-        held = await self._memory.get_many(list(dict.fromkeys(suggested))) if suggested else {}
+        held = await store.get_many(list(dict.fromkeys(suggested))) if suggested else {}
         candidates: list[KeptInMind] = []
         seen: set[str] = set()
         for start, pinned in [
@@ -551,7 +633,8 @@ class PersonBlocks:
             )
         return tuple(shown)
 
-    async def _reached(self, starts: Iterable[str]) -> dict[str, Memory]:
+    @staticmethod
+    async def _reached(memory: MemoryStore, starts: Iterable[str]) -> dict[str, Memory]:
         """Each start's chain's current end, where it has one (ADR-0342 §5:2-§5:3).
 
         A pin or mark on a memory that is ended or wrong and names a successor shows the
@@ -572,13 +655,14 @@ class PersonBlocks:
         A live read returning a memory whose status is not current, a state the writer
         never builds (a retired memory's window is closed, ADR-0328 §3:4, §5:9), is
         taken as a miss, so even then no retired memory is shown as current (ADR-0342
-        §5:1).
+        §5:1). ``memory`` is the store bound to a work's sight, or the owner's panel's
+        unbound one (:meth:`PersonBlocks.current_ends`).
         """
         at = {start: start for start in dict.fromkeys(starts)}
         reached: dict[str, Memory] = {}
         visited: dict[str, set[str]] = {start: {start} for start in at}
         while at:
-            live = await self._memory.get_many(list(dict.fromkeys(at.values())))
+            live = await memory.get_many(list(dict.fromkeys(at.values())))
             missed: dict[str, str] = {}
             for start, memory_id in at.items():
                 record = live.get(memory_id)
@@ -588,7 +672,7 @@ class PersonBlocks:
                     missed[start] = memory_id
             if not missed:
                 break
-            history = await self._memory.get_history(list(dict.fromkeys(missed.values())))
+            history = await memory.get_history(list(dict.fromkeys(missed.values())))
             following: dict[str, str] = {}
             for start, memory_id in missed.items():
                 retired = history.get(memory_id)
@@ -633,7 +717,7 @@ def _successor(record: Memory) -> str | None:
     return None
 
 
-async def still_held(block: PersonBlock, memory: MemoryStore) -> PersonBlock:
+async def still_held(block: PersonBlock, memory: Bound[MemoryStore]) -> PersonBlock:
     """The block less every memory the memory store no longer holds (ADR-0338 §7:10).
 
     Read before each planning round, the first included, so a memory forgotten while
@@ -646,7 +730,8 @@ async def still_held(block: PersonBlock, memory: MemoryStore) -> PersonBlock:
 
     Args:
         block: The activation's block, as it stood before this round.
-        memory: The memory store.
+        memory: The memory store bound to the work's sight (ADR-0383 §7:7), which
+            :meth:`PersonBlocks.still_held` hands it.
 
     Returns:
         The block, its slot and its pin suggestions those still held.

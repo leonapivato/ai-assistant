@@ -14,6 +14,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from understanding_support import OWNERS_SIGHT
 
 from ai_assistant.core.errors import PersonModelOffError, PersonModelStoreError
 from ai_assistant.core.types import (
@@ -118,7 +119,7 @@ async def test_the_panels_slot_is_the_slot_the_models_are_given(budget: int) -> 
     await _scenario(world)
 
     view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID, limit=100, offset=0)
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert view is not None
     assert block is not None

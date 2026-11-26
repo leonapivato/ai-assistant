@@ -15,10 +15,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
+from test_activation_state import _admitted
 from test_planning import _episode
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import ChannelIdentity, Profile
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import NewsShown, PlanningWork
@@ -120,15 +122,20 @@ class _Blocks:
     ends: dict[str, Memory]
     budget_chars: int = 1600
 
-    @property
-    def store(self) -> Any:
+    def people(self, sight: object) -> Any:
+        """The person-model store bound to the work's sight (ADR-0383 §7:7)."""
+        del sight
+
         async def read(person_id: str) -> object:
             del person_id
             return SimpleNamespace(standing_pins=self.pins, profile=Profile(name="Leo"))
 
         return SimpleNamespace(read=read)
 
-    async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
+    async def current_ends(
+        self, memory_ids: Iterable[str], *, sight: object = None
+    ) -> dict[str, Memory]:
+        del sight
         return {one: self.ends[one] for one in memory_ids if one in self.ends}
 
 
@@ -156,9 +163,14 @@ async def test_a_pin_past_the_slots_budget_is_not_shown_and_still_reached() -> N
         held_senders=(OWNER_SENDER,),
     )
 
-    person = await path._person_now(
-        cast("Any", state), cast("Any", SimpleNamespace(supply=_SUPPLY))
-    )
+    # The reads are the running work's, by its sight (ADR-0383 §7:7).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        person = await path._person_now(
+            cast("Any", state), cast("Any", SimpleNamespace(supply=_SUPPLY))
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     assert person is not None
     assert person.pinned == ()

@@ -30,6 +30,14 @@ one still open is still running (§10:2). Its projection is the full view
 this look-up sets, §11:5), under the pass's owner-only placement (§10:5), and every record
 it names by reference is read again, as it is held now, the predicate applied (§10:6).
 
+**Through the work's sight** (ADR-0383 §7:7, §9:1). Each read is of a store the
+composition root's :class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to
+the sight the work carries, handed to each look-up and never made here (§9:2): the
+memory store's search, fetch and channel tail, the story store's matters, and the
+conversation store's transcript and what took each message in. A record its sight does
+not see is one the store does not hold (§7:2, §8:2): an episode it names is not kept, a
+matter is not named, and its chat's older messages are not shown (§7:9; ADR-0387 §5:1).
+
 **It logs nothing of what it reads** (ADR-0275 §8): its runner logs stage and
 code-owned reason only.
 """
@@ -76,9 +84,11 @@ if TYPE_CHECKING:
         ChannelIdentity,
         EpisodeProjection,
         MemoryRecord,
+        Sight,
         StorySummaryState,
         TranscriptMessage,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["EpisodeLookUpReads", "OlderSource"]
@@ -130,14 +140,15 @@ class OlderSource:
 
 
 class EpisodeLookUpReads:
-    """The episode look-ups' reads over the memory, story and conversation stores."""
+    """The episode look-ups' reads over the memory, story and conversation stores.
 
-    def __init__(  # noqa: PLR0913 — three stores and the composition root's five numbers
+    Each bound to the sight a look-up is handed, through the holder (ADR-0383 §7:7).
+    """
+
+    def __init__(  # noqa: PLR0913 — the holder and the composition root's five numbers
         self,
         *,
-        memory: MemoryStore,
-        stories: StoryStore | None,
-        conversations: ConversationStore | None,
+        stores: BoundStores,
         threshold: float,
         limit: int,
         search_page: int,
@@ -148,11 +159,10 @@ class EpisodeLookUpReads:
         """Wire the reads to their stores and the composition root's numbers.
 
         Args:
-            memory: The memory store episodes are searched in and read from.
-            stories: The story store the matters an episode belongs to are read from,
-                or ``None`` where none is wired, and then no matter is named.
-            conversations: The conversation store a conversation's older history is
-                read from, or ``None`` where none is wired.
+            stores: The holder that binds stores for a pass: the memory store episodes
+                are searched in and read from, the story store the matters an episode
+                belongs to are read from, and the conversation store a conversation's
+                older history is read from, each asked for bound to a look-up's sight.
             threshold: The recall threshold, set for the embedder (ADR-0281 §3).
             limit: The most episodes one search keeps (§7:1).
             search_page: How many of them one page shows (§6:6).
@@ -166,9 +176,7 @@ class EpisodeLookUpReads:
         if min(limit, search_page, history_page, full_page, excerpt_chars) < 1:
             msg = "the episode look-ups' limit, pages and excerpt bound are at least 1"
             raise ValueError(msg)
-        self._memory = memory
-        self._stories = stories
-        self._conversations = conversations
+        self._stores = stores
         self._threshold = threshold
         self._limit = limit
         self._search_page = search_page
@@ -179,9 +187,11 @@ class EpisodeLookUpReads:
     # --- §7: a search of past episodes ---
 
     async def search(
-        self, query: str, page: int, *, audience: TurnSupply, owner_records: bool
+        self, query: str, page: int, *, sight: Sight, audience: TurnSupply, owner_records: bool
     ) -> EpisodesFound:
         """One page of the past episodes found for ``query``, each with its matters.
+
+        Every read is bound to ``sight``, the work's (ADR-0383 §7:7).
 
         Raises:
             MemoryStoreError: If the store cannot be searched.
@@ -189,11 +199,13 @@ class EpisodeLookUpReads:
         """
         if isinstance(audience, UnboundedAudienceSupply):
             return EpisodesFound(page=page, unbounded=True)
+        memory = self._stores.memory(sight)
+        stories = self._stores.stories(sight)
         kept: dict[str, EpisodicMemory] = {}
         for band in _BANDS:
             if len(kept) >= self._limit:
                 break
-            found = await self._memory.search(
+            found = await memory.search(
                 query, limit=self._limit, kinds=(MemoryKind.EPISODIC,), bands=(band,)
             )
             for record in admitted_to_understanding(audience, found.records):
@@ -207,7 +219,7 @@ class EpisodeLookUpReads:
         shown = records[start : start + self._search_page]
         visibility = SummaryVisibility(owner_records=owner_records)
         episodes = [
-            EpisodeShown(record=record, matters=await self._matters(record, visibility))
+            EpisodeShown(record=record, matters=await _matters(stories, record, visibility))
             for record in shown
         ]
         return EpisodesFound(
@@ -226,36 +238,14 @@ class EpisodeLookUpReads:
         score = record.score
         return score is not None and score >= self._threshold
 
-    async def _matters(
-        self, record: EpisodicMemory, visibility: SummaryVisibility
-    ) -> tuple[MatterShown, ...]:
-        """The matters an episode belongs to, as recall reads them (ADR-0300 §7:1, §8:1).
-
-        Only for an episode whose stored id is its activation's episode; one merged into
-        another is passed over, and one the store no longer holds left out.
-
-        Raises:
-            StoryStoreError: If the story store cannot be read.
-        """
-        activation = activation_of(record)
-        if self._stories is None or activation is None or record.id != episode_address(activation):
-            return ()
-        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
-        matters: list[MatterShown] = []
-        for header in await self._stories.stories_of(member):
-            if header.merged_into is not None:
-                continue
-            state = await self._stories.current_summary(header.story_id)
-            if state is not None:
-                matters.append(_matter(state, visibility))
-        return tuple(matters)
-
     # --- §9: the origin's older history ---
 
     async def older(
-        self, source: OlderSource | None, page: int, *, audience: TurnSupply
+        self, source: OlderSource | None, page: int, *, sight: Sight, audience: TurnSupply
     ) -> OlderHistory:
         """One page of the origin's older history, newest page first.
+
+        Every read is bound to ``sight``, the work's (ADR-0383 §7:7, §7:9).
 
         Raises:
             ConversationStoreError: If the conversation store cannot be read.
@@ -263,14 +253,26 @@ class EpisodeLookUpReads:
         """
         if source is None:
             return OlderHistory(readable=False)
+        memory = self._stores.memory(sight)
         if source.conversation_id is not None:
-            if self._conversations is None:
-                return OlderHistory(readable=False)
-            return await self._medium(source, source.conversation_id, page)
+            return await self._medium(
+                source,
+                source.conversation_id,
+                page,
+                self._stores.conversations(sight),
+                memory,
+            )
         assert source.channel is not None  # noqa: S101 — the source's validator holds it
-        return await self._earlier_episodes(source, source.channel, page, audience)
+        return await self._earlier_episodes(source, source.channel, page, audience, memory)
 
-    async def _medium(self, source: OlderSource, conversation_id: str, page: int) -> OlderHistory:
+    async def _medium(
+        self,
+        source: OlderSource,
+        conversation_id: str,
+        page: int,
+        conversations: Bound[ConversationStore],
+        memory: Bound[MemoryStore],
+    ) -> OlderHistory:
         """A conversation's messages before the oldest its window showed (§9:2-§9:3).
 
         Read a page at a time below the oldest message the window showed, newest page
@@ -281,14 +283,13 @@ class EpisodeLookUpReads:
             ConversationStoreError: If the store cannot be read.
             MemoryStoreError: If the linked episodes cannot be read.
         """
-        assert self._conversations is not None  # noqa: S101 — checked by the caller
         if source.before is None:
             return OlderHistory(readable=True, page=page)
         cursor = source.before
         entries: Sequence[TranscriptMessage | DeletedMessage] = ()
         more = False
         for turn in range(page):
-            read = await self._conversations.transcript(
+            read = await conversations.transcript(
                 conversation_id, before=cursor, limit=self._history_page + 1
             )
             if read is None or not read.entries:
@@ -303,7 +304,7 @@ class EpisodeLookUpReads:
             for one in entries
             if not isinstance(one, DeletedMessage) and one.position not in source.shown
         ]
-        links = await self._conversations.taken_in(
+        links = await conversations.taken_in(
             conversation_id,
             positions=[one.position for one in messages if one.author is MessageAuthor.USER],
         )
@@ -311,7 +312,7 @@ class EpisodeLookUpReads:
         # ADR-0351 §5:7: a user's message whose episode marks its input relayed is
         # outside, read off that episode as it is held, whichever window shows it.
         linked = sorted({one.episode_id for one in items if one.episode_id is not None})
-        held = await self._memory.get_many(linked) if linked else {}
+        held = await memory.get_many(linked) if linked else {}
         return OlderHistory(
             readable=True,
             items=items,
@@ -321,7 +322,12 @@ class EpisodeLookUpReads:
         )
 
     async def _earlier_episodes(
-        self, source: OlderSource, channel: ChannelIdentity, page: int, audience: TurnSupply
+        self,
+        source: OlderSource,
+        channel: ChannelIdentity,
+        page: int,
+        audience: TurnSupply,
+        memory: Bound[MemoryStore],
     ) -> OlderHistory:
         """The episodes on the window's channel and place older than any it showed (§9:2).
 
@@ -339,7 +345,7 @@ class EpisodeLookUpReads:
         needed = page * self._history_page + 1
         limit = min(_CHANNEL_PAGE_MAX, len(source.episodes) + needed)
         while True:
-            read = await self._memory.channel_episodes(channel, limit=limit)
+            read = await memory.channel_episodes(channel, limit=limit)
             entries: Sequence[ChannelEpisode] = read.entries
             first = next(
                 (at for at, one in enumerate(entries) if one.record.id in source.episodes), None
@@ -389,15 +395,26 @@ class EpisodeLookUpReads:
     # --- §10: one episode's full record ---
 
     async def full(
-        self, episode_id: str, page: int, *, audience: TurnSupply, owner_records: bool
+        self,
+        episode_id: str,
+        page: int,
+        *,
+        sight: Sight,
+        audience: TurnSupply,
+        owner_records: bool,
     ) -> EpisodeRead:
         """One page of an episode's full record, each record it names read as held now.
+
+        Every read is bound to ``sight``, the work's (ADR-0383 §7:7): an episode, and a
+        record or matter it names, that the sight does not see is one not held (§8:2).
 
         Raises:
             MemoryStoreError: If the memory store cannot be read.
             StoryStoreError: If the story store cannot be read.
         """
-        held = await self._memory.get_many([episode_id])
+        memory = self._stores.memory(sight)
+        stories = self._stores.stories(sight)
+        held = await memory.get_many([episode_id])
         record = held.get(episode_id)
         if not isinstance(record, EpisodicMemory) or not admitted_to_understanding(
             audience, (record,)
@@ -412,24 +429,23 @@ class EpisodeLookUpReads:
             record, excerpt_chars=self._excerpt_chars, owner_records=owner_records, full_view=True
         )
         named = _named(projection)
-        records = await self._again(
-            [one.id for one in named if one.kind is not ShownRecordKind.STORY], audience
+        records = await _again(
+            memory, [one.id for one in named if one.kind is not ShownRecordKind.STORY], audience
         )
         visibility = SummaryVisibility(owner_records=owner_records)
-        matters = await self._matters(record, visibility)
-        stories: dict[str, MatterShown] = {}
-        if self._stories is not None:
-            for one in named:
-                if one.kind is ShownRecordKind.STORY and one.id not in stories:
-                    state = await self._stories.current_summary(one.id)
-                    if state is not None:
-                        stories[one.id] = _matter(state, visibility)
+        matters = await _matters(stories, record, visibility)
+        shown: dict[str, MatterShown] = {}
+        for one in named:
+            if one.kind is ShownRecordKind.STORY and one.id not in shown:
+                state = await stories.current_summary(one.id)
+                if state is not None:
+                    shown[one.id] = _matter(state, visibility)
         return EpisodeRead(
             episode_id=episode_id,
             record=record,
             projection=projection,
             memories={key: one for key, one in records.items() if isinstance(one, Memory)},
-            stories=stories,
+            stories=shown,
             matters=matters,
             episodes=frozenset(
                 key
@@ -440,18 +456,49 @@ class EpisodeLookUpReads:
             page_size=self._full_page,
         )
 
-    async def _again(self, ids: Iterable[str], audience: TurnSupply) -> dict[str, MemoryRecord]:
-        """The records ``ids`` name, as held now, the audience predicate applied (§10:6).
 
-        Raises:
-            MemoryStoreError: If the store cannot be read.
-        """
-        wanted = list(dict.fromkeys(ids))
-        if not wanted:
-            return {}
-        held = await self._memory.get_many(wanted)
-        admitted = admitted_to_understanding(audience, [held[one] for one in wanted if one in held])
-        return {one.id: one for one in admitted}
+async def _matters(
+    stories: Bound[StoryStore], record: EpisodicMemory, visibility: SummaryVisibility
+) -> tuple[MatterShown, ...]:
+    """The matters an episode belongs to, as recall reads them (ADR-0300 §7:1, §8:1).
+
+    Only for an episode whose stored id is its activation's episode; one merged into
+    another is passed over, and one the store no longer holds left out. ``stories`` is
+    the story store bound to the work's sight (ADR-0383 §7:7).
+
+    Raises:
+        StoryStoreError: If the story store cannot be read.
+    """
+    activation = activation_of(record)
+    if activation is None or record.id != episode_address(activation):
+        return ()
+    member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+    matters: list[MatterShown] = []
+    for header in await stories.stories_of(member):
+        if header.merged_into is not None:
+            continue
+        state = await stories.current_summary(header.story_id)
+        if state is not None:
+            matters.append(_matter(state, visibility))
+    return tuple(matters)
+
+
+async def _again(
+    memory: Bound[MemoryStore], ids: Iterable[str], audience: TurnSupply
+) -> dict[str, MemoryRecord]:
+    """The records ``ids`` name, as held now, the audience predicate applied (§10:6).
+
+    ``memory`` is the store bound to the work's sight (ADR-0383 §7:7).
+
+    Raises:
+        MemoryStoreError: If the store cannot be read.
+    """
+    wanted = list(dict.fromkeys(ids))
+    if not wanted:
+        return {}
+    held = await memory.get_many(wanted)
+    admitted = admitted_to_understanding(audience, [held[one] for one in wanted if one in held])
+    return {one.id: one for one in admitted}
 
 
 def _started(record: EpisodicMemory) -> datetime:

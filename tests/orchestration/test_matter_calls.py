@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from test_matters import _running, _understood
+from understanding_support import bound_stores
 
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
@@ -51,7 +52,7 @@ from ai_assistant.orchestration.task_scheduler import StillLive
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import FrozenJson, ToolDefinition
+    from ai_assistant.core.types import FrozenJson, Sight, ToolDefinition
     from ai_assistant.orchestration.activation_state import ActivationState
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
@@ -85,8 +86,7 @@ def _wired(states: list[ActivationState]) -> tuple[Matters, MatterCalls, _Stops,
     plans = FakePlanStore(now=lambda: _AT)
     matters = Matters(
         running=lambda: states,
-        plans=plans,
-        memory=FakeMemoryStore(now=lambda: _AT),
+        stores=bound_stores(FakeMemoryStore(now=lambda: _AT), plans=plans),
         stop=stops,
         held_input_limit=4,
         in_progress_limit=5,
@@ -396,8 +396,8 @@ async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:
     older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
     matters, calls, stops, _ = _wired([older, asker])
 
-    async def unreadable(activation_id: str, *, owner_records: bool) -> None:
-        del activation_id, owner_records
+    async def unreadable(activation_id: str, *, owner_records: bool, sight: Sight) -> None:
+        del activation_id, owner_records, sight
         msg = "the memory store is unavailable"
         raise MemoryStoreError(msg)
 
@@ -437,8 +437,7 @@ def _wired_with_set_up(
     set_up = _SetUp(stops)
     matters = Matters(
         running=lambda: states,
-        plans=FakePlanStore(now=lambda: _AT),
-        memory=FakeMemoryStore(now=lambda: _AT),
+        stores=bound_stores(FakeMemoryStore(now=lambda: _AT), plans=FakePlanStore(now=lambda: _AT)),
         stop=stops,
         held_input_limit=4,
         in_progress_limit=5,

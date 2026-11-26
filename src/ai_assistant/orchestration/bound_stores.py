@@ -21,7 +21,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import MemoryStore, StoryStore
+    from ai_assistant.core.protocols import (
+        ConversationStore,
+        MemoryStore,
+        PersonModelStore,
+        PlanStore,
+        StoryStore,
+    )
     from ai_assistant.core.types import Sight
 
 __all__ = ["Bound", "BoundStores"]
@@ -39,20 +45,73 @@ class BoundStores:
     sight and no mode: each call binds anew, so one holder serves every pass at once.
     """
 
-    def __init__(self, *, memory: MemoryStore, stories: StoryStore) -> None:
+    def __init__(
+        self,
+        *,
+        memory: MemoryStore,
+        stories: StoryStore | None = None,
+        people: PersonModelStore | None = None,
+        conversations: ConversationStore | None = None,
+        plans: PlanStore | None = None,
+    ) -> None:
         """Hold the stores a converted stage reads.
+
+        Each but the memory store is optional, for a holder built where that store is
+        not wired; asking such a holder for it is a wiring defect, and raises.
 
         Args:
             memory: The memory store.
             stories: The story store.
+            people: The person-model store, where the person model is wired.
+            conversations: The conversation store.
+            plans: The plan store.
         """
         self._memory = memory
         self._stories = stories
+        self._people = people
+        self._conversations = conversations
+        self._plans = plans
 
     def memory(self, sight: Sight) -> Bound[MemoryStore]:
         """The memory store, bound to ``sight``."""
         return self._memory.bound(sight)
 
     def stories(self, sight: Sight) -> Bound[StoryStore]:
-        """The story store, bound to ``sight``."""
-        return self._stories.bound(sight)
+        """The story store, bound to ``sight``.
+
+        Raises:
+            RuntimeError: If no story store is wired to this holder.
+        """
+        return _wired(self._stories, "story").bound(sight)
+
+    def people(self, sight: Sight) -> Bound[PersonModelStore]:
+        """The person-model store, bound to ``sight``.
+
+        Raises:
+            RuntimeError: If no person-model store is wired to this holder.
+        """
+        return _wired(self._people, "person-model").bound(sight)
+
+    def conversations(self, sight: Sight) -> Bound[ConversationStore]:
+        """The conversation store, bound to ``sight``.
+
+        Raises:
+            RuntimeError: If no conversation store is wired to this holder.
+        """
+        return _wired(self._conversations, "conversation").bound(sight)
+
+    def plans(self, sight: Sight) -> Bound[PlanStore]:
+        """The plan store, bound to ``sight``.
+
+        Raises:
+            RuntimeError: If no plan store is wired to this holder.
+        """
+        return _wired(self._plans, "plan").bound(sight)
+
+
+def _wired[S](store: S | None, name: str) -> S:
+    """``store``, where one is wired; a stage asking for one that is not is a defect."""
+    if store is None:
+        msg = f"no {name} store is wired to the holder that binds stores for a pass"
+        raise RuntimeError(msg)
+    return store

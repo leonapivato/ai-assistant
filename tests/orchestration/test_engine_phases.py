@@ -424,11 +424,13 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 episodes=3,
             )
         )
+        # ADR-0383 §9:1: the one holder, as the composition root builds it.
+        holder = bound_stores(
+            harness.memory, stories, conversations=harness.conversation_store, plans=harness.plans
+        )
         episode_reads = (
             EpisodeLookUpReads(
-                memory=harness.memory,
-                stories=stories,
-                conversations=harness.conversation_store,
+                stores=holder,
                 threshold=0.0,
                 limit=6,
                 search_page=3,
@@ -441,13 +443,11 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
         )
         looking = (
             LookUps(
-                memory=harness.memory,
+                stores=holder,
                 views=reads,
                 search_limit=5,
                 episodes=episode_reads,
-                connections=ConnectionSearch(
-                    conversations=harness.conversation_store, scan=50, page_size=5
-                ),
+                connections=ConnectionSearch(stores=holder, scan=50, page_size=5),
             )
             if look_ups
             else None
@@ -465,7 +465,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             search_query="query",
         )
         # ADR-0329 §4:1: a candidate's lookup, over the same store.
-        similar = LookUps(memory=harness.memory, views=reads, search_limit=5)
+        similar = LookUps(stores=holder, views=reads, search_limit=5)
         chat = ChatWriter(
             conversations=harness.conversation_store, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
         )
@@ -3593,8 +3593,17 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
         deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working, supply=_UNBOUNDED
     )
     stages = {one.name: one for one in path.stages()}
-    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
-        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    # The search is the running work's, read by its sight (ADR-0383 §7:7).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        for stage in (
+            ControllerStage.PLANNING,
+            ControllerStage.AUTHORIZING,
+            ControllerStage.ACTING,
+        ):
+            assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     # At the search: neither the fact about Sam nor the one a source reported is kept,
     # shown or held.

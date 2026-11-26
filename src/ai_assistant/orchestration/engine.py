@@ -210,6 +210,7 @@ from ai_assistant.orchestration.approvals import (
     asked_from,
     ticket_of,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channel_kinds import (
@@ -283,7 +284,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.permission_check import level_needed, place_connection
-from ai_assistant.orchestration.person_block import person_zone, still_held
+from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.person_calls import recorded_wording
 from ai_assistant.orchestration.phase_path import (
     PlaceTarget,
@@ -1754,6 +1755,7 @@ class Engine:
         lines: PermissionLineStore | None = None,
         held_things: Sequence[ThingKey] = (),
         things: ThingRecordStore | None = None,
+        stores: BoundStores | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -2172,6 +2174,12 @@ class Engine:
                 start wrote: an event's place, which the hub comes to hold while running,
                 has its record written naming the owner before the event is admitted
                 (§4:2). The engine reads no record (§6:4). ``None`` writes none.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1), over the
+                **same** stores handed here: the composition root's one, which the
+                running-work coordinator reads the peer view and writes a merge's stop
+                record through, bound to the sight of the work that makes each. ``None``
+                builds one over ``memory``, ``stories``, ``plans`` and the person
+                block's store, which binds them alike.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2348,8 +2356,18 @@ class Engine:
         # account of them; the stop call runs the Task Manager's stop through it (§4:7).
         self._matters = Matters(
             running=lambda: (one.state for one in self._running if one.state is not None),
-            plans=plans,
-            memory=memory,
+            # ADR-0383 §9:1: the peer view's reads and a merge's stop record go through
+            # the holder, bound to the sight of the work that makes them.
+            stores=(
+                stores
+                if stores is not None
+                else BoundStores(
+                    memory=memory,
+                    stories=stories,
+                    plans=plans,
+                    people=None if person_blocks is None else person_blocks.store,
+                )
+            ),
             stop=self._stop,
             held_input_limit=held_input_limit,
             in_progress_limit=in_progress_limit,
@@ -8891,7 +8909,12 @@ class Engine:
                 # ADR-0375 §6:3: in a work that is no person's, the name alone of the person
                 # whose place it is; a person's work names them from their block.
                 named = (
-                    await place_name(self._person_blocks, state.work_facts, stage="understanding")
+                    await place_name(
+                        self._person_blocks,
+                        state.work_facts,
+                        sight=working.sight,
+                        stage="understanding",
+                    )
                     if state is not None
                     and person is None
                     and persons_work(state.work_facts, state.held_senders) is None
@@ -8976,13 +8999,18 @@ class Engine:
         if not state.person_block_assembled:
             state.person_block_assembled = True
             # ADR-0368 §9:5, ADR-0338 §2:3: a block only for a person's work.
+            # ADR-0383 §7:7: assembled through the stores bound to the work's sight.
             state.person_block = await self._person_blocks.assemble(
-                persons_work(state.work_facts, state.held_senders), supply=working.supply
+                persons_work(state.work_facts, state.held_senders),
+                supply=working.supply,
+                sight=working.sight,
             )
         elif state.person_block is not None:
             # §7:10, for an understanding run again on joined input as for a planning
             # round: a memory forgotten since the block was assembled reaches no request.
-            state.person_block = await still_held(state.person_block, self._memory)
+            state.person_block = await self._person_blocks.still_held(
+                state.person_block, sight=working.sight
+            )
         if state.person_block is not None:
             # ADR-0309 §5:10: what understanding is shown of the block is supply the
             # episode's placement inherits from, whether or not a round is planned.
@@ -9252,7 +9280,7 @@ class Engine:
         )
         for activation_id in absorbed:
             await self._matters.record_stop(
-                activation_id, deadline=working.deadline, stage="takeover"
+                activation_id, deadline=working.deadline, stage="takeover", sight=working.sight
             )
 
     async def _beliefs(
