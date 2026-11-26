@@ -88,6 +88,15 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _never_stored(record_id: str, expected: int | None) -> str:
+    """The refusal of a conditional write naming no stored record (ADR-0219 §3).
+
+    One message for both causes: a record never written, and one a store bound to a
+    sight does not hold, which ADR-0383 §8:2 has answered exactly as the first.
+    """
+    return f"cannot write {record_id!r} at revision {expected}: no record is stored under that id"
+
+
 def _check_page_bounds(limit: int, offset: int) -> None:
     """Refuse a paging argument outside ``[0, 2**63)`` (ADR-0073 §2).
 
@@ -288,7 +297,9 @@ class InMemoryMemoryStore:
         if self._sight is not None and self._sight_mode is SightMode.COUNT:
             count_records(self._sight, member, records)
 
-    def _refuse_unheld(self, record_id: str, mode: MemoryWriteMode) -> None:
+    def _refuse_unheld(
+        self, record_id: str, mode: MemoryWriteMode, expected: int | None = None
+    ) -> None:
         """Refuse a write that would change a stored record this store does not hold.
 
         ADR-0383 §7:5, as a write to one the store does not hold: an ``IF_UNCHANGED``
@@ -304,8 +315,7 @@ class InMemoryMemoryStore:
         if stored is None or self._holds(stored) or mode is MemoryWriteMode.INSERT_IF_ABSENT:
             return
         if mode is MemoryWriteMode.IF_UNCHANGED:
-            msg = f"cannot write {record_id!r}: no record is stored under that id"
-            raise MemoryStoreStaleError(msg)
+            raise MemoryStoreStaleError(_never_stored(record_id, expected))
         msg = f"cannot write {record_id!r}: the id names a record this store does not hold"
         raise MemoryStoreConflictError(msg)
 
@@ -468,7 +478,7 @@ class InMemoryMemoryStore:
             if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
                 msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
                 raise MemoryStoreConflictError(msg)
-            self._refuse_unheld(write.record.id, write.mode)
+            self._refuse_unheld(write.record.id, write.mode, write.expected_revision)
             if write.mode is MemoryWriteMode.IF_UNCHANGED:
                 self._refuse_stale(write)
             # An INSERT_IF_ABSENT element never reaches here with a collision of
@@ -502,11 +512,7 @@ class InMemoryMemoryStore:
         """
         stored = self._records.get(write.record.id)
         if stored is None:
-            msg = (
-                f"cannot write {write.record.id!r} at revision "
-                f"{write.expected_revision}: no record is stored under that id"
-            )
-            raise MemoryStoreStaleError(msg)
+            raise MemoryStoreStaleError(_never_stored(write.record.id, write.expected_revision))
         if stored.revision != write.expected_revision:
             msg = (
                 f"cannot write {write.record.id!r} at revision "

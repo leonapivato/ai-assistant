@@ -1401,6 +1401,34 @@ class MemoryStoreContract:
         assert await bound.get("m-new-shared") is not None
         assert await bound.delete("m-shared-1") is True
 
+    async def test_a_conditional_write_to_a_record_not_held_is_refused_as_one_never_written(
+        self, sight_store_factory: Callable[[SightMode], MemoryStore]
+    ) -> None:
+        """§7:5, §8:2: the refusal is the one a record never written gets, message and all.
+
+        An ``IF_UNCHANGED`` naming a record the sight does not see raises the same error,
+        with the same message, as the same write to a store from which that record was
+        deleted, so nothing in the refusal tells the two apart.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        for one in (store, holding_only):
+            for record in _sight_history():
+                await one.add(record)
+        unheld = await store.get("m-owner-1")
+        assert unheld is not None
+        assert await holding_only.delete("m-owner-1") is True
+        write = MemoryWrite(
+            record=unheld, mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=unheld.revision
+        )
+
+        with pytest.raises(MemoryStoreStaleError) as withheld:
+            await store.bound(SIGHTS["run-over-the-shared-things"]).write_atomic([write])
+        with pytest.raises(MemoryStoreStaleError) as never_written:
+            await holding_only.write_atomic([write])
+
+        assert str(withheld.value) == str(never_written.value)
+
     async def test_a_bound_stores_clear_and_purge_reach_only_what_it_holds(
         self, sight_store_factory: Callable[[SightMode], MemoryStore]
     ) -> None:

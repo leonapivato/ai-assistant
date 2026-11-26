@@ -304,6 +304,15 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _never_stored(record_id: str, expected: int | None) -> str:
+    """The refusal of a conditional write naming no stored record (ADR-0219 §3).
+
+    One message for both causes: a record never written, and one a store bound to a
+    sight does not hold, which ADR-0383 §8:2 has answered exactly as the first.
+    """
+    return f"cannot write {record_id!r} at revision {expected}: no record is stored under that id"
+
+
 def _check_page_bounds(limit: int, offset: int) -> None:
     """Refuse a paging argument outside ``[0, 2**63)`` (ADR-0073 §2).
 
@@ -2196,7 +2205,11 @@ class SqliteMemoryStore:
             count_records(sight, member, records)
 
     def _refuse_unheld(
-        self, conn: sqlite3.Connection, record_id: str, mode: MemoryWriteMode
+        self,
+        conn: sqlite3.Connection,
+        record_id: str,
+        mode: MemoryWriteMode,
+        expected: int | None = None,
     ) -> None:
         """Refuse a write that would change a stored row this store does not hold.
 
@@ -2220,8 +2233,7 @@ class SqliteMemoryStore:
         if unheld is None:
             return
         if mode is MemoryWriteMode.IF_UNCHANGED:
-            msg = f"cannot write {record_id!r}: no record is stored under that id"
-            raise MemoryStoreStaleError(msg)
+            raise MemoryStoreStaleError(_never_stored(record_id, expected))
         msg = f"cannot write {record_id!r}: the id names a record this store does not hold"
         raise MemoryStoreConflictError(msg)
 
@@ -2581,7 +2593,7 @@ class SqliteMemoryStore:
                                 f"a record with that id is already stored"
                             )
                             raise MemoryStoreConflictError(msg)
-                    self._refuse_unheld(conn, record.id, mode)
+                    self._refuse_unheld(conn, record.id, mode, expected)
                     if mode is MemoryWriteMode.IF_UNCHANGED:
                         self._refuse_stale(conn, record.id, expected)
                     self._persist_record(record, vector, labels)
@@ -2681,11 +2693,7 @@ class SqliteMemoryStore:
         """
         row = conn.execute("SELECT revision FROM records WHERE id = ?", (record_id,)).fetchone()
         if row is None:
-            msg = (
-                f"cannot write {record_id!r} at revision {expected}: "
-                f"no record is stored under that id"
-            )
-            raise MemoryStoreStaleError(msg)
+            raise MemoryStoreStaleError(_never_stored(record_id, expected))
         stored = _stored_revision(row[0])
         if stored != expected:
             msg = (
