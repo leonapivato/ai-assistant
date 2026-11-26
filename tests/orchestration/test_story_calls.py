@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from exchange_support import reported
+from story_support import episode as story_episode
+from story_support import memory_of as story_memory_of
 from structured_support import structured
 from test_activation_state import _admitted
 
@@ -258,7 +260,33 @@ def test_the_hub_fills_the_episode_and_the_mark_and_planning_is_never_offered_th
     # is read by, which the offer leaves out (below).
     for member in (LINK_STORY, UNLINK_STORY):
         assert member.system_supplied == (EPISODE_ARGUMENT,)
-    assert TIDY_STORY.system_supplied == ()
+    # ADR-0384 §6:2: the tidy-up takes this activation's episode too, to learn its home.
+    assert TIDY_STORY.system_supplied == (EPISODE_ARGUMENT,)
+
+
+def test_the_tidy_up_planning_is_offered_is_what_it_was_before_the_hub_filled_its_episode() -> None:
+    """ADR-0384 §6:2 changes nothing planning is offered: the declaration as it was, with
+    no hub-filled argument, is offered byte for byte as the one that has one."""
+    schema = dict(TIDY_STORY.parameters_schema)
+    properties = schema["properties"]
+    assert isinstance(properties, Mapping)
+    before = TIDY_STORY.model_copy(
+        update={
+            "system_supplied": (),
+            "parameters_schema": {
+                **schema,
+                "properties": {STORY_ARGUMENT: properties[STORY_ARGUMENT]},
+                "required": [STORY_ARGUMENT],
+            },
+        }
+    )
+
+    for labels in (None, STORY_LABEL_ARGUMENTS):
+        (now,) = offered_tools([TIDY_STORY], labels)
+        (then,) = offered_tools([before], labels)
+
+        assert now == then
+        assert now.parameters == then.parameters
 
 
 async def test_the_offer_leaves_out_the_arguments_a_member_is_written_into() -> None:
@@ -1654,3 +1682,143 @@ async def test_a_move_still_carries_an_episode_forgotten_since() -> None:
         _activation_member("act-2"),
         _activation_member("act-gone"),
     ]
+
+
+# --- planning's tidy-up tends the domain its work's records land in (ADR-0384 §6:2) --------
+
+
+def _tidying(model: FakeModelProvider, stories: FakeStoryStore, memory: Any) -> StoryCalls:
+    tidy_up = StoryTidyUp(
+        model=structured(model),
+        stories=stories,
+        memory=memory,
+        excerpt_chars=2000,
+        other_stories=5,
+        decisions=0,
+        budget=timedelta(seconds=5),
+        threshold=0.0,
+        prompt=default_prompt(STORY_TIDY_UP_PROMPT),
+    )
+    return StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
+
+
+def _tidy_reply(lines: list[str], flags: list[dict[str, str]] | None = None) -> str:
+    return json.dumps({"lines": lines, "flags": flags or []})
+
+
+def _shared(record: EpisodicMemory) -> EpisodicMemory:
+    return record.model_copy(update={"home": RecordHome.shared()})
+
+
+def _not_done_with(result: ToolResult, kind: ToolFailureKind, message: str) -> None:
+    assert result.outcome is ToolOutcome.FAILED
+    assert result.failure is not None
+    assert (result.failure.kind, result.failure.message) == (kind, message)
+
+
+async def test_a_tidy_up_of_a_story_of_another_domain_is_not_done_and_writes_nothing() -> None:
+    """§6:2: an owner's work's call on a story of the shared things: no completion."""
+    stories = FakeStoryStore(now=_now)
+    memory = await story_memory_of(story_episode(_ACTIVATION), _shared(story_episode("s-1")))
+    shared = await stories.create(
+        [_activation_member("s-1")], home=RecordHome.shared(), actor=StoryActor.OWNER
+    )
+    assert shared.story_id is not None
+    await stories.append_note(str(shared.story_id), "The boiler.", author=StoryNoteAuthor.OWNER)
+    model = FakeModelProvider(reply=_tidy_reply(["The boiler."]))
+
+    result = await _tidying(model, stories, memory).run(
+        _call(TIDY_STORY, {STORY_ARGUMENT: str(shared.story_id)})
+    )
+
+    _not_done_with(result, ToolFailureKind.REFUSED, "the tidy-up wrote nothing: no_story")
+    assert model.calls == []
+    versions = await stories.summary_versions(str(shared.story_id))
+    assert versions is not None
+    assert versions.versions == ()
+
+
+async def test_a_tidy_up_whose_episode_is_not_held_is_not_done_and_writes_nothing() -> None:
+    """§6:2: with no episode, the domain the work's records land in is unknown."""
+    stories = FakeStoryStore(now=_now)
+    memory = await story_memory_of(story_episode("a-1"))
+    trip = await _story(stories, _activation_member("a-1"))
+    await stories.append_note(trip, "A camping trip.", author=StoryNoteAuthor.OWNER)
+    model = FakeModelProvider(reply=_tidy_reply(["A camping trip."]))
+
+    result = await _tidying(model, stories, memory).run(_call(TIDY_STORY, {STORY_ARGUMENT: trip}))
+
+    _not_done_with(result, ToolFailureKind.INVALID_REQUEST, "the activation named has no episode")
+    assert model.calls == []
+
+
+class _HoldingAnyHome(FakeMemoryStore):
+    """A memory store answering one episode in a home no write may carry (ADR-0383 §2:3),
+    which no store holds once written, so a read answers it here."""
+
+    def __init__(self, record: EpisodicMemory) -> None:
+        super().__init__(now=_now)
+        self._record = record
+
+    async def get(self, record_id: str) -> Any:
+        return self._record if record_id == self._record.id else await super().get(record_id)
+
+
+async def test_a_tidy_up_whose_episode_carries_a_home_no_write_may_carry_is_not_done() -> None:
+    stories = FakeStoryStore(now=_now)
+    memory = _HoldingAnyHome(
+        story_episode(_ACTIVATION).model_copy(update={"home": RecordHome.person("person:sam")})
+    )
+    trip = await _story(stories)
+    model = FakeModelProvider(reply=_tidy_reply(["A camping trip."]))
+
+    result = await _tidying(model, stories, memory).run(_call(TIDY_STORY, {STORY_ARGUMENT: trip}))
+
+    _not_done_with(
+        result,
+        ToolFailureKind.REFUSED,
+        "this work's records land in a home no write may carry",
+    )
+    assert model.calls == []
+
+
+async def test_a_tidy_up_takes_in_no_member_episode_of_another_home() -> None:
+    """Row 4 of B5's survey: a summary names no episode of another home it took in."""
+    stories = FakeStoryStore(now=_now)
+    memory = await story_memory_of(
+        story_episode(_ACTIVATION), story_episode("a-1"), _shared(story_episode("s-1"))
+    )
+    trip = await _story(stories, _activation_member("a-1"), _activation_member("s-1"))
+    model = FakeModelProvider(reply=_tidy_reply(["A camping trip."]))
+
+    result = await _tidying(model, stories, memory).run(_call(TIDY_STORY, {STORY_ARGUMENT: trip}))
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    versions = await stories.summary_versions(trip)
+    assert versions is not None
+    (version,) = versions.versions
+    assert version.took_in_episodes == ("a-1",)
+    state = await stories.current_summary(trip)
+    assert state is not None
+    assert state.pending_episodes == ("s-1",)
+
+
+async def test_a_tidy_up_writes_no_flag_naming_a_story_of_another_domain() -> None:
+    """Row 4 of B5's survey, ADR-0384 §4:2: the like-another flag refuses the output whole."""
+    stories = FakeStoryStore(now=_now)
+    memory = await story_memory_of(story_episode(_ACTIVATION), story_episode("a-1"))
+    trip = await _story(stories, _activation_member("a-1"))
+    other = await stories.create(
+        [_activation_member("a-1")], home=RecordHome.shared(), actor=StoryActor.OWNER
+    )
+    assert other.story_id is not None
+    model = FakeModelProvider(
+        reply=_tidy_reply(["A camping trip."], [{"kind": "like_another", "story": "S1"}])
+    )
+
+    result = await _tidying(model, stories, memory).run(_call(TIDY_STORY, {STORY_ARGUMENT: trip}))
+
+    _not_done_with(result, ToolFailureKind.REFUSED, "the tidy-up wrote nothing: refused")
+    versions = await stories.summary_versions(trip)
+    assert versions is not None
+    assert versions.versions == ()
