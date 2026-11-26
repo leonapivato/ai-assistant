@@ -121,7 +121,7 @@ from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
 from ai_assistant.memory._sight import (
-    STORED_HOME_SQL,
+    STORED_HOME_OBJECT_SQL,
     count_given,
     count_records,
     made_by_id,
@@ -476,16 +476,16 @@ def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
 def _home_or_none(stored: object) -> RecordHome | None:
     """A stored home read back, or ``None`` where there is none or it cannot be read.
 
-    ``stored`` is :data:`STORED_HOME_SQL`'s rendering, so the home read is the one the
-    record decoder and :func:`seen_sql` both read (ADR-0383 §5:3, §7:3).
+    ``stored`` is :data:`STORED_HOME_OBJECT_SQL`'s text, the home object as the record
+    decoder finds it, so validating it reads the home the decoder reads, and fails
+    where the decoder would (ADR-0383 §5:3).
     """
     if stored is None:
         return None
     try:
-        home = RecordHome.model_validate_json(str(stored))
+        return RecordHome.model_validate_json(str(stored))
     except ValidationError:
         return None
-    return home if home.model_dump_json() == str(stored) else None
 
 
 class SqliteMemoryStore:
@@ -502,10 +502,11 @@ class SqliteMemoryStore:
     is added for it.
 
     Withholding reads each row's home as the record decoder reads it
-    (:data:`STORED_HOME_SQL`), so the statement and the predicate over the decoded
-    record agree on every row. Counting classifies each record a read gave back by its
-    decoded home, and :meth:`channel_episode_ids`, which decodes nothing, by that same
-    expression.
+    (:data:`~ai_assistant.memory._sight.STORED_HOME_SQL`), so the statement and the
+    predicate over the decoded record agree on every row. Counting classifies each
+    record a read gave back by its decoded home, and :meth:`channel_episode_ids`, which
+    decodes nothing, by validating the home object the decoder would find
+    (:data:`~ai_assistant.memory._sight.STORED_HOME_OBJECT_SQL`).
     """
 
     def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
@@ -3480,7 +3481,7 @@ class SqliteMemoryStore:
         The home is read from the blob only where this store counts for a sight, so
         an unbound enumeration still reads the channel index alone.
         """
-        home = STORED_HOME_SQL if self._counting() is not None else "NULL"
+        home = STORED_HOME_OBJECT_SQL if self._counting() is not None else "NULL"
         sql = (
             f"SELECT rowid, id, kind, {home} FROM records "  # noqa: S608 — module text; values bound
             "WHERE channel_type = ? AND channel_instance = ?"

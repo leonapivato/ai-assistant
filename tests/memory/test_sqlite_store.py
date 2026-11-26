@@ -3539,6 +3539,19 @@ _PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
     ),
     "string": ("""json_set(data, '$.home', '{"kind":"shared","id":null}')""", None),
     "number-id": ("""json_set(data, '$.home', json('{"kind":"person","id":7}'))""", None),
+    "object-id": ("""json_set(data, '$.home', json('{"kind":"person","id":{}}'))""", None),
+    "array-id": (
+        """json_set(data, '$.home', json('{"kind":"person","id":["person:owner"]}'))""",
+        None,
+    ),
+    "object-id-shared": ("""json_set(data, '$.home', json('{"kind":"shared","id":{}}'))""", None),
+    "number-kind": ("""json_set(data, '$.home', json('{"kind":1,"id":null}'))""", None),
+    # A lone surrogate's escape, which SQLite decodes to bytes no driver can read.
+    "lone-surrogate-id": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"person","id":"\\ud800"}')""",
+        None,
+    ),
     "reordered": (
         """json_set(data, '$.home', json('{"id":null,"kind":"shared"}'))""",
         RecordHome.shared(),
