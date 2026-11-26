@@ -54,6 +54,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     RecallOutcome,
+    RecordHome,
     RoundResponse,
 )
 from ai_assistant.orchestration.authorizer import (
@@ -89,7 +90,7 @@ _FILLER = "Let me check."
 #: A later round's message.
 _ANSWER = "It's done."
 #: *Couldn't finish*, listing the remember an earlier round made (ADR-0317 §3:1).
-_LISTED = couldnt_finish(("the tool remember_fact ran",)).text
+_LISTED = couldnt_finish(("the tool remember_fact ran",), home=RecordHome.owners()).text
 
 
 def _remember() -> RoundResponse:

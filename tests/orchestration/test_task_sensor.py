@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     OccurrenceState,
     ProcessingReason,
     ProcessingStatus,
+    RecordHome,
     ScheduledOccurrence,
     ToolOutcome,
 )
@@ -228,14 +229,19 @@ async def test_three_restarts_end_interrupted_with_no_fourth_push() -> None:
 async def test_a_hub_chat_message_confirmed_recorded_ends_done_with_no_second_try() -> None:
     """§8:11, §13:3: the transcript recorded it, so the record is done and so is it."""
     world = _World()
-    conversation = await world.conversations.start()
+    conversation = await world.conversations.start(home=RecordHome.owners())
     place = CHAT.model_copy(update={"instance_id": conversation.id})
     task = await write_task(world.plans, activation(), places=(place,))
     cut = await pushed(world.plans, task)
     claimed = await message(world.plans, cut, place)
     receipt = await world.conversations.append_message(
         conversation.id,
-        NewMessage(author=MessageAuthor.ASSISTANT, text="time for the pills", effect_id=claimed.id),
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="time for the pills",
+            effect_id=claimed.id,
+            home=RecordHome.owners(),
+        ),
     )
 
     await world.sensor.settle_restart()
@@ -250,7 +256,7 @@ async def test_a_hub_chat_message_confirmed_recorded_ends_done_with_no_second_tr
 async def test_a_hub_chat_message_confirmed_absent_is_pushed_again_unmarked() -> None:
     """§8:11, §13:3: confirmed not done, so §8:5 pushes it again, no second try."""
     world = _World()
-    conversation = await world.conversations.start()
+    conversation = await world.conversations.start(home=RecordHome.owners())
     place = CHAT.model_copy(update={"instance_id": conversation.id})
     task = await write_task(world.plans, activation(), places=(place,))
     cut = await pushed(world.plans, task)
@@ -367,14 +373,19 @@ async def test_a_transcript_that_cannot_be_read_settles_nothing_until_it_can() -
     world = _World()
     world.conversations = _UnreadableOnce()
     world.sensor._conversations = world.conversations
-    conversation = await world.conversations.start()
+    conversation = await world.conversations.start(home=RecordHome.owners())
     place = CHAT.model_copy(update={"instance_id": conversation.id})
     task = await write_task(world.plans, activation(), places=(place,))
     cut = await pushed(world.plans, task)
     claimed = await message(world.plans, cut, place)
     await world.conversations.append_message(
         conversation.id,
-        NewMessage(author=MessageAuthor.ASSISTANT, text="time for the pills", effect_id=claimed.id),
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="time for the pills",
+            effect_id=claimed.id,
+            home=RecordHome.owners(),
+        ),
     )
 
     assert await world.sensor.settle_restart() is False
@@ -415,7 +426,7 @@ async def test_nothing_is_pushed_until_what_a_restart_left_is_settled() -> None:
         limits=SensorLimits(recheck=timedelta(milliseconds=5), push_limit=3),
         now=lambda: AT,
     )
-    conversation = await world.conversations.start()
+    conversation = await world.conversations.start(home=RecordHome.owners())
     place = CHAT.model_copy(update={"instance_id": conversation.id})
     cut_off = await write_task(world.plans, activation(), places=(place,))
     await message(world.plans, await pushed(world.plans, cut_off), place)

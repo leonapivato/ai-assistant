@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     UserMessage,
 )
 from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, _agent_for
@@ -454,7 +455,12 @@ async def test_the_transcript_carries_messages_and_markers(harness: Harness) -> 
         )
     await harness.engine.chat.append_message(
         conversation,
-        NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", replies_to=1),
+        NewMessage(
+            author=MessageAuthor.ASSISTANT,
+            text="Pinecrest, Friday.",
+            replies_to=1,
+            home=RecordHome.owners(),
+        ),
     )
     await harness.engine.delete_message(conversation, position=2)
 

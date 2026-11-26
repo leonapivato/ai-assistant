@@ -649,6 +649,7 @@ def _message(
         text=text,
         device_id="phone" if author is MessageAuthor.USER else None,
         message_id=f"m-{position}" if author is MessageAuthor.USER else None,
+        home=RecordHome.owners(),
     )
 
 

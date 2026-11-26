@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -53,6 +54,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageDeletedChange,
     NewMessage,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
 )
@@ -104,6 +106,7 @@ def _said(
         device_id=device,
         message_id=message_id,
         replies_to=replies_to,
+        home=RecordHome.owners(),
     )
 
 
@@ -125,13 +128,14 @@ def _answered(
         replies_to=replies_to,
         cut_off=cut_off,
         effect_id=effect_id,
+        home=RecordHome.owners(),
     )
 
 
 async def _chat(store: ConversationStore) -> str:
     """Put the phone and the watch in "my devices" and start a conversation on them."""
     await store.set_my_devices([_PHONE, _WATCH])
-    return (await store.start()).id
+    return (await store.start(home=RecordHome.owners())).id
 
 
 async def _seen_by(store: ConversationStore, device: str, *, after: int = 0) -> list[Any]:
@@ -270,7 +274,7 @@ async def _seed(
 
     The ids are in ADR-0283 §2's ``activation:`` shape and opaque to the store.
     """
-    conversation = await store.start()
+    conversation = await store.start(home=RecordHome.owners())
     episode_ids = [f"activation:{conversation.id}-{index}" for index in range(count)]
     for index, episode_id in enumerate(episode_ids):
         await store.record_turn(
@@ -306,7 +310,7 @@ async def _walk_stamped_from(
 
 async def _stamp_many(store: ConversationStore, count: int) -> list[str]:
     """Start ``count`` conversations and stamp every one of them deleted."""
-    started = [await store.start() for _ in range(count)]
+    started = [await store.start(home=RecordHome.owners()) for _ in range(count)]
     for conversation in started:
         assert await store.stamp_deleted(conversation.id) is True
     return sorted(one.id for one in started)
@@ -361,8 +365,8 @@ class _PairedOp:
 
     async def prepare(self, store: ConversationStore) -> None:
         """Start the two conversations the two calls act on."""
-        self.left = (await store.start()).id
-        self.right = (await store.start()).id
+        self.left = (await store.start(home=RecordHome.owners())).id
+        self.right = (await store.start(home=RecordHome.owners())).id
 
     def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
         """The call the case suspends mid-write and then cancels."""
@@ -387,11 +391,11 @@ class _StartOp(_PairedOp):
 
     def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
         """Mint a conversation — the call that is cancelled."""
-        return store.start()
+        return store.start(home=RecordHome.owners())
 
     def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
         """Mint another concurrently."""
-        return store.start()
+        return store.start(home=RecordHome.owners())
 
     async def verify(self, store: ConversationStore) -> None:
         """The concurrent conversation is there and every record still decodes."""
@@ -484,11 +488,11 @@ class _ReadOp:
 
     async def prepare(self, store: ConversationStore) -> None:
         """Two live conversations with a recorded turn each, plus one stamped."""
-        self.left = (await store.start()).id
-        self.right = (await store.start()).id
+        self.left = (await store.start(home=RecordHome.owners())).id
+        self.right = (await store.start(home=RecordHome.owners())).id
         await store.record_turn(self.left, episode_id=_LEFT_EPISODE, occurred_at=_NOW)
         await store.record_turn(self.right, episode_id=_RIGHT_EPISODE, occurred_at=_NOW)
-        self.stamped = (await store.start()).id
+        self.stamped = (await store.start(home=RecordHome.owners())).id
         assert await store.stamp_deleted(self.stamped) is True
 
     def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
@@ -975,8 +979,8 @@ class ConversationStoreContract:
         self, store: ConversationStore
     ) -> None:
         """§1, §2: the id exists before any turn, and ``last_turn_at`` is unset."""
-        first = await store.start()
-        second = await store.start()
+        first = await store.start(home=RecordHome.owners())
+        second = await store.start(home=RecordHome.owners())
 
         assert first.id != second.id, "each conversation gets its own opaque id"
         assert first.last_turn_at is None, "no turn has landed yet"
@@ -988,10 +992,10 @@ class ConversationStoreContract:
     ) -> None:
         """§1: ``start`` re-mints on collision instead of clobbering or sharing."""
         store = _build(factory, new_id=ScriptedIds(["taken", "taken", "fresh"]))
-        first = await store.start()
+        first = await store.start(home=RecordHome.owners())
         await store.record_turn(first.id, episode_id=_EPISODE, occurred_at=_NOW)
 
-        second = await store.start()
+        second = await store.start(home=RecordHome.owners())
 
         assert second.id != first.id, "a colliding mint must not hand back someone else's"
         assert second.last_turn_at is None, "the new conversation is empty"
@@ -1004,11 +1008,11 @@ class ConversationStoreContract:
     ) -> None:
         """§1: an exhausted retry budget raises rather than returning a stranger's."""
         store = _build(factory, new_id=lambda: "always-the-same")
-        first = await store.start()
+        first = await store.start(home=RecordHome.owners())
         await store.record_turn(first.id, episode_id=_EPISODE, occurred_at=_NOW)
 
         with pytest.raises(ConversationStoreError):
-            await store.start()
+            await store.start(home=RecordHome.owners())
 
         kept = await store.get(first.id)
         assert kept is not None
@@ -1028,13 +1032,13 @@ class ConversationStoreContract:
         """
         blank = _build(factory, new_id=lambda: "   ")
         with pytest.raises(ConversationStoreError):
-            await blank.start()
+            await blank.start(home=RecordHome.owners())
 
         # Deliberately violating the factory's own annotation: the point is a
         # source that misbehaves, which no type check at this seam can prevent.
         unusable = _build(factory, new_id=cast("Callable[[], str]", list))
         with pytest.raises(ConversationStoreError):
-            await unusable.start()
+            await unusable.start(home=RecordHome.owners())
 
     async def test_a_deadline_near_the_end_of_time_does_not_overflow(
         self, factory: ConversationStoreFactory
@@ -1049,7 +1053,7 @@ class ConversationStoreContract:
         """
         clock = MovableClock(datetime.max.replace(tzinfo=UTC) - 2 * _DAY)
         store = _build(factory, now=clock, retention=_RETENTION, tombstone_grace=_GRACE)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         assert await store.drop_if_eligible(conversation.id) is False
 
@@ -1074,7 +1078,7 @@ class ConversationStoreContract:
         """§2: activity is "someone was here"; a recorded turn is a different fact."""
         clock = MovableClock()
         store = _build(factory, now=clock)
-        started = await store.start()
+        started = await store.start(home=RecordHome.owners())
         clock.advance(_HOUR)
 
         marked = await store.mark_active(started.id)
@@ -1098,7 +1102,7 @@ class ConversationStoreContract:
         """
         clock = MovableClock()
         store = _build(factory, now=clock)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         clock.advance(_HOUR)
         occurred = _NOW + _MINUTE
 
@@ -1120,7 +1124,7 @@ class ConversationStoreContract:
         A naive instant would be localised to the host's zone (ADR-0023 §3), and a
         blank id would name no episode.
         """
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         naive = datetime(2026, 6, 1)  # noqa: DTZ001 — the naive reading is the subject
         with pytest.raises(ValueError, match="occurred_at"):
@@ -1147,7 +1151,7 @@ class ConversationStoreContract:
         )
         assert await store.get("no-such-conversation") is None
 
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         assert await store.stamp_deleted(conversation.id) is True
         assert (
             await store.record_turn(conversation.id, episode_id=_EPISODE, occurred_at=_NOW) is None
@@ -1164,7 +1168,7 @@ class ConversationStoreContract:
         the conversation stays enumerable for the sweep.
         """
         store = _build(factory)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         recorded, stamped = await asyncio.gather(
             store.record_turn(conversation.id, episode_id=_EPISODE, occurred_at=_NOW),
@@ -1198,10 +1202,10 @@ class ConversationStoreContract:
         """§2: some total order must be named, or two stores answer differently."""
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["b", "a", "c"]))
-        await store.start()  # b, at _NOW
-        await store.start()  # a, at _NOW — ties with b
+        await store.start(home=RecordHome.owners())  # b, at _NOW
+        await store.start(home=RecordHome.owners())  # a, at _NOW — ties with b
         clock.advance(_HOUR)
-        await store.start()  # c, later
+        await store.start(home=RecordHome.owners())  # c, later
 
         listed = [one.id for one in await store.recent()]
 
@@ -1219,10 +1223,10 @@ class ConversationStoreContract:
         """
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["older", "newer"]))
-        older = await store.start()
+        older = await store.start(home=RecordHome.owners())
         await store.record_turn(older.id, episode_id=_EPISODE, occurred_at=_NOW)
         clock.advance(_HOUR)
-        await store.start()  # newer, and empty
+        await store.start(home=RecordHome.owners())  # newer, and empty
 
         listed = [one.id for one in await store.recent()]
 
@@ -1235,7 +1239,7 @@ class ConversationStoreContract:
         """§9.3: 50, the figure ``AuditTrail.recent`` set and ADR-0073 §2 reused."""
         store = _build(factory)
         for _ in range(52):
-            await store.start()
+            await store.start(home=RecordHome.owners())
 
         assert len(await store.recent()) == 50
 
@@ -1244,7 +1248,7 @@ class ConversationStoreContract:
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["a", "b", "c", "d"]))
         for _ in range(4):
-            await store.start()
+            await store.start(home=RecordHome.owners())
             clock.advance(_MINUTE)
 
         assert [one.id for one in await store.recent(limit=2)] == ["d", "c"]
@@ -1622,7 +1626,7 @@ class ConversationStoreContract:
         store = _build(factory, now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001 — the fault
 
         with pytest.raises(ConversationStoreError) as raised:
-            await store.start()
+            await store.start(home=RecordHome.owners())
 
         assert not isinstance(raised.value, UnknownConversationError), (
             "a store fault is not 'this conversation is already gone', and a sweep "
@@ -1637,7 +1641,7 @@ class ConversationStoreContract:
         """§7: eligibility is activity against the horizon in force when reclaim runs."""
         clock = MovableClock()
         store = _build(factory, now=clock, retention=_RETENTION)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         clock.advance(_RETENTION - _MINUTE)
         assert await store.drop_if_eligible(conversation.id) is False
@@ -1656,7 +1660,7 @@ class ConversationStoreContract:
         ships unbounded retention while passing every other clause.
         """
         store, clock = defaults
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         clock.advance(3650 * _DAY)
 
@@ -1674,7 +1678,7 @@ class ConversationStoreContract:
         conversation's record forever.
         """
         store, clock = defaults
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.stamp_deleted(conversation.id)
 
         assert await store.drop_if_eligible(conversation.id) is False, "the grace is positive"
@@ -1689,7 +1693,7 @@ class ConversationStoreContract:
         """§9.4: the boundary, in the direction where the continuation wins."""
         clock = MovableClock()
         store = _build(factory, now=clock, retention=_RETENTION)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         clock.advance(_RETENTION)
 
         await store.mark_active(conversation.id)
@@ -1706,7 +1710,7 @@ class ConversationStoreContract:
         """§9.4: the boundary, in the direction where the reclaim wins."""
         clock = MovableClock()
         store = _build(factory, now=clock, retention=_RETENTION)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         clock.advance(_RETENTION)
 
         assert await store.drop_if_eligible(conversation.id) is True
@@ -1726,7 +1730,7 @@ class ConversationStoreContract:
         """
         clock = MovableClock()
         store = _build(factory, now=clock, retention=_RETENTION)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         clock.advance(_RETENTION)
 
         dropped, marked = await asyncio.gather(
@@ -1751,7 +1755,7 @@ class ConversationStoreContract:
         """§7: "keep the episodes forever" is not a setting under which records vanish."""
         clock = MovableClock()
         store = _build(factory, now=clock, retention=None)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         clock.advance(1000 * _DAY)
 
@@ -1767,7 +1771,7 @@ class ConversationStoreContract:
         """§7: under ``None``, deletion is the only thing that removes a conversation."""
         clock = MovableClock()
         store = _build(factory, now=clock, retention=None)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.stamp_deleted(conversation.id)
 
         clock.advance(_GRACE)
@@ -1786,16 +1790,16 @@ class ConversationStoreContract:
         """
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["first", "second"]))
-        first = await store.start()
+        first = await store.start(home=RecordHome.owners())
         await store.record_turn(first.id, episode_id=_EPISODE, occurred_at=_NOW + _MINUTE)
         clock.advance(_HOUR)
-        second = await store.start()
+        second = await store.start(home=RecordHome.owners())
 
         exported = await store.export()
 
         assert [one.id for one in exported.conversations] == [second.id, first.id]
         assert exported.conversations[1].last_turn_at == _NOW + _MINUTE
-        assert exported.schema_version == 7
+        assert exported.schema_version == 8
         assert set(exported.model_dump()) == {
             "schema_version",
             "exported_at",
@@ -1819,7 +1823,7 @@ class ConversationStoreContract:
 
     async def test_export_carries_an_empty_conversation(self, store: ConversationStore) -> None:
         """A conversation with no turns is state the user holds; it exports as itself."""
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
 
         exported = await store.export()
 
@@ -1835,7 +1839,7 @@ class ConversationStoreContract:
         store = _build(factory, new_id=ScriptedIds(["c-1"]))
         await store.set_my_devices([_WATCH, _PHONE])
 
-        started = await store.start()
+        started = await store.start(home=RecordHome.owners())
 
         page = await store.transcript(started.id)
         assert page is not None
@@ -1873,6 +1877,7 @@ class ConversationStoreContract:
                 text="book the campsite",
                 device_id="phone",
                 message_id="m-1",
+                home=RecordHome.owners(),
             ),
             TranscriptMessage(
                 conversation_id=conversation,
@@ -1881,6 +1886,7 @@ class ConversationStoreContract:
                 author=MessageAuthor.ASSISTANT,
                 text="Which weekend?",
                 replies_to=1,
+                home=RecordHome.owners(),
             ),
         )
 
@@ -1914,6 +1920,7 @@ class ConversationStoreContract:
             device_id="phone",
             message_id="m-1",
             came_through="gateway",
+            home=RecordHome.owners(),
         )
         await store.append_message(conversation, named)
         await store.append_message(conversation, _said("from itself", message_id="m-2"))
@@ -1969,7 +1976,7 @@ class ConversationStoreContract:
     async def test_one_id_from_two_devices_is_two_messages(self, store: ConversationStore) -> None:
         """§4:1: a message id is unique per device, not across devices."""
         await store.set_my_devices([_PHONE, _LAPTOP])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
 
         one = await store.append_message(conversation, _said("a", message_id="m-1"))
         other = await store.append_message(
@@ -2146,8 +2153,8 @@ class ConversationStoreContract:
         """§5:10: one counter, increasing, over every kind of change."""
         store = _build(factory, new_id=ScriptedIds(["c-1", "c-2"]))
         await store.set_my_devices([_PHONE])
-        first = (await store.start()).id
-        second = (await store.start()).id
+        first = (await store.start(home=RecordHome.owners())).id
+        second = (await store.start(home=RecordHome.owners())).id
         await store.append_message(first, _said("a", message_id="m-1"))
         await store.append_message(second, _said("b", message_id="m-1"))
         await store.set_conversation_devices(second, [_PHONE, _WATCH])
@@ -2198,8 +2205,8 @@ class ConversationStoreContract:
     ) -> None:
         """§5:11: a reader of some conversations sees theirs and "my devices", and moves on."""
         await store.set_my_devices([_PHONE])
-        mine = (await store.start()).id
-        other = (await store.start()).id
+        mine = (await store.start(home=RecordHome.owners())).id
+        other = (await store.start(home=RecordHome.owners())).id
         await store.append_message(other, _said("not yours", message_id="m-1"))
         await store.set_my_devices([_PHONE, _WATCH])
         await store.append_message(mine, _said("yours", message_id="m-1"))
@@ -2286,7 +2293,7 @@ class ConversationStoreContract:
         clock = MovableClock()
         store = _build(factory, now=clock)
         holding = await _chat(store)
-        emptied = (await store.start()).id
+        emptied = (await store.start(home=RecordHome.owners())).id
         await store.append_message(holding, _said("keep", message_id="m-1"))
         await store.append_message(emptied, _said("gone", message_id="m-1"))
         await store.delete_message(emptied, 1)
@@ -2324,7 +2331,7 @@ class ConversationStoreContract:
         assert await store.set_conversation_devices(earlier, [_PHONE]) is True
         assert await store.set_conversation_devices(earlier, [_PHONE]) is False
         await store.set_my_devices([_LAPTOP])
-        later = (await store.start()).id
+        later = (await store.start(home=RecordHome.owners())).id
 
         assert await store.conversation_devices(earlier) == (_PHONE,)
         assert await store.conversation_devices(later) == (_LAPTOP,)
@@ -2375,10 +2382,10 @@ class ConversationStoreContract:
         """§6:9: after a restart, the conversations with messages never taken in."""
         store = _build(factory, new_id=ScriptedIds(["c-b", "c-a", "c-c", "c-d"]))
         await store.set_my_devices([_PHONE])
-        second = (await store.start()).id
-        first = (await store.start()).id
-        answered = (await store.start()).id
-        stamped = (await store.start()).id
+        second = (await store.start(home=RecordHome.owners())).id
+        first = (await store.start(home=RecordHome.owners())).id
+        answered = (await store.start(home=RecordHome.owners())).id
+        stamped = (await store.start(home=RecordHome.owners())).id
         for conversation in (first, second, stamped):
             await store.append_message(conversation, _said("hi", message_id="m-1"))
         await store.append_message(answered, _answered("unprompted"))
@@ -2426,9 +2433,9 @@ class ConversationStoreContract:
     ) -> None:
         """§4:5: a reading end sees its conversation; a device that is no end does not."""
         await store.set_my_devices([_PHONE, _WATCH])
-        shown = (await store.start()).id
+        shown = (await store.start(home=RecordHome.owners())).id
         await store.set_my_devices([_LAPTOP])
-        elsewhere = (await store.start()).id
+        elsewhere = (await store.start(home=RecordHome.owners())).id
         await store.append_message(shown, _said("hi", message_id="m-1"))
         await store.append_message(elsewhere, _said("not here", message_id="m-1", device="laptop"))
 
@@ -2510,7 +2517,7 @@ class ConversationStoreContract:
     ) -> None:
         """§3:5: a device that only writes is not shown the conversation's messages."""
         await store.set_my_devices([_PHONE, _KEYBOARD])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         sent = await store.append_message(
             conversation, _said("typed", message_id="m-1", device="keyboard")
         )
@@ -2545,8 +2552,8 @@ class ConversationStoreContract:
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["stamped", "reclaimed"]))
         await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
-        stamped = (await store.start()).id
-        reclaimed = (await store.start()).id
+        stamped = (await store.start(home=RecordHome.owners())).id
+        reclaimed = (await store.start(home=RecordHome.owners())).id
         await store.set_conversation_devices(stamped, [_PHONE])
         await store.set_my_devices([_LAPTOP])
 
@@ -2571,8 +2578,8 @@ class ConversationStoreContract:
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["stamped", "reclaimed"]))
         await store.set_my_devices([_PHONE, _WATCH])
-        stamped = (await store.start()).id
-        reclaimed = (await store.start()).id
+        stamped = (await store.start(home=RecordHome.owners())).id
+        reclaimed = (await store.start(home=RecordHome.owners())).id
         saved = (await store.device_changes("watch", after=0)).next_after
         for conversation in (stamped, reclaimed):
             await store.set_conversation_devices(conversation, [_PHONE])
@@ -2642,7 +2649,7 @@ class ConversationStoreContract:
     ) -> None:
         """§7:6: a start makes its reading ends ends, and nothing was recorded before it."""
         await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
-        await store.start()
+        await store.start(home=RecordHome.owners())
 
         for device in ("phone", "watch"):
             mine, started = await _entries_seen_by(store, device)
@@ -2658,7 +2665,7 @@ class ConversationStoreContract:
     ) -> None:
         """Widening to reading adds a reader; a reader keeping its reading is not added."""
         await store.set_my_devices([_PHONE, _WATCH, _KEYBOARD])
-        conversation = (await store.start()).id
+        conversation = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _said("one", message_id="m-1"))
         reading = ChatDevice(device_id="keyboard", access=DeviceAccess.READ_WRITE)
         widened = ChatDevice(device_id="watch", access=DeviceAccess.READ_WRITE)
@@ -2768,12 +2775,12 @@ class ConversationStoreContract:
         ids = ScriptedIds(["c-old", "c-tie-b", "c-tie-a", "c-gone", "c-off"])
         store = _build(factory, now=clock, new_id=ids)
         await store.set_my_devices([_PHONE, _WATCH])
-        old = (await store.start()).id
+        old = (await store.start(home=RecordHome.owners())).id
         clock.advance(_HOUR)
-        tie_b = (await store.start()).id
-        tie_a = (await store.start()).id
-        gone = (await store.start()).id
-        off = (await store.start()).id
+        tie_b = (await store.start(home=RecordHome.owners())).id
+        tie_a = (await store.start(home=RecordHome.owners())).id
+        gone = (await store.start(home=RecordHome.owners())).id
+        off = (await store.start(home=RecordHome.owners())).id
         await store.set_conversation_devices(off, [_PHONE])
         await store.stamp_deleted(gone)
         assert off < tie_a
@@ -2798,10 +2805,10 @@ class ConversationStoreContract:
         """ADR-0296 §3:6: out of "my devices" and every conversation, each a change."""
         store = _build(factory, new_id=ScriptedIds(["c-1", "c-2", "c-3", "c-4"]))
         await store.set_my_devices([_PHONE, _WATCH])
-        first = (await store.start()).id
-        second = (await store.start()).id
-        without = (await store.start()).id
-        stamped = (await store.start()).id
+        first = (await store.start(home=RecordHome.owners())).id
+        second = (await store.start(home=RecordHome.owners())).id
+        without = (await store.start(home=RecordHome.owners())).id
+        stamped = (await store.start(home=RecordHome.owners())).id
         await store.set_conversation_devices(without, [_WATCH])
         await store.stamp_deleted(stamped)
         cursor = (await store.changes(after=0)).next_after
@@ -2823,7 +2830,9 @@ class ConversationStoreContract:
         refused = await store.append_message(first, _said("still here?", message_id="m-1"))
         assert refused.outcome is SendOutcome.NOT_AN_END
         assert await store.device_conversations("phone") == []
-        assert await store.conversation_devices((await store.start()).id) == (_WATCH,)
+        assert await store.conversation_devices(
+            (await store.start(home=RecordHome.owners())).id
+        ) == (_WATCH,)
         assert await store.remove_device("stranger") is False
 
     async def test_removing_a_device_is_one_step_against_starting_a_conversation(
@@ -2831,10 +2840,13 @@ class ConversationStoreContract:
     ) -> None:
         """No conversation started alongside a removal keeps the removed device."""
         await store.set_my_devices([_PHONE, _WATCH])
-        await store.start()
+        await store.start(home=RecordHome.owners())
 
         results = await asyncio.gather(
-            store.start(), store.remove_device("phone"), store.start(), store.start()
+            store.start(home=RecordHome.owners()),
+            store.remove_device("phone"),
+            store.start(home=RecordHome.owners()),
+            store.start(home=RecordHome.owners()),
         )
 
         assert results[1] is True
@@ -2914,7 +2926,7 @@ class ConversationStoreContract:
         second conversation is that conversation's own message.
         """
         conversation = await _chat(store)
-        other = (await store.start()).id
+        other = (await store.start(home=RecordHome.owners())).id
         await store.append_message(conversation, _answered("here", effect_id="e-1"))
 
         assert await store.effect_position(other, "e-1") is None
@@ -2935,7 +2947,7 @@ class ConversationStoreContract:
         stamped = await _chat(store)
         await store.append_message(stamped, _answered("bye", effect_id="e-1"))
         assert await store.stamp_deleted(stamped) is True
-        live = (await store.start()).id
+        live = (await store.start(home=RecordHome.owners())).id
 
         for conversation_id in ("nobody", stamped):
             with pytest.raises(UnknownConversationError):
@@ -3018,9 +3030,9 @@ class ConversationStoreContract:
         clock = MovableClock()
         store = _build(factory, now=clock, new_id=ScriptedIds(["older", "newer"]))
         await store.set_my_devices([_PHONE])
-        older = (await store.start()).id
+        older = (await store.start(home=RecordHome.owners())).id
         clock.advance(_HOUR)
-        newer = (await store.start()).id
+        newer = (await store.start(home=RecordHome.owners())).id
         await store.append_message(older, _said("a", message_id="m-1"))
         await store.append_message(older, _said("b", message_id="m-2"))
         await store.append_message(newer, _said("c", message_id="m-1"))
@@ -3054,6 +3066,166 @@ class ConversationStoreContract:
         changes = await _all_changes(store)
         assert len({one.seq for one in changes}) == len(changes), _INTERLEAVED
 
+    # --- a record's home (ADR-0383 §2 to §5, ADR-0386 §4 and §6) ------------
+
+    def test_start_takes_its_home_as_a_required_keyword(self, store: ConversationStore) -> None:
+        """ADR-0386 §4:1: ``start`` takes the home as a required input with no default."""
+        home = inspect.signature(store.start).parameters["home"]
+
+        assert home.kind is inspect.Parameter.KEYWORD_ONLY
+        assert home.default is inspect.Parameter.empty
+
+    @pytest.mark.parametrize(
+        "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "shared"]
+    )
+    async def test_every_read_of_a_conversation_gives_back_its_home(
+        self, store: ConversationStore, home: RecordHome
+    ) -> None:
+        """ADR-0383 §2:2, ADR-0386 §4:1: the home ``start`` is handed is kept, and read back.
+
+        By the read of one conversation, the listing, the export and one device's view,
+        and kept as both its kind and its identifier.
+        """
+        await store.set_my_devices([_PHONE])
+        started = await store.start(home=home)
+
+        assert started.home == home
+        got = await store.get(started.id)
+        assert got is not None
+        assert got.home == home
+        assert [one.home for one in await store.recent()] == [home]
+        assert [one.home for one in (await store.export()).conversations] == [home]
+        listed = await store.device_conversations("phone")
+        assert [one.conversation.home for one in listed] == [home]
+
+    @pytest.mark.parametrize(
+        "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "shared"]
+    )
+    async def test_every_read_of_a_message_gives_back_its_home(
+        self, store: ConversationStore, home: RecordHome
+    ) -> None:
+        """ADR-0386 §4:2: each message carries the home its ``NewMessage`` did, on every read.
+
+        The transcript, the change stream, one device's view and the snapshot a device
+        added later is given, the messages waiting for the reader, and the export.
+        """
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start(home=home)).id
+        said = NewMessage(
+            author=MessageAuthor.USER,
+            text="Is the lake warm?",
+            device_id="phone",
+            message_id="phone-1",
+            home=home,
+        )
+        answered = NewMessage(author=MessageAuthor.ASSISTANT, text="Warm enough.", home=home)
+        await store.append_message(conversation, said)
+        await store.append_message(conversation, answered)
+        assert await store.set_conversation_devices(conversation, [_PHONE, _WATCH])
+
+        page = await store.transcript(conversation)
+        assert page is not None
+        entries = [one for one in page.entries if isinstance(one, TranscriptMessage)]
+        assert [one.home for one in entries] == [home, home]
+        added = [one.message for one in await _all_changes(store) if one.kind == "message_added"]
+        assert [one.home for one in added] == [home, home]
+        seen = [
+            one.message for one in await _seen_by(store, "phone") if one.kind == "message_added"
+        ]
+        assert [one.home for one in seen] == [home, home]
+        (joined,) = [one for one in await _entries_seen_by(store, "watch") if one.snapshot]
+        shown = [one for one in joined.snapshot or () if isinstance(one, TranscriptMessage)]
+        assert [one.home for one in shown] == [home, home]
+        assert [one.home for one in await store.untaken_messages(conversation)] == [home]
+        assert [one.home for one in (await store.export()).messages] == [home, home]
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.group("group:household"), RecordHome.person("person:sam")],
+        ids=["a-group", "another-person"],
+    )
+    async def test_start_refuses_a_home_no_write_may_carry_before_any_io(
+        self, factory: ConversationStoreFactory, home: RecordHome
+    ) -> None:
+        """ADR-0386 §6:2, ADR-0383 §2:3: ``ValueError``, and nothing minted or recorded.
+
+        The id factory is not drawn on either: the next conversation started takes the
+        first id the script holds.
+        """
+        store = _build(factory, new_id=ScriptedIds(["first"]))
+
+        with pytest.raises(ValueError, match="home"):
+            await store.start(home=home)
+
+        assert await store.recent() == []
+        assert await _all_changes(store) == []
+        assert (await store.start(home=RecordHome.owners())).id == "first"
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.group("group:household"), RecordHome.person("person:sam")],
+        ids=["a-group", "another-person"],
+    )
+    async def test_append_message_refuses_a_home_no_write_may_carry_before_any_io(
+        self, store: ConversationStore, home: RecordHome
+    ) -> None:
+        """ADR-0386 §6:2, ADR-0283 §6:3: ``ValueError`` before any I/O, so nothing is written.
+
+        Before any I/O: even a conversation the store does not hold is not reported,
+        which only a read would find.
+        """
+        conversation = await _chat(store)
+        before = await _all_changes(store)
+        refused = NewMessage(author=MessageAuthor.ASSISTANT, text="Not here.", home=home)
+
+        with pytest.raises(ValueError, match="home"):
+            await store.append_message(conversation, refused)
+        with pytest.raises(ValueError, match="home"):
+            await store.append_message("no-such-conversation", refused)
+
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert page.entries == ()
+        assert await _all_changes(store) == before
+
+    async def test_a_write_that_changes_a_conversation_leaves_its_home(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0383 §4:6: marking it active and recording a turn leave its home as it was."""
+        clock = MovableClock()
+        store = _build(factory, now=clock)
+        conversation = await store.start(home=RecordHome.shared())
+
+        clock.advance(_MINUTE)
+        marked = await store.mark_active(conversation.id)
+        recorded = await store.record_turn(
+            conversation.id, episode_id=_EPISODE, occurred_at=_NOW + _MINUTE
+        )
+
+        assert marked.home == RecordHome.shared()
+        assert recorded is not None
+        assert recorded.home == RecordHome.shared()
+
+    async def test_deleting_a_message_leaves_every_other_message_its_home(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0383 §4:6: a deletion changes no home; its marker carries none (§5:12)."""
+        conversation = (await store.start(home=RecordHome.shared())).id
+        for text in ("One.", "Two."):
+            await store.append_message(
+                conversation,
+                NewMessage(author=MessageAuthor.ASSISTANT, text=text, home=RecordHome.shared()),
+            )
+
+        assert await store.delete_message(conversation, 1) is True
+
+        page = await store.transcript(conversation)
+        assert page is not None
+        marker, kept = page.entries
+        assert marker == DeletedMessage(conversation_id=conversation, position=1)
+        assert isinstance(kept, TranscriptMessage)
+        assert kept.home == RecordHome.shared()
+
     # --- detachment and construction ----------------------------------------
 
     async def test_reads_return_detached_frozen_snapshots(
@@ -3067,7 +3239,7 @@ class ConversationStoreContract:
         """
         clock = MovableClock()
         store = _build(factory, now=clock)
-        conversation = await store.start()
+        conversation = await store.start(home=RecordHome.owners())
         await store.record_turn(conversation.id, episode_id=_EPISODE, occurred_at=_NOW)
 
         clock.advance(_HOUR)
@@ -3307,7 +3479,7 @@ class ConversationStoreContract:
         """ADR-0065 on ``changes``' ``conversation_ids``, a caller's list."""
         async with self._observation_subject(store) as (subject, arm):
             mine = await _chat(subject)
-            other = (await subject.start()).id
+            other = (await subject.start(home=RecordHome.owners())).id
             asked = [mine]
             gate = None if arm is None else arm("changes")
             call = subject.changes(after=0, conversation_ids=asked)

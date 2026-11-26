@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    RecordHome,
     RequestedCall,
     ScheduledTask,
     ScheduledTaskAuthor,
@@ -665,8 +666,8 @@ async def test_a_call_with_no_spawner_is_not_done() -> None:
 async def test_a_task_suggesting_two_places_one_deleted_still_lists_the_other() -> None:
     """§5:8, §13:3."""
     conversations = FakeConversationStore(now=lambda: AT)
-    kept = await conversations.start()
-    gone = await conversations.start()
+    kept = await conversations.start(home=RecordHome.owners())
+    gone = await conversations.start(home=RecordHome.owners())
     await conversations.stamp_deleted(gone.id)
     lists = PlaceLists(conversations=conversations)
 
@@ -681,7 +682,7 @@ async def test_a_task_suggesting_two_places_one_deleted_still_lists_the_other() 
 async def test_a_deleted_conversation_leaves_the_line_or_nothing() -> None:
     """§5:9, §13:3: nothing is cancelled; the line is the fallback, and with none, nothing."""
     conversations = FakeConversationStore(now=lambda: AT)
-    gone = await conversations.start()
+    gone = await conversations.start(home=RecordHome.owners())
     await conversations.stamp_deleted(gone.id)
     suggested = [f"conversation:{gone.id}"]
 
@@ -701,7 +702,7 @@ async def test_a_deleted_conversation_leaves_the_line_or_nothing() -> None:
 async def test_an_activation_not_a_tasks_lists_its_input_conversation_and_the_line() -> None:
     """§5:11: the conversation its input came from, and the line's chat where connected."""
     conversations = FakeConversationStore(now=lambda: AT)
-    here = await conversations.start()
+    here = await conversations.start(home=RecordHome.owners())
     channel = CHAT.model_copy(update={"instance_id": here.id})
 
     async def disconnected() -> bool:

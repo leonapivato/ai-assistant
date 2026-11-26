@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     MessageAddedChange,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     Sureness,
     TranscriptMessage,
     TranscriptPage,
@@ -288,6 +289,7 @@ def _recorded(text: str, *, came_through: str | None) -> TranscriptMessage:
         "text": text,
         "device_id": _LONG_DEVICE,
         "message_id": "m",
+        "home": RecordHome.owners(),
     }
     if came_through is not None:
         held["came_through"] = came_through
@@ -304,7 +306,7 @@ def test_a_message_through_its_own_device_dumps_as_before_the_field() -> None:
     assert named.model_dump(mode="json")["came_through"] == _GATEWAY
     assert TranscriptMessage.model_validate(itself.model_dump(mode="json")) == itself
     assert TranscriptMessage.model_validate(named.model_dump(mode="json")) == named
-    said = NewMessage(author=MessageAuthor.ASSISTANT, text="hello")
+    said = NewMessage(author=MessageAuthor.ASSISTANT, text="hello", home=RecordHome.owners())
     assert said.came_through is None
     assert "came_through" not in said.model_dump()
 
@@ -321,6 +323,7 @@ def test_a_message_admitted_at_the_bound_before_the_field_is_still_read_back() -
                 _CONVERSATION,
                 UserMessage(device_id=_LONG_DEVICE, message_id="m", text="x" * middle),
                 max_bytes=_LIMIT,
+                home=RecordHome.owners(),
             )
             low = middle
         except OversizedValueError:
@@ -338,4 +341,5 @@ def test_a_message_admitted_at_the_bound_before_the_field_is_still_read_back() -
             UserMessage(device_id=_LONG_DEVICE, message_id="m", text=largest),
             max_bytes=_LIMIT,
             came_through="g" * 128,
+            home=RecordHome.owners(),
         )

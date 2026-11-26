@@ -190,6 +190,7 @@ def _message(position: int, author: MessageAuthor, text: str) -> TranscriptMessa
         text=text,
         device_id="dev-1" if author is MessageAuthor.USER else None,
         message_id=f"m{position}" if author is MessageAuthor.USER else None,
+        home=RecordHome.owners(),
     )
 
 

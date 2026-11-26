@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     DevicesChangedChange,
     MessageAuthor,
     NewMessage,
+    RecordHome,
 )
 from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.refusals import refusal_detail
@@ -172,7 +173,10 @@ async def test_a_message_written_after_opening_arrives_as_a_change() -> None:
         values = _values(await _follow(one, cursor))
         opened = await _next(values)
         await engine.chat.append_message(
-            started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.")
+            started.id,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", home=RecordHome.owners()
+            ),
         )
         value = await _next(values)
 
@@ -195,7 +199,10 @@ async def test_each_chunk_is_one_value_of_its_own_kind() -> None:
     source = FakeAssistantEngine()
     started = await source.start_conversation()
     await source.chat.append_message(
-        started.id, NewMessage(author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.")
+        started.id,
+        NewMessage(
+            author=MessageAuthor.ASSISTANT, text="Pinecrest, Friday.", home=RecordHome.owners()
+        ),
     )
     page = await source.transcript(started.id)
     assert page is not None

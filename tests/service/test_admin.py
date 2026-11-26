@@ -20,7 +20,13 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 
 from ai_assistant.core.errors import ConversationStoreError, DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChatDevice, DeviceAccess, DeviceRole, DevicesChangedChange
+from ai_assistant.core.types import (
+    ChatDevice,
+    DeviceAccess,
+    DeviceRole,
+    DevicesChangedChange,
+    RecordHome,
+)
 from ai_assistant.service import admin, device
 from ai_assistant.service.admin import (
     ADMIN_FRAME_BYTES,
@@ -1239,7 +1245,7 @@ async def _sets_naming(device: str) -> FakeConversationStore:
     space = FakeConversationStore()
     named = ChatDevice(device_id=device, access=DeviceAccess.READ_WRITE)
     await space.set_my_devices((named,))
-    started = await space.start()
+    started = await space.start(home=RecordHome.owners())
     await space.set_conversation_devices(started.id, (named,))
     return space
 

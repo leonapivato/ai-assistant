@@ -8,7 +8,9 @@ export that carries the conversations and their transcripts and no episode
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -39,11 +41,16 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageReceipt,
     NewMessage,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
     TranscriptPage,
+    UserMessage,
     checked_chat_devices,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(hours=1)
@@ -54,6 +61,7 @@ def _conversation(conversation_id: str = "c-1", **overrides: object) -> Conversa
         "id": conversation_id,
         "started_at": _NOW,
         "last_active_at": _NOW,
+        "home": RecordHome.owners(),
     }
     fields.update(overrides)
     return Conversation.model_validate(fields)
@@ -126,7 +134,7 @@ def test_an_export_carries_no_episode() -> None:
         "conversations",
         "messages",
     }
-    assert exported.schema_version == 7
+    assert exported.schema_version == 8
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"exported_at": _NOW, "turns": ()})
 
@@ -142,20 +150,23 @@ def test_a_conversation_carries_no_observation_watermark() -> None:
         _conversation(observed_through=3)
 
 
-def test_the_export_version_moves_because_its_messages_gained_their_claim() -> None:
-    """ADR-0350 §12:9: each message carries the effect record it was claimed under.
+def test_the_export_version_moves_because_its_records_gained_their_home() -> None:
+    """ADR-0386 §4:1, §4:2: each conversation and each message carries its home.
 
     That is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5),
-    so the document reads 7 where it read 6 (and 6 where ADR-0293 §5:3 moved it from 5,
-    for the transcripts).
+    so the document reads 8 where it read 7 (and 7 where ADR-0350 §12:9 moved it from 6,
+    for each message's claim, and 6 where ADR-0293 §5:3 moved it from 5, for the
+    transcripts).
     """
-    assert ConversationExport(exported_at=_NOW).schema_version == 7
+    assert ConversationExport(exported_at=_NOW).schema_version == 8
     assert ConversationExport.model_fields["messages"].annotation == tuple[ExportedMessage, ...]
+    assert "home" in Conversation.model_fields
+    assert "home" in ExportedMessage.model_fields
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 8])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 9])
 def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: int) -> None:
-    """The export label describes the claim-carrying ADR-0350 §12:9 shape exactly."""
+    """The export label describes the home-carrying ADR-0386 §4 shape exactly."""
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})
 
@@ -170,6 +181,7 @@ def _message(position: int = 1, **overrides: object) -> TranscriptMessage:
         "written_at": _NOW,
         "author": MessageAuthor.ASSISTANT,
         "text": "hello",
+        "home": RecordHome.owners(),
     }
     fields.update(overrides)
     return TranscriptMessage.model_validate(fields)
@@ -219,8 +231,15 @@ def test_a_message_within_every_bound_is_constructed() -> None:
         author=MessageAuthor.ASSISTANT,
         text="x" * TRANSCRIPT_MESSAGE_MAX_CHARS,
         options=tuple(str(index) for index in range(MESSAGE_OPTIONS_MAX)),
+        home=RecordHome.owners(),
     )
-    said = NewMessage(author=MessageAuthor.USER, text="hi", device_id="phone", message_id="m")
+    said = NewMessage(
+        author=MessageAuthor.USER,
+        text="hi",
+        device_id="phone",
+        message_id="m",
+        home=RecordHome.owners(),
+    )
 
     assert len(question.options) == MESSAGE_OPTIONS_MAX
     assert said.cut_off is False
@@ -229,7 +248,12 @@ def test_a_message_within_every_bound_is_constructed() -> None:
 
 def test_only_the_assistants_message_is_claimed_under_an_effect_record() -> None:
     """ADR-0350 §12:9: the claim is the assistant's alone, as the export carries it too."""
-    claimed = NewMessage(author=MessageAuthor.ASSISTANT, text="Time to call Mom.", effect_id="e-1")
+    claimed = NewMessage(
+        author=MessageAuthor.ASSISTANT,
+        text="Time to call Mom.",
+        effect_id="e-1",
+        home=RecordHome.owners(),
+    )
 
     assert claimed.effect_id == "e-1"
     assert _exported(1, effect_id="e-1").effect_id == "e-1"
@@ -243,7 +267,7 @@ def test_an_unclaimed_message_dumps_as_it_did_before_the_claim() -> None:
     So a dump spread into a ``TranscriptMessage``, which never carries the claim, still
     builds one; a claimed message's dump carries it, and validates back to itself.
     """
-    unclaimed = NewMessage(author=MessageAuthor.ASSISTANT, text="hi")
+    unclaimed = NewMessage(author=MessageAuthor.ASSISTANT, text="hi", home=RecordHome.owners())
     claimed = unclaimed.model_copy(update={"effect_id": "e-1"})
 
     assert "effect_id" not in unclaimed.model_dump()
@@ -441,3 +465,45 @@ def test_an_export_carries_only_its_own_conversations_messages_once_each() -> No
             conversations=(_conversation(),),
             messages=(_exported(1), _exported(1, text="again")),
         )
+
+
+# --- a record's home (ADR-0383 §2, ADR-0386 §4) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _conversation(home=None),
+        lambda: _message(home=None),
+        lambda: NewMessage.model_validate({"author": MessageAuthor.ASSISTANT, "text": "hello"}),
+    ],
+    ids=["conversation", "transcript-message", "new-message"],
+)
+def test_a_conversation_and_each_message_require_a_home(build: Callable[[], object]) -> None:
+    """ADR-0383 §5:4, ADR-0386 §4: a required field, so no write can leave it out."""
+    with pytest.raises(ValidationError, match="home"):
+        build()
+
+
+def test_a_message_carries_its_own_home_and_a_marker_none() -> None:
+    """ADR-0386 §4:2: the message's home is its own; the marker carries nothing (§5:12)."""
+    message = _message(home=RecordHome.shared())
+
+    assert message.home == RecordHome.shared()
+    assert TranscriptMessage.model_validate(message.model_dump(mode="json")) == message
+    assert "home" not in DeletedMessage.model_fields
+
+
+def test_a_users_message_cannot_say_its_home_and_the_engine_sets_it() -> None:
+    """ADR-0383 §4:3, §4:6: the client's message names no home; the caller's write does."""
+    sent = {"device_id": "phone", "message_id": "m-1", "text": "hello"}
+
+    with pytest.raises(ValidationError):
+        UserMessage.model_validate({**sent, "home": {"kind": "shared"}})
+    written = UserMessage.model_validate(sent).as_new_message(home=RecordHome.owners())
+    assert written.home == RecordHome.owners()
+    assert "home" in inspect.signature(UserMessage.as_new_message).parameters
+    assert (
+        inspect.signature(UserMessage.as_new_message).parameters["home"].default
+        is inspect.Parameter.empty
+    )

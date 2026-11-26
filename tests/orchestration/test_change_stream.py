@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     MessageAddedChange,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     RequestingDevice,
     TranscriptMessage,
     UserMessage,
@@ -128,7 +129,13 @@ def _stream(
 
 
 def _said(text: str, message_id: str, device: str = "phone") -> NewMessage:
-    return NewMessage(author=MessageAuthor.USER, text=text, device_id=device, message_id=message_id)
+    return NewMessage(
+        author=MessageAuthor.USER,
+        text=text,
+        device_id=device,
+        message_id=message_id,
+        home=RecordHome.owners(),
+    )
 
 
 class _Following:
@@ -181,7 +188,7 @@ async def _sent(
 
 async def _chat(chat: FakeConversationStore, *devices: ChatDevice) -> str:
     await chat.set_my_devices(devices)
-    return (await chat.start()).id
+    return (await chat.start(home=RecordHome.owners())).id
 
 
 async def test_the_hubs_machine_is_sent_every_change_and_no_snapshot() -> None:
@@ -702,7 +709,7 @@ def _longest_admitted(limit: int) -> int:
         middle = (low + high) // 2
         message = UserMessage(device_id="phone", message_id="m", text="x" * middle)
         try:
-            check_message_fits(_UUID_WIDE, message, max_bytes=limit)
+            check_message_fits(_UUID_WIDE, message, max_bytes=limit, home=RecordHome.owners())
         except OversizedValueError:
             high = middle
         else:
@@ -720,7 +727,7 @@ def test_a_message_admitted_is_one_its_chunk_can_carry(limit: int) -> None:
     """
     longest = _longest_admitted(limit)
     admitted = UserMessage(device_id="phone", message_id="m", text="x" * longest)
-    chunk = _widest_chunk(_UUID_WIDE, admitted.as_new_message())
+    chunk = _widest_chunk(_UUID_WIDE, admitted.as_new_message(home=RecordHome.owners()))
 
     assert len(canonical_payload(chunk)) <= limit
     assert fit_stream_chunk(chunk, max_bytes=limit) == chunk
@@ -729,7 +736,7 @@ def test_a_message_admitted_is_one_its_chunk_can_carry(limit: int) -> None:
 def test_an_assistant_message_is_cut_to_what_its_chunk_can_carry() -> None:
     """The writer's fitting measures the chunk too, so a reply never stops a stream."""
     limit = 2048
-    reply = NewMessage(author=MessageAuthor.ASSISTANT, text="y" * 4000)
+    reply = NewMessage(author=MessageAuthor.ASSISTANT, text="y" * 4000, home=RecordHome.owners())
 
     fitted = fitted_message(_UUID_WIDE, reply, max_bytes=limit)
 
@@ -740,7 +747,12 @@ def test_an_assistant_message_is_cut_to_what_its_chunk_can_carry() -> None:
 def test_a_message_cut_to_fit_keeps_the_claim_it_is_written_under() -> None:
     """ADR-0350 §12:9: a cut message is still the one its effect record names."""
     limit = 2048
-    reply = NewMessage(author=MessageAuthor.ASSISTANT, text="y" * 4000, effect_id="effect:abc")
+    reply = NewMessage(
+        author=MessageAuthor.ASSISTANT,
+        text="y" * 4000,
+        effect_id="effect:abc",
+        home=RecordHome.owners(),
+    )
 
     fitted = fitted_message(_UUID_WIDE, reply, max_bytes=limit)
 
@@ -783,7 +795,7 @@ def test_a_message_recorded_before_the_stream_existed_fits_its_chunk() -> None:
         while high - low > 1:
             middle = (low + high) // 2
             said = UserMessage(device_id="phone", message_id="m", text="x" * middle)
-            chunk = _widest_chunk(_UUID_WIDE, said.as_new_message())
+            chunk = _widest_chunk(_UUID_WIDE, said.as_new_message(home=RecordHome.owners()))
             assert chunk.change is not None
             page = ChatChanges(changes=(chunk.change.change,), next_after=_WIDEST)
             if len(canonical_payload(page)) <= limit:
@@ -791,7 +803,7 @@ def test_a_message_recorded_before_the_stream_existed_fits_its_chunk() -> None:
             else:
                 high = middle
         said = UserMessage(device_id="phone", message_id="m", text="x" * low)
-        chunk = _widest_chunk(_UUID_WIDE, said.as_new_message())
+        chunk = _widest_chunk(_UUID_WIDE, said.as_new_message(home=RecordHome.owners()))
         assert len(canonical_payload(chunk)) <= limit
 
 

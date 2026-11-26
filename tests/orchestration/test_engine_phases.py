@@ -1170,7 +1170,7 @@ async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remem
         await _say(harness, conversation, "remember I like green tea")
         episode = await _settled(harness, conversation)
 
-    expected = couldnt_finish(("the tool remember_fact ran",)).text
+    expected = couldnt_finish(("the tool remember_fact ran",), home=RecordHome.owners()).text
     assert _said(await _messages(harness, conversation))[1:] == [
         (MessageAuthor.ASSISTANT, expected)
     ]
@@ -2141,8 +2141,13 @@ async def _ended_failing(harness: Harness, completer: FakeToolCallingCompleter) 
         msg = "a stage failed"
         raise RuntimeError(msg)
 
-    with pytest.raises(RuntimeError, match="a stage failed"):
-        await path.run(given, failing, state=None)
+    # The message is the running work's, so it is written inside one (ADR-0383 §4:1).
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        with pytest.raises(RuntimeError, match="a stage failed"):
+            await path.run(given, failing, state=None)
+    finally:
+        CURRENT_ACTIVATION.reset(token)
     (*_, last) = await _messages(harness, conversation)
     return last.text
 
@@ -2174,7 +2179,12 @@ async def test_couldnt_finish_lists_an_unknown_outcome_as_unknown() -> None:
 
     written = await _ended_failing(harness, completer)
 
-    assert written == couldnt_finish(("the tool remember_fact ran", _UNKNOWN_BOOKING)).text
+    assert (
+        written
+        == couldnt_finish(
+            ("the tool remember_fact ran", _UNKNOWN_BOOKING), home=RecordHome.owners()
+        ).text
+    )
 
 
 async def test_couldnt_finish_is_written_where_the_effect_records_cannot_be_read(
@@ -2233,11 +2243,18 @@ async def test_a_later_activation_sees_what_an_earlier_one_wrote_under_its_episo
     conversation = await _conversation(harness)
     store = harness.conversation_store
     # What the old path left: a message it took in, and the reply its adapter wrote.
-    old = NewMessage(author=MessageAuthor.USER, text="old", device_id="phone", message_id="m-0")
+    old = NewMessage(
+        author=MessageAuthor.USER,
+        text="old",
+        device_id="phone",
+        message_id="m-0",
+        home=RecordHome.owners(),
+    )
     await store.append_message(conversation, old)
     await store.take_in(conversation, positions=[1], activation_id=_OLD_PATH)
     await store.append_message(
-        conversation, NewMessage(author=MessageAuthor.ASSISTANT, text="Old reply.")
+        conversation,
+        NewMessage(author=MessageAuthor.ASSISTANT, text="Old reply.", home=RecordHome.owners()),
     )
 
     await _say(harness, conversation, "hi")

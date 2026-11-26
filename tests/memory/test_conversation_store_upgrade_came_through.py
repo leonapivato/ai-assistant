@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     DeletedMessage,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
 )
@@ -61,14 +62,18 @@ _TABLES: Final = {
 
 
 def _rows(path: Path) -> dict[str, list[tuple[Any, ...]]]:
-    """Every row of every table, by the columns the previous release wrote."""
+    """Every row of every table, by the columns the previous release wrote.
+
+    A conversation's and a message's home, which the next label's upgrade adds and sets
+    (ADR-0383 §5:1), are not among them.
+    """
     with sqlite3.connect(path) as conn:
         held: dict[str, list[tuple[Any, ...]]] = {}
         for table, key in _TABLES.items():
             columns = [
                 str(row[1])
                 for row in conn.execute(f"PRAGMA table_info({table})")
-                if row[1] != "came_through"
+                if row[1] not in {"came_through", "home_kind", "home_id"}
             ]
             held[table] = conn.execute(
                 f"SELECT {', '.join(columns)} FROM {table} ORDER BY {key}"  # noqa: S608 — names read from the file's own schema
@@ -203,6 +208,7 @@ async def test_a_message_through_another_device_round_trips(legacy: Path) -> Non
                 device_id="phone",
                 message_id="phone-msg-4",
                 came_through="gateway-1",
+                home=RecordHome.owners(),
             ),
         )
     finally:

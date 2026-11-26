@@ -64,6 +64,19 @@ column, at the label 13, is upgraded in place when the store opens (ADR-0326 §4
 column is added, each standing user's message is set as having come through the device
 it is written from, and the label advances to 14, which an older build refuses (§5:3).
 
+**Each conversation and each message carries its home** (ADR-0383 §3, ADR-0386 §4), as
+both its kind and its identifier in two columns of its own row (``home_kind``,
+``home_id``), so a read can be narrowed by it inside this store's own query. ``start``
+writes the home it is handed and ``append_message`` the one its message carries; a
+message's is its own, not its conversation's. No write changes one: deleting a message
+clears every property but its ids and keeps its home with the marker's row, though the
+marker a read gives back carries none (ADR-0293 §5:12, ADR-0383 §4:6). A home
+:func:`~ai_assistant.core.types.home_may_be_written` does not allow is refused with
+``ValueError`` before any I/O (ADR-0386 §6:2). A file written before the columns, at the
+label 14, is upgraded in place when the store opens (ADR-0326 §4:1): the columns are
+added, the owner's domain is written into every conversation and every message it holds
+(ADR-0383 §5:1), and the label advances to 15, which an older build refuses (§5:3).
+
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
 ``observed_through`` column and nothing adds one to an existing file. Nothing drops
 it either: a file written by an earlier build that still carries the column is
@@ -114,14 +127,17 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageDeletedChange,
     MessageReceipt,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
     TranscriptPage,
     UtcInstant,
     checked_chat_devices,
     describe_untrusted,
+    home_may_be_written,
 )
 from ai_assistant.memory._episode_format import (
+    CAME_THROUGH_CONVERSATION_RECORD_FORMAT,
     CLAIMED_CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMAT,
     CONVERSATION_RECORD_FORMATS,
@@ -270,6 +286,20 @@ _EFFECT_COLUMN: Final = "effect_id TEXT"
 #: message and a marker carry none.
 _CAME_THROUGH_COLUMN: Final = "came_through TEXT"
 
+#: ADR-0383 §2:2's two columns, a home's kind and its identifier, on both the
+#: ``conversations`` and the ``messages`` table (ADR-0386 §4:1, §4:2). Held apart from the
+#: ``CREATE TABLE`` statements as :data:`_EFFECT_COLUMN` is:
+#: :meth:`SqliteConversationStore._upgrade_to_homes` adds them to every table that lacks
+#: them, a fresh file's and one written before them alike, and writes the owner's domain
+#: into every row a file held before them (ADR-0383 §5:1). Nullable, as SQLite adds a
+#: column only so; a row with none, or one that does not read as a home, is a corrupt
+#: row, never anyone's (§5:3).
+_HOME_COLUMNS: Final = ("home_kind TEXT", "home_id TEXT")
+
+#: The tables that carry a home: a conversation and each message, and nothing else this
+#: store keeps (ADR-0383 §3: device rows carry none).
+_HOMED_TABLES: Final = ("conversations", "messages")
+
 #: What makes an effect record name one message per conversation (ADR-0350 §12:9), and
 #: what :meth:`SqliteConversationStore.effect_position` reads through. Created after
 #: the column is there, so it is not in :data:`_CHAT_SCHEMA`.
@@ -322,6 +352,7 @@ _DEVICE_CHANGES_SQL: Final = (
     "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
     "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
     "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through, "
+    "m.home_kind, m.home_id, "
     "(SELECT COALESCE(p.devices, X'') FROM chat_changes p "
     "WHERE p.conversation_id IS c.conversation_id "
     "AND p.kind IN ('conversation_started', 'devices_changed') AND p.seq < c.seq "
@@ -339,9 +370,10 @@ _DEVICE_CHANGES_BATCH: Final = 500
 #: ``recent``'s, since it is ``recent`` for one device.
 _DEFAULT_DEVICE_CONVERSATIONS_PAGE: Final = 50
 
-# **The five columns every conversation read selects.** An ordinary comment and not
-# a ``#:`` attribute block, because there is deliberately no name here to attach one
-# to: the list is written out at each read that needs it, because ruff's ``S608`` reads
+# **The seven columns every conversation read selects**, its home's two last. An
+# ordinary comment and not a ``#:`` attribute block, because there is deliberately no
+# name here to attach one to: the list is written out at each read that needs it,
+# because ruff's ``S608`` reads
 # a query assembled from a name as a possible injection vector whatever the name
 # holds, and a literal at the call site is the cheaper answer than a suppression on
 # each of them. What keeps the reads in step is
@@ -694,11 +726,45 @@ def _bool_of(value: object) -> bool:
     return bool(value)
 
 
+def _checked_home(home: object) -> RecordHome:
+    """Validate the home a write carries (ADR-0386 §4, §6:2), before any I/O.
+
+    Re-validated from its dump, so a home built without validation cannot reach a row.
+
+    Raises:
+        ValueError: If it is not a :class:`~ai_assistant.core.types.RecordHome`, or is
+            one :func:`~ai_assistant.core.types.home_may_be_written` does not allow
+            (ADR-0383 §2:3, §4:7).
+    """
+    if not isinstance(home, RecordHome):
+        msg = f"a home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
+
+
+def _home_from(kind: Any, home_id: Any) -> RecordHome:
+    """Rebuild a stored home from its two columns.
+
+    A row with no home, or one that does not read as a home, is not read as anyone's:
+    it raises, as any other corrupt row does (ADR-0383 §5:3).
+
+    Raises:
+        ValidationError: If the two columns do not make a home.
+    """
+    return RecordHome(kind=kind, id=home_id)
+
+
 def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
     """Rebuild a message, or its marker, from the message columns.
 
     The columns are ``conversation_id, position, author, written_at, text,
-    replies_to, options, cut_off, device_id, message_id, deleted, came_through``.
+    replies_to, options, cut_off, device_id, message_id, deleted, came_through,
+    home_kind, home_id``. A marker carries no home (ADR-0293 §5:12), and its row's is not
+    read.
 
     Raises:
         ConversationStoreError: If the stored row does not decode.
@@ -719,10 +785,15 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
             device_id=row[8],
             message_id=row[9],
             came_through=row[11],
+            home=_home_from(row[12], row[13]),
         )
     except (ValidationError, ValueError, TypeError, OverflowError) as exc:
         msg = f"a stored message could not be decoded: {exc}"
         raise ConversationStoreError(msg) from exc
+
+
+#: How many columns :func:`_message_from` reads.
+_MESSAGE_COLUMNS: Final = 14
 
 
 def _exported_from(row: Sequence[Any]) -> ExportedMessage:
@@ -734,12 +805,12 @@ def _exported_from(row: Sequence[Any]) -> ExportedMessage:
         ConversationStoreError: If the stored row does not decode, or is a marker,
             which the export does not carry.
     """
-    message = _message_from(row[:12])
+    message = _message_from(row[:_MESSAGE_COLUMNS])
     if not isinstance(message, TranscriptMessage):
         msg = "a deleted message's marker was read as a standing message"
         raise ConversationStoreError(msg)
     try:
-        return ExportedMessage(**dict(message), effect_id=row[12])
+        return ExportedMessage(**dict(message), effect_id=row[_MESSAGE_COLUMNS])
     except ValidationError as exc:
         msg = f"a stored message's effect id could not be decoded: {exc}"
         raise ConversationStoreError(msg) from exc
@@ -1040,6 +1111,7 @@ class SqliteConversationStore:
                 conn.execute(statement)
             self._upgrade_to_claimed(conn, existing_format)
             self._upgrade_to_came_through(conn, existing_format)
+            self._upgrade_to_homes(conn, existing_format)
             conn.execute(_EFFECT_INDEX)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
@@ -1179,11 +1251,49 @@ class SqliteConversationStore:
         present = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
         if _CAME_THROUGH_COLUMN.split(" ")[0] not in present:
             conn.execute("ALTER TABLE messages ADD COLUMN " + _CAME_THROUGH_COLUMN)
-        if found is not None and found < CONVERSATION_RECORD_FORMAT:
+        if found is not None and found < CAME_THROUGH_CONVERSATION_RECORD_FORMAT:
             conn.execute(
                 "UPDATE messages SET came_through = device_id "
                 "WHERE deleted = 0 AND device_id IS NOT NULL AND came_through IS NULL"
             )
+            conn.execute(
+                "UPDATE episode_record_format SET version = ?",
+                (CAME_THROUGH_CONVERSATION_RECORD_FORMAT,),
+            )
+
+    @staticmethod
+    def _upgrade_to_homes(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0383 §5:1's, in place (ADR-0326 §4:1).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_came_through` has carried a file to 14, so the upgrades chain
+        (§4:5), and it completes or rolls back with the transaction (§4:3). Each table of
+        :data:`_HOMED_TABLES` gains :data:`_HOME_COLUMNS` where it lacks them, read from
+        ``PRAGMA table_info`` as the earlier upgrades read their columns, so a fresh file
+        gains them here too. Every conversation and every message a file held before them,
+        a deleted message's marker included, is written as the owner's domain, whatever
+        the works that wrote them were for: nothing asks the owner anything (ADR-0383
+        §5:1). No other byte moves (§4:4), and no device row, change or bookkeeping row
+        gains a home (ADR-0383 §3). The label then advances, so an older build, which reads
+        12 to 14, refuses the file (§5:3).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        for table in _HOMED_TABLES:
+            present = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+            for column in _HOME_COLUMNS:
+                if column.split(" ")[0] not in present:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+        if found is not None and found < CONVERSATION_RECORD_FORMAT:
+            owners = RecordHome.owners()
+            for table in _HOMED_TABLES:
+                conn.execute(
+                    f"UPDATE {table} SET home_kind = ?, home_id = ?",  # noqa: S608 — a module constant, no input
+                    (owners.kind.value, owners.id),
+                )
             conn.execute(
                 "UPDATE episode_record_format SET version = ?", (CONVERSATION_RECORD_FORMAT,)
             )
@@ -1283,8 +1393,9 @@ class SqliteConversationStore:
     def _decode_conversation(row: Sequence[Any]) -> Conversation:
         """Rebuild a :class:`Conversation` from its row, surfacing corruption.
 
-        The row is the five columns every conversation read selects, in the order
-        each of them names them.
+        The row is the seven columns every conversation read selects, in the order
+        each of them names them. A row with no home, or one that does not read as a
+        home, is not read as anyone's: it is corrupt (ADR-0383 §5:3).
 
         Raises:
             ConversationStoreError: If the stored row does not validate.
@@ -1298,6 +1409,7 @@ class SqliteConversationStore:
                     None if row[3] is None else _instant_from(row[3], what="last_turn_at")
                 ),
                 deleted_at=None if row[4] is None else _instant_from(row[4], what="deleted_at"),
+                home=_home_from(row[5], row[6]),
             )
         except (ValidationError, TypeError, OverflowError) as exc:
             msg = f"a stored conversation could not be decoded: {exc}"
@@ -1309,7 +1421,8 @@ class SqliteConversationStore:
         rows = cls._fetch(
             conn,
             "read a conversation",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.home_kind, c.home_id "
             "FROM conversations c WHERE c.id = ?",
             (conversation_id,),
         )
@@ -1455,23 +1568,26 @@ class SqliteConversationStore:
 
     # --- the contract --------------------------------------------------------
 
-    async def start(self) -> Conversation:
-        """Mint an id, insert the record if that id is absent, and return it.
+    async def start(self, *, home: RecordHome) -> Conversation:
+        """Mint an id, insert the record in ``home`` if that id is absent, and return it.
 
         The presence check and the insert are one ``IMMEDIATE`` transaction, so a
         second writer cannot land the row between them; a collision re-mints, and
         an exhausted budget raises rather than returning someone else's
-        conversation (ADR-0074 §1).
+        conversation (ADR-0074 §1). The home is checked first, before the id factory
+        is drawn on or the store is reached (ADR-0386 §6:2).
 
         Raises:
+            ValueError: If ``home`` is one no write may carry.
             ConversationStoreError: If the retry budget is exhausted, the id
                 factory produced something unusable, or the store cannot be
                 written.
         """
+        checked = _checked_home(home)
         for _ in range(_START_RETRY_BUDGET):
             minted = self._new_id()
             async with self._lock:
-                conversation = await _run_to_completion(self._insert_sync, minted)
+                conversation = await _run_to_completion(self._insert_sync, minted, checked)
             if conversation is not None:
                 return conversation
         msg = (
@@ -1480,8 +1596,8 @@ class SqliteConversationStore:
         )
         raise ConversationStoreError(msg)
 
-    def _insert_sync(self, minted: str) -> Conversation | None:
-        """Insert a conversation under ``minted``, or ``None`` if that id is taken.
+    def _insert_sync(self, minted: str, home: RecordHome) -> Conversation | None:
+        """Insert a conversation in ``home`` under ``minted``, or ``None`` if that id is taken.
 
         The clock is read **inside** the transaction, after the write exclusion is
         held. A reading taken before it could go stale while this call queues
@@ -1495,7 +1611,9 @@ class SqliteConversationStore:
             # Validated before it reaches the database, so a misbehaving factory
             # is this seam's error rather than a raw one from a bind parameter.
             try:
-                conversation = Conversation(id=minted, started_at=now, last_active_at=now)
+                conversation = Conversation(
+                    id=minted, started_at=now, last_active_at=now, home=home
+                )
             except (ValidationError, TypeError) as exc:
                 msg = f"the id factory minted an unusable id: {describe_untrusted(minted)}"
                 raise ConversationStoreError(msg) from exc
@@ -1507,12 +1625,14 @@ class SqliteConversationStore:
                 # the `DEFAULT 0` their declaration carries — "read by nothing and
                 # written by nothing", which is what makes them costless to keep.
                 "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
-                "deleted_at) "
-                "VALUES (?, ?, ?, NULL, NULL)",
+                "deleted_at, home_kind, home_id) "
+                "VALUES (?, ?, ?, NULL, NULL, ?, ?)",
                 (
                     conversation.id,
                     _to_micros(conversation.started_at),
                     _to_micros(conversation.last_active_at),
+                    conversation.home.kind.value,
+                    conversation.home.id,
                 ),
             )
             # ADR-0293 §2:1, §3:1: empty, on "my devices" as they stand, and the
@@ -1545,7 +1665,8 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "read a conversation",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.home_kind, c.home_id "
             "FROM conversations c WHERE c.id = ? AND c.deleted_at IS NULL",
             (conversation_id,),
         )
@@ -1690,7 +1811,8 @@ class SqliteConversationStore:
         return self._fetch(
             self._conn,
             "list recent conversations",
-            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
+            "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+            "c.home_kind, c.home_id "
             "FROM conversations c WHERE c.deleted_at IS NULL "
             "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -1832,7 +1954,8 @@ class SqliteConversationStore:
             conversations = self._fetch(
                 conn,
                 "export conversations",
-                "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at "
+                "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
+                "c.home_kind, c.home_id "
                 "FROM conversations c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.last_active_at DESC, c.id ASC",
             )
@@ -1841,7 +1964,7 @@ class SqliteConversationStore:
                 "export transcripts",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
                 "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
-                "m.came_through, m.effect_id "
+                "m.came_through, m.home_kind, m.home_id, m.effect_id "
                 "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
                 "WHERE c.deleted_at IS NULL AND m.deleted = 0 "
                 "ORDER BY m.conversation_id ASC, m.position ASC",
@@ -1856,12 +1979,16 @@ class SqliteConversationStore:
         The repeat check, the device check, the reply check, the insert and the
         change are one step, so two sends of one message cannot both record it and
         a device removed concurrently either wrote before the removal or not at all.
+        The message's home is checked first, before the lock and any I/O (ADR-0386
+        §6:2), and written with it.
 
         Raises:
+            ValueError: If the message's home is one no write may carry.
             UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
             ConversationStoreError: If the store cannot be written.
         """
+        _checked_home(message.home)
         async with self._lock:
             return await _run_to_completion(self._append_message_sync, conversation_id, message)
 
@@ -1928,7 +2055,8 @@ class SqliteConversationStore:
             conn.execute(
                 "INSERT INTO messages(conversation_id, position, author, written_at, text, "
                 "replies_to, options, cut_off, device_id, message_id, deleted, came_through, "
-                "effect_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                "effect_id, home_kind, home_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
                 (
                     conversation_id,
                     position,
@@ -1942,6 +2070,8 @@ class SqliteConversationStore:
                     recorded.message_id,
                     recorded.came_through,
                     message.effect_id,
+                    recorded.home.kind.value,
+                    recorded.home.id,
                 ),
             )
             self._record_change(conn, "message_added", conversation_id, position=position)
@@ -2080,7 +2210,8 @@ class SqliteConversationStore:
                 return None
             columns = (
                 "SELECT conversation_id, position, author, written_at, text, replies_to, "
-                "options, cut_off, device_id, message_id, deleted, came_through FROM messages "
+                "options, cut_off, device_id, message_id, deleted, came_through, home_kind, "
+                "home_id FROM messages "
             )
             if before is None:
                 rows = self._fetch(
@@ -2140,7 +2271,8 @@ class SqliteConversationStore:
                 "read the change stream",
                 "SELECT c.seq, c.kind, c.conversation_id, c.position, c.devices, "
                 "m.conversation_id, m.position, m.author, m.written_at, m.text, m.replies_to, "
-                "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through "
+                "m.options, m.cut_off, m.device_id, m.message_id, m.deleted, m.came_through, "
+                "m.home_kind, m.home_id "
                 "FROM chat_changes c LEFT JOIN messages m ON c.kind = 'message_added' "
                 "AND m.conversation_id = c.conversation_id AND m.position = c.position "
                 "WHERE c.seq > ? AND (? IS NULL OR c.conversation_id IS NULL OR "
@@ -2320,7 +2452,7 @@ class SqliteConversationStore:
                 "read untaken messages",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
                 "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
-                "m.came_through "
+                "m.came_through, m.home_kind, m.home_id "
                 "FROM messages m WHERE m.conversation_id = ? AND m.deleted = 0 "
                 "AND m.author = ? AND NOT EXISTS (SELECT 1 FROM taken_in t WHERE "
                 "t.conversation_id = m.conversation_id AND t.position = m.position) "
@@ -2482,7 +2614,8 @@ class SqliteConversationStore:
             conn,
             "read a conversation's snapshot at a change",
             "SELECT conversation_id, position, author, written_at, text, replies_to, "
-            "options, cut_off, device_id, message_id, deleted, came_through FROM messages "
+            "options, cut_off, device_id, message_id, deleted, came_through, home_kind, home_id "
+            "FROM messages "
             "WHERE conversation_id = ? AND position <= ? ORDER BY position DESC LIMIT ?",
             (conversation_id, recorded, CHAT_SNAPSHOT_ENTRIES),
         )
@@ -2512,7 +2645,7 @@ class SqliteConversationStore:
         for row in rows:
             conversation = self._decode_conversation(row)
             try:
-                listed.append(DeviceConversation(conversation=conversation, access=row[5]))
+                listed.append(DeviceConversation(conversation=conversation, access=row[7]))
             except ValidationError as exc:
                 msg = f"a stored device could not be decoded: {exc}"
                 raise ConversationStoreError(msg) from exc
@@ -2523,7 +2656,7 @@ class SqliteConversationStore:
             self._conn,
             "list a device's conversations",
             "SELECT c.id, c.started_at, c.last_active_at, c.last_turn_at, c.deleted_at, "
-            "d.access FROM conversations c JOIN conversation_devices d "
+            "c.home_kind, c.home_id, d.access FROM conversations c JOIN conversation_devices d "
             "ON d.conversation_id = c.id WHERE c.deleted_at IS NULL AND d.device_id = ? "
             "AND d.access NOT IN (SELECT value FROM json_each(?)) "
             "ORDER BY c.last_active_at DESC, c.id ASC LIMIT ? OFFSET ?",

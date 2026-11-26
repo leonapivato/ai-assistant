@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     DeviceRole,
     NotificationCandidate,
+    RecordHome,
     RequestingDevice,
     SendOutcome,
     TranscriptMessage,
@@ -397,7 +398,7 @@ class _ChurningStore(FakeConversationStore):
     ) -> list[DeviceConversation]:
         if self.churn > 0:
             self.churn -= 1
-            await self.start()
+            await self.start(home=RecordHome.owners())
         return await super().device_conversations(device_id, limit=limit, offset=offset)
 
 

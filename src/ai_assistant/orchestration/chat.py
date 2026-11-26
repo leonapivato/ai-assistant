@@ -85,7 +85,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
-    from ai_assistant.core.types import ChannelIdentity, InputSender, MessageReceipt
+    from ai_assistant.core.types import (
+        ChannelIdentity,
+        InputSender,
+        MessageReceipt,
+        RecordHome,
+    )
     from ai_assistant.orchestration.matters import HeldInput
 
 __all__ = [
@@ -99,6 +104,7 @@ __all__ = [
     "ChatReader",
     "ChatWriter",
     "couldnt_finish",
+    "couldnt_finish_text",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -217,12 +223,25 @@ class _Read:
     queried: int = 0
 
 
-def couldnt_finish(effects: Sequence[str] = ()) -> NewMessage:
-    """The fixed *couldn't finish* message, listing any effects that did happen (§9:1)."""
+def couldnt_finish_text(effects: Sequence[str] = ()) -> str:
+    """The fixed *couldn't finish* text, listing any effects that did happen (§9:1)."""
     text = COULDNT_FINISH
     if effects:
         text += _EFFECTS_INTRODUCED + "".join(f"\n- {one}" for one in effects)
-    return NewMessage(author=MessageAuthor.ASSISTANT, text=text)
+    return text
+
+
+def couldnt_finish(effects: Sequence[str] = (), *, home: RecordHome) -> NewMessage:
+    """The fixed *couldn't finish* message, listing any effects that did happen (§9:1).
+
+    Args:
+        effects: The effects that did happen, as listed.
+        home: The home the work writing it is for gives (ADR-0383 §4:1).
+
+    Returns:
+        The message to write.
+    """
+    return NewMessage(author=MessageAuthor.ASSISTANT, home=home, text=couldnt_finish_text(effects))
 
 
 class ChatWriter:

@@ -2892,7 +2892,20 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     them without it, which this version refuses. The method set does not move:
 #:     ``StoryStore.create`` and ``NotificationStore.admit`` gain an argument, and
 #:     neither is on the wire.
-PROTOCOL_VERSION: Final[int] = 138
+#: 139: ADR-0124 §9:2 advances the version in the change that adds ADR-0383 §2's home to
+#:     each message of a conversation's transcript (ADR-0386 §4:2; ADR-0386 §1:3 leaves
+#:     the version to §9:2): ``TranscriptMessage`` gains ``home``, a required
+#:     ``RecordHome`` (ADR-0383 §5:4), on every transcript page, every
+#:     ``MessageAddedChange`` of a change page or a change stream's chunk, and every
+#:     snapshot a device is given. A deleted message's marker carries none. A peer at 138
+#:     refuses a message carrying it as extra and sends messages without it, which this
+#:     version refuses. ``Conversation`` gains it too (§4:1), but crosses no frame: the
+#:     engine answers with ``ConversationSummary`` and ``ConversationDigest``, which do
+#:     not change. ``UserMessage`` does not change: a client cannot say a message's home,
+#:     which the engine sets (ADR-0383 §4:3). The method set does not move:
+#:     ``ConversationStore.start`` gains an argument and ``NewMessage`` a field, and
+#:     neither is on the wire.
+PROTOCOL_VERSION: Final[int] = 139
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

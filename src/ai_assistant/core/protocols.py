@@ -6677,6 +6677,21 @@ class ConversationStore(Protocol):
     the ``bool`` of the two lifecycle mutations) that spelling is used and nothing
     is raised; every other method raises.
 
+    **A conversation and each message carry a home** (ADR-0383 §3, ADR-0386 §4): the
+    domain each landed in. :meth:`start` takes the conversation's as a required input
+    and writes it, and each message carries its own as a required field of the
+    ``NewMessage`` :meth:`append_message` is handed, which gains no argument for it; a
+    message's home is its own and need not be its conversation's. The caller sets each
+    by ADR-0383 §4, never a model (§4:6), and no write changes one: marking a
+    conversation active, recording a turn, stamping it deleted and deleting a message
+    leave every home as it was. Every read that gives back a
+    :class:`~ai_assistant.core.types.Conversation` or a
+    :class:`~ai_assistant.core.types.TranscriptMessage` gives its home; a deleted
+    message's marker carries none (ADR-0293 §5:12). A home
+    :func:`~ai_assistant.core.types.home_may_be_written` does not allow is a malformed
+    argument, refused by :meth:`start` and :meth:`append_message` with ``ValueError``
+    before any I/O (ADR-0386 §6:2, ADR-0283 §6:3).
+
     **The unknown-id refusal is the narrower
     :class:`~ai_assistant.core.errors.UnknownConversationError`** (ADR-0076 §2),
     a subclass, so the sentence above stays true as written and every existing
@@ -6758,7 +6773,7 @@ class ConversationStore(Protocol):
       up still learns it holds a conversation it must drop (ADR-0296 §4:8).
     """
 
-    async def start(self) -> Conversation:
+    async def start(self, *, home: RecordHome) -> Conversation:
         """Mint a conversation id, insert the record, and return it (§1, §2).
 
         **The store mints; a client never invents an id.** Minting is server-side
@@ -6787,7 +6802,18 @@ class ConversationStore(Protocol):
         they stand (§3:1) and a ``ConversationStartedChange`` carrying them is
         recorded. Its transcript is empty.
 
+        The conversation carries ``home`` (ADR-0386 §4:1), which the caller sets by
+        ADR-0383 §4 and never a model (§4:6).
+
+        Args:
+            home: The domain the conversation it mints lands in. Required, with no
+                default.
+
         Raises:
+            ValueError: If ``home`` is one
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow,
+                refused before any I/O, so nothing is minted or recorded (ADR-0386 §6:2,
+                ADR-0283 §6:3).
             ConversationStoreError: If the id factory kept colliding until the
                 retry budget was exhausted, or the store cannot be written.
         """
@@ -7149,10 +7175,15 @@ class ConversationStore(Protocol):
            position the conversation never held (§4:5). A position whose message
            was deleted is one it held: a reply to it is recorded, naming it;
         5. otherwise records the message at the next position, stamped with the
-           store's clock, with its ``effect_id`` where it carries one, records a
-           ``MessageAddedChange``, and answers ``RECORDED`` with the position, which
-           is *received* (§4:4). The change carries the message as a device reads
-           it, with no effect id.
+           store's clock, with its ``effect_id`` where it carries one and its
+           ``home`` (ADR-0386 §4:2), records a ``MessageAddedChange``, and answers
+           ``RECORDED`` with the position, which is *received* (§4:4). The change
+           carries the message as a device reads it, its home included, with no
+           effect id.
+
+        **A home no write may carry is refused first**, with ``ValueError`` before any
+        I/O, so not even an unknown conversation is reported for it (ADR-0386 §6:2,
+        ADR-0283 §6:3). The message's home is the caller's, set by ADR-0383 §4.
 
         **The message's id is unique per conversation and device here.** ADR-0293
         §4:1 has a device choose an id unique per device; a repeat is a send of the
@@ -7171,6 +7202,9 @@ class ConversationStore(Protocol):
             recorded.
 
         Raises:
+            ValueError: If ``message.home`` is one
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow,
+                refused before any I/O (ADR-0386 §6:2).
             UnknownConversationError: If the id names nothing or names a
                 conversation stamped deleted — refused, never created (ADR-0293
                 §2:2: a conversation is never created as a side effect of a
@@ -7190,6 +7224,9 @@ class ConversationStore(Protocol):
         its ``MessageAddedChange`` leaves the change stream, and a
         ``MessageDeletedChange`` is recorded. A reply to it is left as it stands
         (§5:8). Nothing else is reached: deleting does not forget (ADR-0292 §3:10).
+        The message's home is not a property deleting removes: no write changes a
+        record's home (ADR-0383 §4:6), so the store keeps it with the marker's record,
+        though the marker a read gives back carries none (§5:12).
 
         Args:
             conversation_id: The conversation holding the message.

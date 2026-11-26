@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     DeviceAccess,
     MessageAuthor,
     NewMessage,
+    RecordHome,
     TranscriptMessage,
 )
 from ai_assistant.orchestration.chat import ChatInput, ChatReader
@@ -158,7 +159,7 @@ class _Reader:
 
     async def conversation(self) -> str:
         await self.store.set_my_devices([_PHONE])
-        return (await self.store.start()).id
+        return (await self.store.start(home=RecordHome.owners())).id
 
     async def say(self, conversation: str, text: str) -> int:
         """Write the user's message, and tell the reader, as the engine's write does."""
@@ -170,6 +171,7 @@ class _Reader:
                 text=text,
                 device_id="phone",
                 message_id=f"m-{self._sent}",
+                home=RecordHome.owners(),
             ),
         )
         assert receipt.position is not None

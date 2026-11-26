@@ -163,7 +163,9 @@ class Wiring:
         standalone: bool = False,
     ) -> ActivationState:
         """One admitted text activation, optionally with canonical conversational facts."""
-        conversation = None if standalone else await self.conversations.start()
+        conversation = (
+            None if standalone else await self.conversations.start(home=RecordHome.owners())
+        )
         state = admit_channel(
             ChannelInput(
                 target=NewConversation()

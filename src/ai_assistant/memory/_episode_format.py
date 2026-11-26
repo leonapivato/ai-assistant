@@ -247,19 +247,35 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
 #: an older build, which serves 12 alone, refuses a file at 13 (ADR-0326 §5:3).
 CLAIMED_CONVERSATION_RECORD_FORMAT: Final[int] = 13
 
-#: The conversation store's own label, the one this build writes. It advances to 14 for
+#: The conversation store's label for ADR-0378 §8:2's record. It advances to 14 for
 #: ADR-0378 §8:2's ``came_through`` column of its ``messages`` table, the device a user's
 #: message came through (ADR-0326 §2:3). A file at 13 is upgraded in place by adding the
 #: column and setting it, on each standing user's message, to the device it is written
 #: from, so a message from before reads as having come through that device (ADR-0378
 #: §8:2, ADR-0326 §4:4); an older build, which serves 12 and 13, refuses a file at 14
 #: (ADR-0326 §5:3).
-CONVERSATION_RECORD_FORMAT: Final[int] = 14
+CAME_THROUGH_CONVERSATION_RECORD_FORMAT: Final[int] = 14
+
+#: The conversation store's own label, the one this build writes. It advances to 15 for
+#: ADR-0383 §5:1's record: each conversation and each message gains its home
+#: (ADR-0386 §4:1, §4:2), as the ``home_kind`` and ``home_id`` columns of its
+#: ``conversations`` and ``messages`` tables, holding a ``RecordHome`` and the closed
+#: ``RecordHomeKind`` (ADR-0326 §2:3). A file at 14 is upgraded in place by adding the
+#: columns and writing the owner's domain into every conversation and every message it
+#: holds, a deleted message's marker included, whatever the works that wrote them were
+#: for (ADR-0383 §5:1); an older build, which serves 12 to 14, refuses a file at 15
+#: (ADR-0326 §5:3).
+CONVERSATION_RECORD_FORMAT: Final[int] = 15
 
 #: The conversation store's labels a build opens: its own, and each it upgrades from,
 #: in order (ADR-0326 §4:5, §5:1).
 CONVERSATION_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
-    {EPISODE_RECORD_FORMAT, CLAIMED_CONVERSATION_RECORD_FORMAT, CONVERSATION_RECORD_FORMAT}
+    {
+        EPISODE_RECORD_FORMAT,
+        CLAIMED_CONVERSATION_RECORD_FORMAT,
+        CAME_THROUGH_CONVERSATION_RECORD_FORMAT,
+        CONVERSATION_RECORD_FORMAT,
+    }
 )
 
 

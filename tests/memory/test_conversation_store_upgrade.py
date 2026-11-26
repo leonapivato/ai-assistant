@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     MessageDeletedChange,
     NewMessage,
+    RecordHome,
     SendOutcome,
     TranscriptMessage,
 )
@@ -69,8 +70,9 @@ def _rows(path: Path) -> dict[str, list[tuple[Any, ...]]]:
     """Every row of every table the previous release kept, read out of band.
 
     Each table's columns are the ones the previous release wrote, so a column the
-    upgrade adds is not among them: ``effect_id``, and ``came_through``, which the next
-    label's upgrade adds and sets (ADR-0378 §8:2).
+    upgrade adds is not among them: ``effect_id``, ``came_through``, which the next
+    label's upgrade adds and sets (ADR-0378 §8:2), and a conversation's and a message's
+    home, which the one after adds and sets (ADR-0383 §5:1).
     """
     with sqlite3.connect(path) as conn:
         held: dict[str, list[tuple[Any, ...]]] = {}
@@ -78,7 +80,7 @@ def _rows(path: Path) -> dict[str, list[tuple[Any, ...]]]:
             columns = [
                 str(row[1])
                 for row in conn.execute(f"PRAGMA table_info({table})")
-                if row[1] not in {"effect_id", "came_through"}
+                if row[1] not in {"effect_id", "came_through", "home_kind", "home_id"}
             ]
             held[table] = conn.execute(
                 f"SELECT {', '.join(columns)} FROM {table} ORDER BY {key}"  # noqa: S608 — names read from the file's own schema
@@ -225,7 +227,10 @@ async def test_a_claimed_message_round_trips_through_the_upgraded_file(legacy: P
     store = _open(legacy)
     try:
         claimed = NewMessage(
-            author=MessageAuthor.ASSISTANT, text="Time to call Mom.", effect_id="e-1"
+            author=MessageAuthor.ASSISTANT,
+            text="Time to call Mom.",
+            effect_id="e-1",
+            home=RecordHome.owners(),
         )
         written = await store.append_message("conv-kept", claimed)
         again = await store.append_message("conv-kept", claimed)

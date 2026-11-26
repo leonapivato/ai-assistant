@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     NewMessage,
     ProposedCall,
+    RecordHome,
     RoundResponse,
     Sureness,
     WorkAuthority,
@@ -151,7 +152,10 @@ async def test_a_tasks_text_into_a_shown_conversation_its_task_does_not_suggest_
         # runs.
         other = await open_conversation(harness)
         await harness.conversation_store.append_message(
-            other, NewMessage(author=MessageAuthor.ASSISTANT, text="Good morning.")
+            other,
+            NewMessage(
+                author=MessageAuthor.ASSISTANT, text="Good morning.", home=RecordHome.owners()
+            ),
         )
         conversation = await open_conversation(harness)
         await harness.engine.write_message(conversation, message=said("m-1", "say hello soon"))

@@ -85,6 +85,7 @@ if TYPE_CHECKING:
         DeviceConversation,
         MemoryRecord,
         MessageReceipt,
+        RecordHome,
         UserMessage,
     )
 
@@ -416,6 +417,7 @@ def _widest_records(
         position=_WIDEST_NUMBER,
         written_at=_WIDEST_AT,
         author=message.author,
+        home=message.home,
         text=message.text,
         # As wide as the reply the message names, and below the probe's own position,
         # which a recorded message's reference always is.
@@ -437,7 +439,12 @@ def _widest_records(
 
 
 def check_message_fits(
-    conversation_id: str, message: UserMessage, *, max_bytes: int, came_through: str | None = None
+    conversation_id: str,
+    message: UserMessage,
+    *,
+    max_bytes: int,
+    home: RecordHome,
+    came_through: str | None = None,
 ) -> None:
     """Refuse a message whose own record could not be read back within the limit.
 
@@ -450,13 +457,14 @@ def check_message_fits(
     entry and no further, and a chunk carries one change. Shared by the engine and the
     canonical fake engine. ``came_through`` is the device the message would record it
     came through (ADR-0378 §4:2), which the record carries; ``None`` for the device it
-    is written from.
+    is written from. ``home`` is the home the message would be written in (ADR-0386
+    §4:2), which the record carries too.
 
     Raises:
         OversizedValueError: If any of the three would exceed ``max_bytes``.
     """
     page, changes, chunk = _widest_records(
-        conversation_id, message.as_new_message(came_through=came_through)
+        conversation_id, message.as_new_message(home=home, came_through=came_through)
     )
     check_payload(
         page,
@@ -780,7 +788,7 @@ class ConversationLifecycle:
 
     # --- resolving the conversation a turn runs under (§2) -------------------
 
-    async def begin(self, conversation_id: str | None) -> Conversation:
+    async def begin(self, conversation_id: str | None, *, home: RecordHome) -> Conversation:
         """Resolve the conversation this turn runs under, **before** its work (§2).
 
         No id starts one; an id continues that one and marks it active. Both happen
@@ -795,6 +803,8 @@ class ConversationLifecycle:
             conversation_id: The conversation to continue, or ``None`` to start a
                 fresh one. Untrusted input from an adapter, refused rather than
                 silently started if the store does not know it (§1).
+            home: The home a fresh one lands in, set by the caller by ADR-0383 §4;
+                a continued one keeps its own (§4:6).
 
         Returns:
             The conversation the turn runs under.
@@ -807,7 +817,7 @@ class ConversationLifecycle:
             ConversationStoreError: If the store cannot be read or written.
         """
         if conversation_id is None:
-            return await self._conversations.start()
+            return await self._conversations.start(home=home)
         return await self._conversations.mark_active(conversation_id)
 
     # --- deletion (§8) -------------------------------------------------------
@@ -861,9 +871,12 @@ class ConversationLifecycle:
 
     # --- the chat space's acts and reads (ADR-0293 §2-§5) --------------------
 
-    async def start(self) -> Conversation:
-        """Start an empty conversation, given "my devices" (ADR-0293 §2:1, §3:1)."""
-        return await self._conversations.start()
+    async def start(self, *, home: RecordHome) -> Conversation:
+        """Start an empty conversation in ``home``, given "my devices" (ADR-0293 §2:1, §3:1).
+
+        ``home`` is the caller's, set by ADR-0383 §4 (ADR-0386 §4:1).
+        """
+        return await self._conversations.start(home=home)
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
         """Read "my devices" (ADR-0293 §3:1)."""
@@ -900,17 +913,18 @@ class ConversationLifecycle:
         return await self._conversations.device_changes(device_id, after=after, limit=limit)
 
     async def write(
-        self, conversation_id: str, message: UserMessage, *, came_through: str
+        self, conversation_id: str, message: UserMessage, *, home: RecordHome, came_through: str
     ) -> MessageReceipt:
         """Record the user's message and answer for it (ADR-0293 §4).
 
         The store answers *received*, a repeat, a device that is not an end for
         writing and a reply to nothing; it starts no activation, which is the
         reader's (§6). ``came_through`` is the device the message came through, the
-        request's connecting device, which the engine alone supplies (ADR-0378 §4:2).
+        request's connecting device, which the engine alone supplies (ADR-0378 §4:2),
+        and ``home`` the home it lands in, which the engine sets by ADR-0383 §4.
         """
         return await self._conversations.append_message(
-            conversation_id, message.as_new_message(came_through=came_through)
+            conversation_id, message.as_new_message(home=home, came_through=came_through)
         )
 
     async def delete_message(self, conversation_id: str, position: int) -> bool:

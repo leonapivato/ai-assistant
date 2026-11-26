@@ -364,7 +364,7 @@ from ai_assistant.orchestration.channel_kinds import (
     served,
     takes_text,
 )
-from ai_assistant.orchestration.chat import couldnt_finish
+from ai_assistant.orchestration.chat import couldnt_finish_text
 from ai_assistant.orchestration.controller import (
     Stage,
     StageResult,
@@ -530,6 +530,7 @@ if TYPE_CHECKING:
         PermissionLine,
         PlanningRound,
         RecordedChannelTrigger,
+        RecordHome,
         RequestedCall,
         ScheduledTask,
         SearchOutcome,
@@ -822,6 +823,11 @@ class _ConversationWriter:
     is unknown, since whether it recorded is not known; a conversation gone, or one
     that refused the message, is not done; and a message recorded is done, at its
     position.
+
+    **The message takes the home of the work writing it** (ADR-0383 §4:1, ADR-0386
+    §4:2): whom the running work is for gives it, read off the work's state as it
+    stands (``ActivationState.home``), as its episode's and its stories' are. Its
+    conversation's home is not read.
     """
 
     writer: MessageWriter
@@ -832,12 +838,26 @@ class _ConversationWriter:
         message = self._message(text)
         return Fitted(text=message.text, cut_off=message.cut_off)
 
+    @staticmethod
+    def _home() -> RecordHome:
+        """The home the running work's message takes: whom the work is for gives it (§4:1).
+
+        Raises:
+            RuntimeError: If no work is running, so the message has no home to carry.
+        """
+        state = active_state()
+        if state is None:
+            msg = "no work is running, so a message has no home to be written in"
+            raise RuntimeError(msg)
+        return state.home
+
     def _message(self, text: str) -> NewMessage:
         cut = len(text) > TRANSCRIPT_MESSAGE_MAX_CHARS
         return self.writer.fitted(
             self.conversation_id,
             NewMessage(
                 author=MessageAuthor.ASSISTANT,
+                home=self._home(),
                 text=text[:TRANSCRIPT_MESSAGE_MAX_CHARS],
                 cut_off=cut,
             ),
@@ -848,6 +868,7 @@ class _ConversationWriter:
         # claimed under, so whether it was sent is read after a restart, never guessed.
         message = NewMessage(
             author=MessageAuthor.ASSISTANT,
+            home=self._home(),
             text=fitted.text,
             cut_off=fitted.cut_off,
             effect_id=effect_id,
@@ -6743,7 +6764,7 @@ class PhasePath:
         if not places:
             return
         effects = await self._effects(working)
-        text = couldnt_finish(effects).text
+        text = couldnt_finish_text(effects)
         for place in places:
             await self._couldnt_finish_into(working, text, place)
 

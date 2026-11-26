@@ -245,6 +245,22 @@ class ChatSurfaceContract:
         assert message.author is MessageAuthor.USER
         assert (message.device_id, message.message_id, message.text) == ("phone", "m-1", "hello")
 
+    async def test_a_message_a_device_writes_lands_in_the_home_its_connection_gives(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """ADR-0383 §4:3, ADR-0386 §4:2: whoever the connection belongs to, the owner today.
+
+        Set by the engine, never by the message, which names no home.
+        """
+        engine = chat_surface.engine
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        page = await engine.transcript(conversation)
+        assert page is not None
+        (message,) = page.entries
+        assert isinstance(message, TranscriptMessage)
+        assert message.home == RecordHome.owners()
+
     async def test_only_a_writing_end_writes_and_a_reply_names_a_message_held(
         self, chat_surface: ChatSurfaceSubject
     ) -> None:
@@ -781,6 +797,28 @@ class ChatReaderContract:
         assert set(taken) == {1}, "the user's message is taken in, the reply is not"
         assert await chat.untaken_messages(conversation) == ()
         assert await _input_of(chat_reader_surface.memory, taken[1]) == "hello"
+
+    async def test_a_conversation_and_its_reply_land_in_the_homes_their_writes_give(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0383 §4:1, §4:3; ADR-0386 §4: each is set by code and none by a model.
+
+        A conversation a device starts and the message it writes take the home of
+        whoever the connection belongs to; the reply takes the home whom the work that
+        writes it is for gives. All three are the owner's today.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        conversation = await _started(engine, _PHONE)
+        await engine.write_message(conversation, message=said(_PHONE, "m-1", "hello"))
+        written = await _answered(engine, conversation, 1)
+
+        held = await chat.get(conversation)
+        assert held is not None
+        assert held.home == RecordHome.owners()
+        assert [(one.author, one.home) for one in written] == [
+            (MessageAuthor.USER, RecordHome.owners()),
+            (MessageAuthor.ASSISTANT, RecordHome.owners()),
+        ]
 
     async def test_a_message_written_while_one_runs_is_taken_in_at_once_by_its_own(
         self, chat_reader_surface: ChatReaderSubject

@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ProcessingStatus,
     RecordedChannelTrigger,
+    RecordHome,
     RoundResponse,
     SupportHolder,
     Validity,
@@ -364,7 +365,7 @@ async def test_reclaim_keeps_a_conversation_whose_channel_holds_a_live_episode(
     composed = await _started(tmp_path, monkeypatch, episode_retention=timedelta(days=30))
     try:
         kept = (await composed.say("hello")).conversation_id
-        empty = await composed.engine._conversations.begin(None)
+        empty = await composed.engine._conversations.begin(None, home=RecordHome.owners())
         lifecycle = composed.engine._conversations
         assert lifecycle._retention is not None
         later = datetime.now(UTC) + lifecycle._retention + timedelta(days=1)

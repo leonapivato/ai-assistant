@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     OccurrenceState,
     ProcessingStatus,
     ProposedCall,
+    RecordHome,
     RoundResponse,
     ScheduledTaskAuthor,
     Sureness,
@@ -328,7 +329,7 @@ async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_i
         return _texting("hello", connection="L1")(request)
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
-    gone = await harness.conversation_store.start()
+    gone = await harness.conversation_store.start(home=RecordHome.owners())
     place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
     await write_task(harness.plans, activation(), places=(place,))
     await harness.conversation_store.stamp_deleted(gone.id)
@@ -369,7 +370,7 @@ async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_
         return _texting("time to move the car")(request)
 
     harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
-    gone = await harness.conversation_store.start()
+    gone = await harness.conversation_store.start(home=RecordHome.owners())
     space.append(_DeletedWhilePlanning(harness.conversation_store, gone.id))
     harness.engine._place_lists = PlaceLists(conversations=cast("ConversationStore", space[0]))
     place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
@@ -531,7 +532,7 @@ async def test_a_failure_before_planning_still_writes_couldnt_finish_where_sugge
         task_scheduler=seams(),
         understanding=understanding_stage(model=_Unreachable()),
     )
-    conversation = await harness.conversation_store.start()
+    conversation = await harness.conversation_store.start(home=RecordHome.owners())
     place = ChannelIdentity(channel_type="conversation", instance_id=conversation.id)
     await write_task(harness.plans, activation(), places=(place,))
     await harness.engine.start()
@@ -650,7 +651,7 @@ async def test_a_task_whose_conversation_was_deleted_speaks_on_the_line() -> Non
     harness.engine._place_lists = PlaceLists(
         conversations=harness.conversation_store, line=line.channel
     )
-    gone = await harness.conversation_store.start()
+    gone = await harness.conversation_store.start(home=RecordHome.owners())
     place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
     task = await write_task(harness.plans, activation(), places=(place,))
     await harness.conversation_store.stamp_deleted(gone.id)

@@ -13284,6 +13284,12 @@ class Conversation(BaseModel):
     **There is no observation watermark** (ADR-0285 §4). The member ADR-0212 §1
     gave the conversation is removed with the observer that wrote it, and nothing
     replaces it.
+
+    **It carries its home** (ADR-0383 §3, ADR-0386 §4:1): the domain it landed in,
+    which ``ConversationStore.start`` takes as a required input and writes, set by code
+    by ADR-0383 §4 and never by a model (§4:6). Marking it active, recording a turn and
+    stamping it deleted leave it as it was. Each message of its transcript carries a
+    home of its own (:class:`TranscriptMessage`), not this one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13300,6 +13306,13 @@ class Conversation(BaseModel):
     deleted_at: UtcInstant | None = Field(
         default=None,
         description="Tombstone stamp: when the user's deletion was recorded (ADR-0074 §8).",
+    )
+    home: RecordHome = Field(
+        description=(
+            "The domain the conversation landed in (ADR-0383 §2:2, §3; ADR-0386 §4:1), set "
+            "by code when it starts (§4) and never changed by a later write (§4:6). "
+            "Required, so no write can leave it out (§5:4)."
+        ),
     )
 
 
@@ -13627,11 +13640,24 @@ class NewMessage(BaseModel):
     through, which the engine sets from the requesting device's connecting device
     (:meth:`UserMessage.as_new_message`); built without it, the device it is written
     from.
+
+    ``home`` (ADR-0386 §4:2) is the domain the message lands in, a required field, so the
+    write that hands it to ``ConversationStore.append_message`` carries it and that
+    member gains no argument. Code sets it by ADR-0383 §4, never a model (§4:6): the
+    home of whoever a device's connection belongs to for a user's message (§4:3), and
+    the home whom the writing work is for gives for the assistant's (§4:1). It is the
+    message's own, not its conversation's.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     author: MessageAuthor
+    home: RecordHome = Field(
+        description=(
+            "The domain the message lands in (ADR-0383 §2:2, §3; ADR-0386 §4:2), set by "
+            "code (§4). Required, so no write can leave it out (§5:4)."
+        ),
+    )
     text: NonBlankEncodableText = Field(max_length=TRANSCRIPT_MESSAGE_MAX_CHARS)
     replies_to: int | None = Field(
         default=None,
@@ -13724,6 +13750,12 @@ class TranscriptMessage(BaseModel):
     carries it only where it differs** from ``device_id``, and decoding puts it back, so
     a message that came through its own device is carried exactly as it was before the
     field, and one the size bound admitted then is one every read can still return.
+
+    **Every entry carries its home** (ADR-0383 §3, ADR-0386 §4:2): the domain the
+    message landed in, the one the :class:`NewMessage` it was written from carried. It
+    is the message's own and need not be its conversation's; no write changes it
+    (ADR-0383 §4:6). A deleted message's marker (:class:`DeletedMessage`) carries
+    nothing of the message (ADR-0293 §5:12), its home included.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -13732,6 +13764,12 @@ class TranscriptMessage(BaseModel):
     position: int = Field(strict=True, ge=1, lt=_CHAT_INT_BOUND)
     written_at: UtcInstant
     author: MessageAuthor
+    home: RecordHome = Field(
+        description=(
+            "The domain the message landed in (ADR-0383 §2:2, §3; ADR-0386 §4:2), set by "
+            "code when it was written (§4) and never changed (§4:6)."
+        ),
+    )
     text: NonBlankEncodableText = Field(max_length=TRANSCRIPT_MESSAGE_MAX_CHARS)
     replies_to: int | None = Field(default=None, strict=True, ge=1, lt=_CHAT_INT_BOUND)
     options: tuple[_OptionText, ...] = Field(default=(), max_length=MESSAGE_OPTIONS_MAX)
@@ -14021,10 +14059,15 @@ class UserMessage(BaseModel):
         description="The position of an earlier message in the same conversation (§4:5).",
     )
 
-    def as_new_message(self, *, came_through: str | None = None) -> NewMessage:
+    def as_new_message(self, *, home: RecordHome, came_through: str | None = None) -> NewMessage:
         """The message as the conversation store writes it: the user's, from its device.
 
+        It cannot say its own home either: the caller sets it, by ADR-0383 §4:3, from
+        whoever the connection it came by belongs to.
+
         Args:
+            home: The domain it lands in (ADR-0386 §4:2), set by code and never by the
+                request. Required, with no default.
             came_through: The device it came through: the connecting device of the
                 request that wrote it, which the engine takes from the requesting device
                 (ADR-0378 §4:2); ``None`` for the device it is written from.
@@ -14034,6 +14077,7 @@ class UserMessage(BaseModel):
         """
         return NewMessage(
             author=MessageAuthor.USER,
+            home=home,
             text=self.text,
             replies_to=self.replies_to,
             device_id=self.device_id,
@@ -14448,21 +14492,22 @@ class ConversationExport(BaseModel):
     with, for the assistant's, the effect record it was claimed under (ADR-0350 §12:9),
     which no device is shown and the export carries with its message.
 
-    ``schema_version`` is 7 because each message gains that id (ADR-0350 §12:9,
-    ADR-0014 §5); it was 6 when the document gained the transcripts (ADR-0293 §5), 5
-    when the :class:`Conversation` it carries lost its observation watermark (ADR-0285
-    §4), and 4 when the turns left the document (ADR-0275 §7:9 as ADR-0283 §4:3 reads
-    it). Exports have no import operation and no historical conversion path, so an
+    ``schema_version`` is 8 because each conversation and each message gains its home
+    (ADR-0386 §4:1, §4:2; ADR-0039 §10); it was 7 when each message gained that id
+    (ADR-0350 §12:9, ADR-0014 §5), 6 when the document gained the transcripts (ADR-0293
+    §5), 5 when the :class:`Conversation` it carries lost its observation watermark
+    (ADR-0285 §4), and 4 when the turns left the document (ADR-0275 §7:9 as ADR-0283
+    §4:3 reads it). Exports have no import operation and no historical conversion path, so an
     earlier document is not read here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[7] = Field(
-        default=7,
+    schema_version: Literal[8] = Field(
+        default=8,
         description=(
-            "Shape of this export, pinned to exactly 7 (ADR-0039 §10, ADR-0014 §5, "
-            "ADR-0350 §12:9): an export outlives the code that wrote it, so the label "
+            "Shape of this export, pinned to exactly 8 (ADR-0039 §10, ADR-0014 §5, "
+            "ADR-0386 §4): an export outlives the code that wrote it, so the label "
             "must be a fact about the document rather than a producer's unchecked claim."
         ),
     )
