@@ -2035,6 +2035,12 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``Conversation`` gains it too and crosses no frame. **The method set does not move
     and stays at 78.**
 
+    **140 is ADR-0383 §13's error, under ADR-0124 §9 as ADR-0219 §6 reads it.**
+    ``CrossHomeWriteError`` is a ``MemoryStoreError`` a promoted method that writes memory
+    can emit, and the wire carries an error's class name as its code, which a peer at 139
+    cannot resolve. No type, member or frame changes. **The method set does not move and
+    stays at 78.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -2043,7 +2049,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 139), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (78, 140), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
