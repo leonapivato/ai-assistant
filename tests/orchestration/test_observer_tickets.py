@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import Any, Final
 
 import pytest
-from observer_support import AT, Harness, address, episode
+from observer_support import AT, Harness, address, episode, found, framed, framing, scouted
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -25,17 +25,22 @@ from ai_assistant.core.types import (
     ApprovalTap,
     ConfirmationPart,
     EpisodicMemory,
+    Memory,
+    ObservationState,
     PlanningRound,
     ProposedCall,
     RecordHome,
     RequestedCall,
+    Sight,
+    SightMode,
     TicketClaim,
     ToolOutcome,
 )
 from ai_assistant.orchestration.authorizer import values_digest
-from ai_assistant.orchestration.observer.reading import EpisodeReader
+from ai_assistant.orchestration.observer.reading import EpisodeReader, Hint
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.support_parts import part_content, requests_to_read
+from ai_assistant.testing import FakeModelProvider
 from ai_assistant.testing.memories import confirmed_support, memory
 
 _WRITTEN: Final = AT - timedelta(hours=3)
@@ -212,3 +217,113 @@ async def test_a_request_or_approval_of_another_home_confirms_nothing(shared: st
     ).read(leaving)
 
     assert [one for one in reading.hints if one.confirmation is not None] == []
+
+
+# --- the asking activation's episode (ADR-0388 §2:4) ----------------------------------
+
+
+async def _read_by_its_sight(harness: Harness, leaving_id: str) -> tuple[Hint, ...]:
+    """The leaving episode's hints, read as the observer's run reads them: through the
+    stores the holder binds to the sight its facts and senders make (ADR-0383 §6:7)."""
+    leaving = await harness.memory.get(address(leaving_id))
+    assert isinstance(leaving, EpisodicMemory)
+    processing = leaving.processing_record
+    assert processing is not None
+    sight = Sight.of_producer(processing.facts_now, processing.trigger.senders)
+    stores = harness.stores()
+    memory = stores.memory(sight)
+    seen = await memory.get(address(leaving_id))
+    assert isinstance(seen, EpisodicMemory)
+    reading = await EpisodeReader(
+        memory=memory, plans=stores.plans(sight), stories=stores.stories(sight)
+    ).read(seen)
+    return reading.hints
+
+
+@pytest.mark.parametrize("mode", [SightMode.COUNT, SightMode.WITHHOLD], ids=["count", "withhold"])
+@pytest.mark.parametrize(
+    "asking", ["deleted", "of-another-home"], ids=["asking-deleted", "asking-of-another-home"]
+)
+async def test_an_asking_episode_not_held_confirms_nothing(mode: SightMode, asking: str) -> None:
+    """§2:4: the confirmation names the asking activation; where its episode is not held,
+    deleted since by a capture failure, retention, a sweep or a forget, the candidate is
+    given no confirmation, as one whose approval's episode is not held is not, so §2:1
+    refuses no memory for it; and where it is of another home, none either (§2:3). In
+    either build, so the counting build lands what a withholding one would."""
+    harness = Harness(sight_mode=mode)
+    request = await _approved(harness)
+    run = PlanningRound(
+        id="r-run",
+        recorded_at=_TAPPED,
+        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
+    )
+    held = [episode("appr", at=_TAPPED, rounds=(run,))]
+    if asking == "of-another-home":
+        held.append(episode("ask", at=_WRITTEN).model_copy(update={"home": RecordHome.shared()}))
+    await harness.hold(*held)
+    await _ran(harness, request, "appr")
+
+    hints = await _read_by_its_sight(harness, "appr")
+
+    assert [one for one in hints if one.confirmation is not None] == []
+
+
+@pytest.mark.parametrize("mode", [SightMode.COUNT, SightMode.WITHHOLD], ids=["count", "withhold"])
+async def test_an_asking_episode_held_still_confirms_through_the_bound_store(
+    mode: SightMode,
+) -> None:
+    """§2:4 narrows nothing else: where the asking episode is held, the candidate is
+    confirmed at the approval's episode as before, read through the episode's sight."""
+    harness = Harness(sight_mode=mode)
+    request = await _approved(harness)
+    run = PlanningRound(
+        id="r-run",
+        recorded_at=_TAPPED,
+        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
+    )
+    await harness.hold(episode("ask", at=_WRITTEN), episode("appr", at=_TAPPED, rounds=(run,)))
+    await _ran(harness, request, "appr")
+
+    hints = await _read_by_its_sight(harness, "appr")
+
+    (hint,) = [one for one in hints if one.confirmation is not None]
+    assert hint.confirmation is not None
+    assert hint.confirmation.part == ConfirmationPart(
+        episode=address("appr"), asking_activation="ask", request=request.id, ran_in="appr"
+    )
+
+
+async def test_a_run_whose_asking_episode_is_gone_is_refused_nothing() -> None:
+    """§2:4, the Consequences: a ticketed memory whose asking work's episode is gone lands
+    without its confirmation. The run over a withholding build reads the approval's
+    episode, is shown no confirmed candidate, and what it commits names no asking
+    activation: nothing is refused and the attempt ends processed."""
+    harness = Harness(sight_mode=SightMode.WITHHOLD)
+    request = await _approved(harness)
+    run = PlanningRound(
+        id="r-run",
+        recorded_at=_TAPPED,
+        calls=(ProposedCall(call_id="c1", name="run_approved", arguments={"ticket": "A1"}),),
+    )
+    await harness.hold(
+        episode("appr", at=_TAPPED, rounds=(run,), text="Yes, keep that I prefer aisle seats."),
+        episode("one", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("two", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+    await _ran(harness, request, "appr")
+    scout = FakeModelProvider.scripted(scouted(found("The user prefers aisle seats.", "P1")))
+    commit = FakeModelProvider.scripted(framing(framed("The user prefers aisle seats.", "P1")))
+    observer = harness.observer(scout=scout, commit=commit)
+
+    outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (record,) = await harness.plans.observations([address("appr")])
+    assert record.state is ObservationState.PROCESSED
+    written = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert written, "the finding lands"
+    assert all(
+        not isinstance(support.points_at, ConfirmationPart)
+        for one in written
+        for support in one.supports
+    ), "no support names the asking activation"

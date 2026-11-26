@@ -615,14 +615,14 @@ async def test_a_pin_made_since_the_runs_pass_is_confirmed_before_its_memory_is_
         pin = written.record_id
 
     # The run's own pass finds nothing; the pin is made after it, before the episode.
-    run_pass = observer._pins.run_pass  # type: ignore[union-attr]  # a store is wired
+    run_pass = observer._pin_pass
 
     async def passing_then_pinning() -> int:
         added = await run_pass()
         await pin_between()
         return added
 
-    observer._pins.run_pass = passing_then_pinning  # type: ignore[union-attr,method-assign]
+    observer._pin_pass = passing_then_pinning  # type: ignore[method-assign]
 
     outcome = await observer.run()
 

@@ -271,13 +271,18 @@ def test_the_seed_reads_the_variable_through_settings(monkeypatch: pytest.Monkey
 # --- the quiet windows in the owner's zone (§3:6) ------------------------------------
 
 
-def _writer_pick(engine: Engine) -> RulingPolicy:
-    """The live path's pick, inside the producer's write stage: a deliberate reach-in."""
+def _writer(engine: Engine) -> NotificationWriteStage:
+    """The producer's write stage: a deliberate reach-in."""
     stage = engine._upcoming
     assert stage is not None, "a configured calendar builds the producer"
     writer = stage._writer
     assert isinstance(writer, NotificationWriteStage)
-    return writer._policies
+    return writer
+
+
+def _writer_pick(engine: Engine) -> RulingPolicy:
+    """The live path's pick, inside the producer's write stage: a deliberate reach-in."""
+    return _writer(engine)._policies
 
 
 def _engine_pick(engine: Engine) -> RulingPolicy:
@@ -302,20 +307,20 @@ async def test_both_ruling_paths_pick_from_the_one_store_with_the_one_factory(
         for pick in picks:
             assert pick.default is default, "one hub policy, held twice"
             assert pick._policy_for is _policy_for_zone
-        # The reconsideration's pick holds no store: it reads the zone through the
-        # person-model store the holder binds to its run's sight (ADR-0384 §7:1).
-        assert picks[0]._people is None
+        # Neither pick holds a store: each reads the zone through the person-model store
+        # the one holder binds to its run's sight (ADR-0384 §7:1, ADR-0388 §7:1).
+        writer = _writer(engine)
+        assert writer._stores is engine._stores, "the producer reads through the one holder"
+        assert writer._read_zone is on
         if not on:
-            assert picks[1]._people is None
             assert engine._stores._people is None
-            assert [await pick.pick() for pick in picks] == [default, default]
+            assert [await pick.pick_through(None) for pick in picks] == [default, default]
             return
         store = _store(engine)
-        assert picks[1]._people is store
         assert engine._stores._people is store
         await store.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, "Asia/Kolkata", act=_PANEL)
         through = engine._stores.people(upkeep_run(RECONSIDERED).sight)
-        for picked in (await picks[0].pick_through(through), await picks[1].pick()):
+        for picked in (await picks[0].pick_through(through), await picks[1].pick_through(through)):
             assert isinstance(picked, DefaultNotificationPolicy)
             assert picked._zone == ZoneInfo("Asia/Kolkata")
     finally:

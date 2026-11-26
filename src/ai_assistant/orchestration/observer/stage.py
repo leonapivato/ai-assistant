@@ -85,12 +85,12 @@ tests, the episodes it pages and their observation records, reads unbound, by oc
 state and recorded facts and senders alone, and hands a run nothing of them but which
 episode is due and its record's state and revision (:class:`Due`); the facts and senders
 it reads reach the run only as the sight made from them. The calls made in the last 24
-hours are a store-wide figure that counts writes (§8:5), read unbound. The pin pass reads
-every person's pins and is tied to no one ended work, so §6:7 gives it no sight; it reads
-and writes unbound until a decision gives it one (milestone 22's B9). Whether a bound
-store withholds or only counts is its construction (§7:10): where it withholds, an
-episode its sight does not see is read as one never written, and nothing is recorded of
-it; setting such an episode aside is §7:13's, not built here.
+hours are a store-wide figure that counts writes (§8:5), read unbound. Nothing else is: the
+stores a holder is built over, where the caller hands none, are handed to that holder and
+read by nothing else. Whether a bound store withholds or only counts is its construction
+(§7:10): where it withholds, an episode its sight does not see is read as one never
+written, and nothing is recorded of it; setting such an episode aside is §7:13's, not
+built here.
 
 **It logs stage and code-owned reasons only** (§15:7): counts, states and the names of
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
@@ -98,7 +98,14 @@ data.
 
 **The person model, where the root wires its store** (ADR-0338 §9). Each run, before
 its episodes, confirms the pins (§9:6, ``PinConfirmations``), and the writer confirms
-them again, strictly, before each retrieval (§9:9). Each attempt reads the five fields of
+them again, strictly, before each retrieval (§9:9). **Each pass reads by a sight**
+(ADR-0388 §4): the run's pass is an ADR-0384 run, one for each person domain
+(:data:`~ai_assistant.orchestration.upkeep.PERSON_DOMAINS`, never the shared things), by
+the sight :func:`~ai_assistant.orchestration.upkeep.upkeep_run` makes for that domain,
+where every run's is made (§9); the pass before a retiring write is part of the episode's
+run, and reads by that episode's sight. Each reads and writes through the person-model
+store, the memory store and the writer the holder binds to its sight, on no row of its
+own, and no store is held unbound for either. Each attempt reads the five fields of
 the leaving episode's person, and the scout and framing are given them under the prompts'
 ``person`` flag (§9:1): the scout may then propose field suggestions and mark a finding
 as only restating a field, which is not committed (§9:2-§9:3), and framing says of each
@@ -201,6 +208,7 @@ from ai_assistant.orchestration.observer.writing import (
     outcome_of,
 )
 from ai_assistant.orchestration.remembering import is_remember
+from ai_assistant.orchestration.upkeep import PERSON_DOMAINS, upkeep_run
 from ai_assistant.orchestration.work_facts import held_senders
 from ai_assistant.orchestration.writes import MemoryWriteStage
 
@@ -424,9 +432,10 @@ class Observer:
     person-model store where one is wired (ADR-0338 §9:8), and every bound as
     :class:`ObserverLimits`. The composition root builds it; nothing here reads a setting.
 
-    **The stores it holds unbound are the due-finding's, the budget's and the pin pass's**
-    (ADR-0383 §7:12, §8:5; module docstring). A run reads and writes for each episode only
-    through the stores the holder binds to that episode's sight.
+    **The stores it holds unbound are the due-finding's and the budget's** (ADR-0383 §7:12,
+    §8:5; module docstring). A run reads and writes for each episode only through the
+    stores the holder binds to that episode's sight, and its pin pass through those the
+    holder binds to the run's sight for each person domain (ADR-0388 §4:2).
     """
 
     def __init__(  # noqa: PLR0913 — §15:1 names every collaborator the stage holds
@@ -463,10 +472,11 @@ class Observer:
             commit: The commit step's model route, which framing and placement ride
                 (ADR-0346 §10:2), likewise.
             memory: The memory store the finding of what is due pages episodes from
-                (ADR-0383 §7:12), and the pin pass reads memories from.
-            writes: The write stage over the unbound writer (ADR-0329 §12:1), which the
-                pin pass writes through; a run writes through one over the writer the
-                holder binds to its episode's sight.
+                (ADR-0383 §7:12).
+            writes: The write stage over the unbound writer (ADR-0329 §12:1), whose
+                writer a holder is built over where ``stores`` is not handed; a run and
+                each pin pass write through one over the writer the holder binds to its
+                sight.
             plans: The plan store the finding of what is due reads observation records
                 from (§7:12), and the daily budget counts calls in (§8:5).
             episodes: ADR-0276 §4's episode selector (§7:1, §15:3).
@@ -484,8 +494,8 @@ class Observer:
                 where ``diagnostic_record`` is false and no entry is built.
             person_model: The person-model store (ADR-0338 §9:8), which must hold the
                 pins of memories ``memory`` holds; ``None`` where ``person_model`` is
-                off, and then nothing of the person model is read or written. The pin
-                pass reads it unbound; a run, through the holder.
+                off, and then nothing of the person model is read or written. Read only
+                through the holder, bound to an episode's or a pin pass's sight.
             stores: The composition root's holder that binds stores for a pass (ADR-0383
                 §9:1), over these same stores, the story store, the person-model store
                 where one is wired, and the writer ``writes`` writes through. ``None``
@@ -534,13 +544,8 @@ class Observer:
         self._now = checked_clock(now, owner="Observer")
         self._mint = mint or _random_id
         self._entries = ObserverEntries(diagnostics, now=self._now)
-        self._people = person_model
-        # ADR-0338 §9:6: tied to no one ended work, so no sight bounds it yet (B9).
-        self._pins = (
-            None
-            if person_model is None
-            else PinConfirmations(people=person_model, memory=memory, writes=writes, now=self._now)
-        )
+        # ADR-0338 §11:2: whether the person model is wired, read through the holder alone.
+        self._person_model = person_model is not None
         self._write_limits = WriteLimits(
             threshold=limits.relevance,
             bound=limits.retrieved,
@@ -586,7 +591,7 @@ class Observer:
 
     async def _run(self) -> RunOutcome:
         # ADR-0338 §9:6: before the episodes, with no model call and against no budget.
-        pinned = 0 if self._pins is None else await self._pins.run_pass()
+        pinned = await self._pin_pass() if self._person_model else 0
         # ADR-0383 §7:12: the window the due-finding tests, read unbound (§15:3).
         window = await self._episodes(frozenset())
         queue = await self.due(window)
@@ -610,6 +615,30 @@ class Observer:
                 continue
             outcome = _counted(outcome, state)
         return outcome
+
+    async def _pin_pass(self) -> int:
+        """The run's pin pass (ADR-0338 §9:6): how many supports it added.
+
+        An ADR-0384 run for each person domain, never the shared things (ADR-0388 §4:1,
+        §4:3), each reading and writing by the run's sight
+        :func:`~ai_assistant.orchestration.upkeep.upkeep_run` makes for it, through the
+        stores the holder binds to that sight (§4:2).
+        """
+        added = 0
+        for domain in PERSON_DOMAINS:
+            run = upkeep_run(domain)
+            added += await self._pins(run.sight, tends=run.tends).run_pass()
+        return added
+
+    def _pins(self, sight: Sight, *, tends: RecordHome | None = None) -> PinConfirmations:
+        """The pin pass over the stores the holder binds to ``sight`` (ADR-0388 §4:2)."""
+        return PinConfirmations(
+            people=self._stores.people(sight),
+            memory=self._stores.memory(sight),
+            writes=MemoryWriteStage(writer=self._stores.writer(sight)),
+            now=self._now,
+            tends=tends,
+        )
 
     async def due(self, window: Sequence[EpisodicMemory]) -> list[Due]:
         """The queue: the episodes due now, oldest first (§16:2).
@@ -704,18 +733,24 @@ class Observer:
         """The stores one episode's run reads and writes through, each bound to ``sight``."""
         memory = self._stores.memory(sight)
         plans = self._stores.plans(sight)
+        people = self._stores.people(sight) if self._person_model else None
+        writes = MemoryWriteStage(writer=self._stores.writer(sight))
         return _Seen(
             memory=memory,
             plans=plans,
-            people=None if self._people is None else self._stores.people(sight),
+            people=people,
             reader=EpisodeReader(memory=memory, plans=plans, stories=self._stores.stories(sight)),
             writer=FindingWriter(
-                writes=MemoryWriteStage(writer=self._stores.writer(sight)),
+                writes=writes,
                 memory=memory,
                 plans=plans,
                 now=self._now,
                 limits=self._write_limits,
-                pins=self._pins,
+                # ADR-0388 §4:4: the pass before a retiring write is part of the
+                # episode's run, and reads and writes by the episode's sight.
+                pins=None
+                if people is None
+                else PinConfirmations(people=people, memory=memory, writes=writes, now=self._now),
             ),
         )
 

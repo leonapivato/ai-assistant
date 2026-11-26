@@ -50,10 +50,12 @@ from ai_assistant.core.types import (
     RecordHome,
 )
 from ai_assistant.orchestration import NotificationWriteStage
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.orchestration.notifications import RulingPolicy
 from ai_assistant.orchestration.person_block import PersonBlocks, person_zone
 from ai_assistant.testing import (
+    FakeMemoryStore,
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
@@ -154,9 +156,9 @@ def _engine(
 async def test_the_owners_zone_picks_a_policy_built_for_it() -> None:
     factory = _Factory()
     default = FakeNotificationPolicy(timezone="UTC")
-    pick = RulingPolicy(default=default, policy_for=factory, people=await _people(_TOKYO))
+    pick = RulingPolicy(default=default, policy_for=factory)
 
-    picked = await pick.pick()
+    picked = await pick.pick_through(await _people(_TOKYO))
 
     assert picked is not default
     assert factory.zones == [_TOKYO]
@@ -166,9 +168,9 @@ async def test_an_empty_zone_picks_the_hubs_policy() -> None:
     """§3:6: where the person's zone is empty, ``Settings.timezone`` governs."""
     factory = _Factory()
     default = FakeNotificationPolicy(timezone="UTC")
-    pick = RulingPolicy(default=default, policy_for=factory, people=await _people(None))
+    pick = RulingPolicy(default=default, policy_for=factory)
 
-    assert await pick.pick() is default
+    assert await pick.pick_through(await _people(None)) is default
     assert factory.zones == []
 
 
@@ -180,23 +182,20 @@ async def test_unwired_every_ruling_is_handed_the_hubs_policy(wired: str) -> Non
     pick = RulingPolicy(
         default=default,
         policy_for=None if wired in {"no_factory", "neither"} else _Factory(),
-        people=None if wired in {"no_store", "neither"} else people,
     )
 
-    assert await pick.pick() is default
+    assert await pick.pick_through(None if wired in {"no_store", "neither"} else people) is default
 
 
 async def test_a_changed_zone_governs_the_next_pick() -> None:
     """Read just before each ruling and never cached, so no restart is needed."""
     factory = _Factory()
     people = await _people(_TOKYO)
-    pick = RulingPolicy(
-        default=FakeNotificationPolicy(timezone="UTC"), policy_for=factory, people=people
-    )
-    await pick.pick()
+    pick = RulingPolicy(default=FakeNotificationPolicy(timezone="UTC"), policy_for=factory)
+    await pick.pick_through(people)
 
     await people.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, _LISBON, act=_PANEL)
-    await pick.pick()
+    await pick.pick_through(people)
 
     assert factory.zones == [_TOKYO, _LISBON]
 
@@ -205,13 +204,11 @@ async def test_a_store_fault_picks_no_policy() -> None:
     """The fault reaches the caller as the ruling paths' declared store fault, chained."""
     factory = _Factory()
     people = await _people(_TOKYO)
-    pick = RulingPolicy(
-        default=FakeNotificationPolicy(timezone="UTC"), policy_for=factory, people=people
-    )
+    pick = RulingPolicy(default=FakeNotificationPolicy(timezone="UTC"), policy_for=factory)
     people.fail_next()
 
     with pytest.raises(NotificationStoreError, match="person-model store") as raised:
-        await pick.pick()
+        await pick.pick_through(people)
     assert isinstance(raised.value.__cause__, PersonModelStoreError)
     assert factory.zones == []
 
@@ -223,9 +220,9 @@ async def test_a_zone_that_does_not_resolve_picks_the_hubs_policy() -> None:
     # held one can only be a defect, which no member can produce.
     people._people[OWNER_PERSON_ID].profile = Profile(time_zone="Mars/Olympus")
     default = FakeNotificationPolicy(timezone="UTC")
-    pick = RulingPolicy(default=default, policy_for=_Factory(), people=people)
+    pick = RulingPolicy(default=default, policy_for=_Factory())
 
-    assert await pick.pick() is default
+    assert await pick.pick_through(people) is default
 
 
 def test_the_zone_is_read_by_the_one_reading_planning_uses() -> None:
@@ -238,15 +235,26 @@ def test_the_zone_is_read_by_the_one_reading_planning_uses() -> None:
 # --- the live path: the write stage ---------------------------------------------------
 
 
+def _stage(
+    store: FakeNotificationStore,
+    people: FakePersonModelStore | None,
+    outbox: FakeNotificationOutbox,
+) -> NotificationWriteStage:
+    """The live path over a holder of the two stores, as the root builds it (ADR-0388 §7:1)."""
+    return NotificationWriteStage(
+        stores=BoundStores(
+            memory=FakeMemoryStore(now=lambda: AT), notifications=store, people=people
+        ),
+        policy=FakeNotificationPolicy(timezone="UTC"),
+        outbox=outbox,
+        policy_for=_Factory(),
+        read_zone=people is not None,
+    )
+
+
 async def _offered(people: FakePersonModelStore | None) -> NotificationDisposition:
     store = await _store(NotificationReach.INTERRUPT)
-    stage = NotificationWriteStage(
-        store=store,
-        policy=FakeNotificationPolicy(timezone="UTC"),
-        outbox=FakeNotificationOutbox(records=store, now=lambda: AT),
-        policy_for=_Factory(),
-        people=people,
-    )
+    stage = _stage(store, people, FakeNotificationOutbox(records=store, now=lambda: AT))
     return await stage.offer(_candidate())
 
 
@@ -273,13 +281,7 @@ async def test_a_store_fault_on_the_live_path_rules_and_writes_nothing() -> None
     people = await _people(_TOKYO)
     store = await _store(NotificationReach.INTERRUPT)
     outbox = FakeNotificationOutbox(records=store, now=lambda: AT)
-    stage = NotificationWriteStage(
-        store=store,
-        policy=FakeNotificationPolicy(timezone="UTC"),
-        outbox=outbox,
-        policy_for=_Factory(),
-        people=people,
-    )
+    stage = _stage(store, people, outbox)
     people.fail_next()
 
     with pytest.raises(NotificationStoreError, match="person-model store") as raised:

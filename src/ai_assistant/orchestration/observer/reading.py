@@ -1044,14 +1044,20 @@ class EpisodeReader:
         frozen: the part names it and is placed by when it began, and its text is the
         request's recorded statement, never the episode's, so an approval still freezing
         after its taker confirms all the same. A request whose approval's episode is not
-        held at all confirms nothing.
+        held at all confirms nothing, and **nor does one whose asking activation's episode
+        is not** (ADR-0388 §2:4): the confirmation names that activation, which a capture
+        failure, retention, a sweep or a forget may have deleted, and a withholding memory
+        store refuses a write adding a name that resolves to no record it holds (§2:1).
+        Both are read through the memory store bound to the episode's sight, in the one
+        read, open or frozen.
 
         **Nor does one of another home** (ADR-0383 §4:7). A memory written from the
         leaving episode takes its home, ``home`` (§4:2), and a confirmation is an evidence
         pointer to the request, held in another store file keyed by its person, whose
         domain is its home (§3:1, §5:2), and to the approval's episode. Where either is of
         another home than ``home``, the candidate is given no confirmation, as one whose
-        approval's episode is not held is not, so nothing written names them.
+        approval's episode is not held is not, so nothing written names them; and so for
+        an asking episode of another home (§2:3).
         """
         ticketed = [
             one
@@ -1070,11 +1076,14 @@ class EpisodeReader:
             )
         }
         addresses = [
-            episode_address(str(one.pushed_to))
-            for one in requests.values()
-            if one.pushed_to is not None
+            *(
+                episode_address(str(one.pushed_to))
+                for one in requests.values()
+                if one.pushed_to is not None
+            ),
+            *(episode_address(one.activation_id) for one in requests.values()),
         ]
-        held = await self._memory.get_many(addresses)
+        held = await self._memory.get_many(list(dict.fromkeys(addresses)))
         hints: list[Hint] = []
         for effect in ticketed:
             request = requests.get(str(effect.ticket))
@@ -1087,6 +1096,10 @@ class EpisodeReader:
             if not isinstance(own, EpisodicMemory) or fact is None:
                 continue
             if own.home != home or RecordHome.person(request.person) != home:
+                continue
+            # ADR-0388 §2:4: the asking activation's episode, held and of this home.
+            asking = held.get(episode_address(request.activation_id))
+            if not isinstance(asking, EpisodicMemory) or asking.home != home:
                 continue
             confirmation = shown.confirmation(
                 ConfirmationPart(

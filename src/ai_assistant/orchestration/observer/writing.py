@@ -210,9 +210,9 @@ class FindingWriter:
     **Through the episode's sight** (ADR-0383 §6:7, §7:6, §7:7). The observer builds one for
     each episode it reads, over the stores, and a write stage over the writer, that the
     composition root's holder binds to the sight it reads that episode by: retrieval, the
-    reads again and the writer's own reads for a write are all bound stores'. The pin pass
-    it runs before each retrieval (ADR-0338 §9:9) is not: it reads every person's pins, and
-    no sight bounds it yet (milestone 22's B9).
+    reads again and the writer's own reads for a write are all bound stores'. So is the
+    pin pass it runs before each retrieval (ADR-0338 §9:9): part of the episode's run, it
+    reads and writes through the stores bound to the episode's sight (ADR-0388 §4:4).
     """
 
     def __init__(  # noqa: PLR0913 — the stores, the clock, the bounds and the pin pass
@@ -236,9 +236,9 @@ class FindingWriter:
                 likewise.
             now: The clock a proposed narrowing is stamped from.
             limits: The composition root's numbers (ADR-0346 §6).
-            pins: The pin pass run strictly before each retrieval (ADR-0338 §9:9),
-                where the observer holds a person-model store; ``None`` where it holds
-                none.
+            pins: The pin pass run strictly before each retrieval (ADR-0338 §9:9), over
+                the stores bound to the episode's sight (ADR-0388 §4:4), where a
+                person-model store is wired; ``None`` where none is.
         """
         self._writes = writes
         self._memory = memory

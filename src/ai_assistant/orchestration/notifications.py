@@ -28,10 +28,20 @@ is for, and in ``Settings.timezone`` where theirs is empty. A policy's zone stay
 construction-time property of the instance, as ``NotificationPolicy`` requires, so what
 varies is *which* instance a ruling is handed: :class:`RulingPolicy` reads the zone just
 before each ruling and picks the hub's policy or one built for that zone. Both ruling
-paths, this stage's and the engine's reconsideration, pick through it: this stage reads
-the zone from the person-model store it holds, as it always has (ADR-0384 §2 makes the
-upcoming-event producer no upkeep run), and the reconsideration through the person-model
-store bound to its run's sight (:meth:`RulingPolicy.pick_through`, ADR-0384 §7:1).
+paths, this stage's and the engine's reconsideration, pick through it, each reading the
+zone through the person-model store bound to its run's sight
+(:meth:`RulingPolicy.pick_through`, ADR-0384 §7:1, ADR-0388 §7:1). It holds no store.
+
+**The upcoming-event producer's reads and writes are a run's** (ADR-0388 §7:1). For each
+offer, code takes the run of the domain its source's home is in (ADR-0383 §4:3),
+:func:`~ai_assistant.orchestration.upkeep.upkeep_run`, where every run's sight is made
+(ADR-0388 §9): in this milestone the owner's. The zone is read through the person-model
+store, and the ruling written through the notification store, each bound to that sight by
+the holder (:class:`~ai_assistant.orchestration.bound_stores.BoundStores`), so the cap and
+the duplicate lookup are figures of every notification of the home the record lands in,
+and of no other (§7:2, §6:1). Where the stores only count, each read answers as the
+unbound store's and writes its count event, its reader ``run`` (ADR-0383 §11:1). It is
+still no upkeep job, and what it reads to find what is coming is its source (§7:1).
 
 Nothing concrete is imported: the store, the policy and the outbox all arrive by
 injection and are seen only through their Protocols (CLAUDE.md golden rule 1).
@@ -49,16 +59,13 @@ from ai_assistant.core.errors import NotificationStoreError, PersonModelStoreErr
 from ai_assistant.core.protocols import NotificationPolicy
 from ai_assistant.core.types import OWNER_PERSON_ID, NotificationDispositionKind
 from ai_assistant.orchestration.person_block import person_zone
+from ai_assistant.orchestration.upkeep import upkeep_run
 from ai_assistant.orchestration.work_facts import source_home
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import (
-        NotificationOutbox,
-        NotificationStore,
-        PersonModelStore,
-    )
+    from ai_assistant.core.protocols import NotificationOutbox, PersonModelStore
     from ai_assistant.core.types import NotificationCandidate, NotificationDisposition
-    from ai_assistant.orchestration.bound_stores import Bound
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
 
 _log = structlog.get_logger(__name__)
 
@@ -83,7 +90,7 @@ class RulingPolicy:
     a profile field is none of them).
 
     **A store fault rules nothing.** Where the person-model store cannot be read,
-    :meth:`pick` raises and the caller hands no policy to the notification store, so no
+    :meth:`pick_through` raises and the caller hands no policy to the notification store, so no
     record is written or changed and no unit of budget is spent. It raises the
     ``NotificationStoreError`` every ruling path already declares, chained to the
     person-model store's fault, so ``NotificationWriter``'s failure surface is unchanged:
@@ -97,11 +104,10 @@ class RulingPolicy:
     **Inert unwired.** With no person-model store, or no factory, every ruling is handed
     the hub's policy, exactly as before the person model.
 
-    **Which store the zone is read through.** :meth:`pick` reads the store it was built
-    with: the upcoming-event producer's, unbound, since no clause yet gives that producer
-    a sight (ADR-0384 §2's table). The reconsideration, an upkeep run, reads it through
-    the person-model store bound to its run's sight instead (:meth:`pick_through`,
-    ADR-0383 §7:7, ADR-0384 §7:1), and is built with none of its own.
+    **Which store the zone is read through.** The one each ruling hands
+    :meth:`pick_through`: the person-model store bound to the sight of the run the ruling
+    is part of, the reconsideration's (ADR-0384 §7:1) or the upcoming-event producer's
+    (ADR-0388 §7:1). It holds none of its own (ADR-0383 §9:1).
     """
 
     def __init__(
@@ -109,48 +115,30 @@ class RulingPolicy:
         *,
         default: NotificationPolicy,
         policy_for: PolicyForZone | None = None,
-        people: PersonModelStore | None = None,
     ) -> None:
-        """Wire the pick to the hub's policy, the factory and the person-model store.
+        """Wire the pick to the hub's policy and the factory.
 
         Args:
             default: The policy over ``Settings.timezone``, handed to every ruling whose
-                person sets no zone, and to every ruling where either of the other two is
-                ``None``.
+                person sets no zone, and to every ruling where the factory or the store a
+                pick is handed is ``None``.
             policy_for: Builds the policy for a person's zone, or ``None``.
-            people: The person-model store the zone is read from, or ``None`` where the
-                person model is off (``Settings.person_model``).
         """
         self._default = default
         self._policy_for = policy_for
-        self._people = people
 
     @property
     def default(self) -> NotificationPolicy:
         """The policy over ``Settings.timezone``."""
         return self._default
 
-    async def pick(self) -> NotificationPolicy:
-        """The policy the next ruling is handed, the zone read from the store held.
-
-        Returns:
-            A policy built for the owner's zone where their profile sets one that
-            resolves, and the hub's policy otherwise, or where nothing is wired.
-
-        Raises:
-            NotificationStoreError: If the person-model store cannot be read, chained to
-                its ``PersonModelStoreError``. Nothing has been ruled, and the caller
-                rules nothing.
-        """
-        return await self.pick_through(self._people)
-
     async def pick_through(self, people: Bound[PersonModelStore] | None) -> NotificationPolicy:
         """The policy the next ruling is handed, the zone read through ``people``.
 
         Args:
-            people: The person-model store the owner's zone is read through: for the
-                reconsideration, the one bound to its run's sight (ADR-0384 §7:1), and
-                ``None`` where the person model is off, where the hub's policy is handed.
+            people: The person-model store the owner's zone is read through, the one
+                bound to the ruling's run's sight (ADR-0384 §7:1, ADR-0388 §7:1); ``None``
+                where the person model is off, where the hub's policy is handed.
 
         Returns:
             A policy built for the owner's zone where their profile sets one that
@@ -236,26 +224,31 @@ class NotificationWriteStage:
     a notification, so each is one a producer makes from a source, whose home is that of
     whoever the source belongs to, by the one rule :func:`source_home` reads (ADR-0383
     §4:3). The candidate carries none.
+
+    **It reads and writes by the run of that home's domain** (ADR-0388 §7:1; module
+    docstring): it holds the composition root's holder and no store, and asks it for the
+    notification store and the person-model store bound to the run's sight.
     """
 
     def __init__(
         self,
         *,
-        store: NotificationStore,
+        stores: BoundStores,
         policy: NotificationPolicy,
         outbox: NotificationOutbox | None,
         policy_for: PolicyForZone | None = None,
-        people: PersonModelStore | None = None,
+        read_zone: bool = False,
     ) -> None:
-        """Wire the seam to the store it writes through, its policy and its outbox.
+        """Wire the seam to the holder it writes through, its policy and its outbox.
 
         Args:
-            store: Where records live and where §3's atomic act happens. It must
-                be the store the façade's held-notification surface reads and the
-                store the outbox dismisses through — a composition-root obligation
-                no type can express (ADR-0028 §4): wired to a second store, a
-                ruled notification would be unreadable and undismissable through
-                the surfaces the user actually has.
+            stores: The composition root's holder that binds stores for a pass (ADR-0383
+                §9:1), over the notification store records live in and where §3's
+                atomic act happens. That must be the store the façade's
+                held-notification surface reads and the store the outbox dismisses
+                through — a composition-root obligation no type can express (ADR-0028
+                §4): wired to a second store, a ruled notification would be unreadable
+                and undismissable through the surfaces the user actually has.
             policy: The deterministic ruling of ADR-0130 §4 and §5. Held here and
                 handed to the store per call, never kept by the store: a
                 composition that handed the store a policy to keep would be
@@ -268,13 +261,15 @@ class NotificationWriteStage:
                 path exists at all.
             policy_for: Builds the policy for a person's zone (ADR-0338 §3:6), or
                 ``None``, where every ruling is handed ``policy``.
-            people: The person-model store the owner's zone is read from before each
-                ruling, or ``None`` where the person model is off, where every ruling
-                is handed ``policy``.
+            read_zone: Whether the owner's zone is read before each ruling, through the
+                person-model store the holder binds to the run's sight: true where the
+                person model is on, which ``stores`` must then hold; false where it is
+                off, where every ruling is handed ``policy``.
         """
-        self._store = store
-        self._policies = RulingPolicy(default=policy, policy_for=policy_for, people=people)
+        self._stores = stores
+        self._policies = RulingPolicy(default=policy, policy_for=policy_for)
         self._outbox = outbox
+        self._read_zone = read_zone
 
     async def offer(self, candidate: NotificationCandidate) -> NotificationDisposition:
         """Offer one candidate, hand off what it earned, and report the ruling.
@@ -301,8 +296,14 @@ class NotificationWriteStage:
                 enqueue could not commit. The record stays actionable and the next
                 reconciliation offers it (ADR-0131 §3b).
         """
-        policy = await self._policies.pick()
-        ruling = await self._store.admit(candidate, home=source_home(), policy=policy)
+        home = source_home()
+        # ADR-0388 §7:1: the run of the domain the source's home is in, its sight made
+        # where every run's is, and both stores bound to it.
+        run = upkeep_run(home)
+        people = self._stores.people(run.sight) if self._read_zone else None
+        policy = await self._policies.pick_through(people)
+        store = self._stores.notifications(run.sight)
+        ruling = await store.admit(candidate, home=home, policy=policy)
         await hand_off(self._outbox, ruling, candidate)
         return ruling
 

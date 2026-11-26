@@ -22,10 +22,16 @@ was removed — so the observer never decides those itself. It writes no field, 
 no change-log entry.
 
 **Whose sight** (ADR-0383 §6:7, §7:7). The fields are read through the person-model store
-bound to the sight the observer reads the leaving episode by. The pin pass is not: it reads
-every person's pins and is tied to no one ended work, so §6:7 gives it no sight, and it is
-none of ADR-0384's three upkeep jobs. It reads and writes unbound, through a write stage over
-the unbound writer, until a decision gives it a sight (milestone 22's B9; §9:1's list).
+bound to the sight the observer reads the leaving episode by. The pin pass reads and writes
+through stores bound to a sight too, and holds none unbound (ADR-0388 §4:2): the run's
+pass, at the start of each observer run, is an ADR-0384 run, one for each person domain,
+by :meth:`~ai_assistant.core.types.Sight.of_run` for that domain (§4:1), and is never run
+for the hub's shared things (§4:3); the pass before a retiring write is part of the
+episode's run, and reads and writes by that episode's sight (§4:4). The observer builds a
+:class:`PinConfirmations` for each such sight, over the person-model store, the memory
+store and the writer its holder binds to it. The run's pass changes nothing of another
+domain than the one it tends (ADR-0384 §4:2, §5:2): a pin of another person is passed over
+unread, where the bound store gives one back, as in the counting build.
 
 **The pin pass** (§9:6) adds a ``pinned`` support (§4:4) for every pin a person made on
 their own profile, removed since or not, whose memory the memory store holds, and which
@@ -164,37 +170,51 @@ def _own(pin: Pin) -> bool:
 
 
 class PinConfirmations:
-    """The pin pass (§9:6), and the retirement guard's run of it on one memory (§9:9)."""
+    """The pin pass (§9:6), and the retirement guard's run of it (§9:9), by one sight.
+
+    Built for each sight it reads by, over the stores the observer's holder binds to it
+    (ADR-0388 §4:2): a run's, for the pass at the start of an observer run, tending one
+    person domain (§4:1); or an episode's, for the pass before a retiring write, which is
+    part of that episode's run (§4:4) and tends no domain of its own.
+    """
 
     def __init__(
         self,
         *,
-        people: PersonModelStore,
-        memory: MemoryStore,
+        people: Bound[PersonModelStore],
+        memory: Bound[MemoryStore],
         writes: MemoryWriteStage,
         now: Callable[[], datetime],
+        tends: RecordHome | None = None,
     ) -> None:
         """Wire the pass.
 
         Args:
-            people: The person-model store the pins are read from.
+            people: The person-model store the pins are read from, bound to the pass's
+                sight.
             memory: The memory store each pin's memory is read from, through the
-                history read.
-            writes: The write stage every support is added through (ADR-0329 §12:1).
+                history read, bound to the same sight.
+            writes: The write stage every support is added through (ADR-0329 §12:1), over
+                the writer bound to the same sight.
             now: The clock each support and operation is stamped from.
+            tends: The person domain a run's pass tends (ADR-0388 §4:1): a pin of another
+                person is passed over, read for nothing (ADR-0384 §4:2, §5:2). ``None``
+                for the pass before a retiring write, which reads what its episode's
+                sight sees (§4:4).
         """
         self._people = people
         self._memory = memory
         self._writes = writes
         self._now = now
+        self._tends = tends
 
     async def confirm(self, *, strict: bool = False) -> dict[str, int]:
         """Add the ``pinned`` support every own pin lacks (§9:6, §9:9).
 
-        Every pin is read from the store's export, which carries every person's pins,
-        removed ones included (§10:5), so the store holds each pin the pass adds a
-        support for when it reads it (§4:5). A memory's pins are added in the order made,
-        each conditionally on the revision the history read last returned for it.
+        Every pin is read from the store's export, which carries every pin the bound
+        store holds, removed ones included (§10:5), so the store holds each pin the pass
+        adds a support for when it reads it (§4:5). A memory's pins are added in the order
+        made, each conditionally on the revision the history read last returned for it.
 
         Args:
             strict: Whether a support that cannot be written fails the call, as it must
@@ -211,7 +231,7 @@ class PinConfirmations:
                 cannot be written.
         """
         export = await self._people.export()
-        pins = [pin for pin in export.pins if _own(pin)]
+        pins = [pin for pin in export.pins if _own(pin) and self._tended(pin)]
         if not pins:
             return {}
         held = await self._memory.get_history(list(dict.fromkeys(pin.memory_id for pin in pins)))
@@ -222,6 +242,10 @@ class PinConfirmations:
             if count:
                 added[memory_id] = count
         return added
+
+    def _tended(self, pin: Pin) -> bool:
+        """Whether ``pin`` is of the domain the pass tends, where it tends one (§4:1)."""
+        return self._tends is None or RecordHome.person(pin.person_id) == self._tends
 
     async def _confirmed(self, held: Memory, pins: list[Pin], *, strict: bool) -> int:
         """Add each of ``pins``' missing supports to one memory; how many were added.

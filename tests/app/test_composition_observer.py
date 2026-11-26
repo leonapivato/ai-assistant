@@ -25,10 +25,11 @@ from ai_assistant.app.composition import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
-from ai_assistant.core.types import Message, Role, Sight
+from ai_assistant.core.types import Message, RecordHome, Role, Sight
 from ai_assistant.memory import MemoryIngestor
 from ai_assistant.models import RetryingProvider, RoutingProvider
 from ai_assistant.orchestration.observer import Observer
+from ai_assistant.orchestration.upkeep import PERSON_DOMAINS, upkeep_run
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -70,7 +71,6 @@ async def test_the_observer_is_wired_over_the_roots_own_stores_and_the_windows_s
         writer = stores._writer
         assert isinstance(writer, MemoryIngestor)
         assert writer._store is engine._memory, "what it writes is what it reads"
-        assert observer._pins is None or observer._pins._writes.writer is writer
     finally:
         await engine.aclose()
 
@@ -82,7 +82,8 @@ async def test_the_observer_holds_the_person_model_store_only_where_the_switch_i
     off = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path / "off")
     try:
         observer = _observer(off)
-        assert (observer._people, observer._pins, observer._stores._people) == (None, None, None)
+        assert (observer._person_model, observer._stores._people) == (False, None)
+        assert observer._bound(Sight.of_producer(None, ())).writer._pins is None
     finally:
         await off.aclose()
     on = build_engine(
@@ -92,14 +93,21 @@ async def test_the_observer_holds_the_person_model_store_only_where_the_switch_i
         observer = _observer(on)
         blocks = on._person_blocks
         assert blocks is not None
-        assert observer._people is blocks._store, "the one store, read and written"
-        assert observer._stores._people is blocks._store, "a run reads it bound, the same one"
-        assert observer._pins is not None
-        assert observer._pins._memory is on._memory
-        # The pin pass writes through the stage over the unbound writer (B9).
-        assert observer._pins._writes.writer is observer._stores._writer
+        assert observer._person_model
+        assert observer._stores._people is blocks._store, "read bound, the one store"
+        # ADR-0388 §4:1, §4:2: the run's pass, by the run's sight of the owner's domain,
+        # through the stores the one holder binds to it.
+        (domain,) = PERSON_DOMAINS
+        run = upkeep_run(domain)
+        passed = observer._pins(run.sight, tends=run.tends)
+        assert passed._tends == RecordHome.owners()
+        # §4:4: the guard before a retiring write reads by the episode's own bound stores.
         seen = observer._bound(Sight.of_producer(None, ()))
-        assert seen.writer._pins is observer._pins, "the guard runs the run's own pass"
+        guard = seen.writer._pins
+        assert guard is not None
+        assert guard._tends is None
+        assert guard._memory is seen.memory
+        assert guard._people is seen.people
     finally:
         await on.aclose()
 
