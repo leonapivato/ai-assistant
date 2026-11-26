@@ -1,6 +1,6 @@
 # 383. Each record carries its home, and every read a work, a producer or a run makes is of a store bound to one sight, which answers as though it held only what that sight sees
 
-- Status: Partially superseded by ADR-0385 (§6:10 and §9:2, each in the addition alone: a sight is also made by a `core` constructor for an owner's own act, in the engine's members; §7:10, in its reach: a store bound to an owner's act's sight withholds from the build that first binds it)
+- Status: Partially superseded by ADR-0385 (§6:10 and §9:2, each in the addition alone: a sight is also made by a `core` constructor for an owner's own act, in the engine's members; §7:10, in its reach: a store bound to an owner's act's sight withholds from the build that first binds it) and ADR-0386 (§12:2, in its reach: it does not reach the clauses ADR-0386 supersedes in part, which hold as ADR-0386 leaves them)
 - Date: 2026-11-26
 - Scope: decision D1 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
@@ -37,6 +37,7 @@
   with no `Status` edit (ADR-0070 §1; ADR-0082 §1 and its 2026-07-31 note). It changes nothing
   decided: every record the memory store holds carries a required home (§3:1, §5:4). Applied by
   the lane that builds the memory store's home.
+- Partially superseded: 2026-11-26 by [ADR-0386](0386-a-records-home-joins-the-fields-the-reads-and-the-minting-members-earlier-decisions-closed.md) — §12:2, in its reach: it does not reach the clauses ADR-0386 supersedes in part (ADR-0289 §2:1, §3:1, §3:10 and §3:14; ADR-0215 §7:1; ADR-0074 §1 and §9; ADR-0293 §5:2; ADR-0306 §6:1), each of which holds as ADR-0386 leaves it. §12:1 stays true of this decision: the supersession is ADR-0386's (ADR-0386 §7). Every other clause stands. These replacements take effect on ratification of ADR-0386. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
