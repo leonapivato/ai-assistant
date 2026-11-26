@@ -528,14 +528,73 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
 
     # Carried on through ADR-0345 §13's shape, ADR-0349 §10:6's, ADR-0351 §9's and
     # ADR-0353 §9:6's, which the head's upgrades reach next.
-    # And ADR-0356 §13:5's, which carries every processing record to version 12.
+    # And ADR-0356 §13:5's, which carries every processing record to version 12; and the
+    # home columns', which add what each home's bound store reads back, held apart here.
     carried = memory.carries[6](
         memory.carries[5](
             memory.carries[4](memory.carries[3](memory.carries[2](memory.carries[1](base))))
         )
     )
 
-    assert memory.shape == 7
+    assert memory.shape == 8
+    assert set(carried) == set(head)
+    assert {
+        key: first_difference(value, head[key]) for key, value in carried.items()
+    } == dict.fromkeys(carried)
+
+
+@pytest.mark.integration
+def test_the_memory_stores_carry_from_shape_7_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """The carry from shape 7 says what the head's upgrade to the home columns writes.
+
+    Taken over the file the previous release wrote (``tests/memory/legacy``), which
+    holds a record in the owner's domain and one in the hub's shared things: every
+    record that release read back, carried to shape 8, is read back by this build after
+    opening the file, and each home's bound store gives back exactly the records the
+    carry says it holds (ADR-0383 §5:3, §7:3).
+    """
+    import shutil  # noqa: PLC0415
+
+    from ai_assistant.core.types import Sight, SightMode  # noqa: PLC0415
+    from ai_assistant.memory import SqliteMemoryStore  # noqa: PLC0415
+    from ai_assistant.models import HashingEmbedder  # noqa: PLC0415
+    from ai_assistant.testing import FakeTraceSink  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    path = tmp_path / "memory.db"
+    shutil.copyfile(legacy / "memory-before-home-columns.db", path)
+    with sqlite3.connect(path) as conn:
+        base: Records = {
+            f"record/{record_id}": json.loads(data) | {"revision": revision}
+            for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
+        }
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=lambda: datetime(2026, 11, 26, 10, tzinfo=UTC),
+        sight_mode=SightMode.WITHHOLD,
+    )
+
+    async def read_head() -> Records:
+        head: Records = {
+            f"record/{record.id}": upgrade_stores.to_json(record) for record in await store.export()
+        }
+        for key, home in upgrade_stores._MEMORY_SEEN_HOMES.items():
+            seen = await store.bound(Sight.of_run(home)).export()
+            head[key] = upgrade_stores.to_json(sorted(record.id for record in seen))
+        return head
+
+    try:
+        head = asyncio.run(read_head())
+    finally:
+        store.close()
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[7](base)
+
+    assert memory.shape == 8
+    assert carried["seen/shared"] == ["mem-shared"]
     assert set(carried) == set(head)
     assert {
         key: first_difference(value, head[key]) for key, value in carried.items()

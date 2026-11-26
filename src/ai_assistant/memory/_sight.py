@@ -3,8 +3,8 @@
 What both memory stores share about a bound store: which activation the store records
 as having made a record (§7:4), the count event a read through a store bound in the
 counting mode writes (§11:1 to §11:3), and the persistent store's expression of a sight
-in its own query (§7:3). What a sight sees is :meth:`~ai_assistant.core.types.Sight.withheld`'s
-alone; nothing here decides it.
+in its own query, over the two columns it keeps each row's home in (§7:3). What a sight
+sees is :meth:`~ai_assistant.core.types.Sight.withheld`'s alone; nothing here decides it.
 """
 
 from __future__ import annotations
@@ -12,13 +12,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 import structlog
+from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import EpisodicMemory, MemoryKind, RecordHome
 
 if TYPE_CHECKING:
-    import sqlite3
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
 
     from ai_assistant.core.types import MemoryRecord, Sight
 
@@ -81,64 +80,41 @@ def count_records(sight: Sight, member: str, records: Iterable[MemoryRecord]) ->
     count_given(sight, member, ((record.home, made_by(record)) for record in records))
 
 
-#: The SQL function the persistent store's connection carries (``register_home_reader``):
-#: a row's home as the store's own record decoder reads it.
-HOME_READER: Final = "assistant_record_home"
+def home_columns(home: RecordHome) -> tuple[str, str | None]:
+    """``home`` as the persistent store's two home columns hold it: its kind and its id.
 
-#: A ``records`` row's home, read by the store's record decoder over the row's whole
-#: JSON and rendered as ``RecordHome.model_dump_json()`` renders it, or ``NULL`` where
-#: the decoder reads no record there, and so no home (ADR-0383 §5:3, §7:3).
-STORED_HOME_SQL: Final = f"{HOME_READER}(CAST(data AS BLOB))"
-
-
-def register_home_reader(conn: sqlite3.Connection, decode: Callable[[str], MemoryRecord]) -> None:
-    """Give ``conn`` :data:`HOME_READER`: the store's record decoder, as a SQL function.
-
-    The function takes a row's bytes, reads them as UTF-8 as the driver reads a row,
-    decodes the whole JSON with ``decode``, the very decoder every read of the store
-    decodes a row with, and answers the home the record carries; a row that is not
-    UTF-8, or that the decoder refuses, has none. So nothing re-implements how the decoder reads a
-    repeated key, a key's order, a value's type, an escape or a malformed record, and
-    a statement that compares the function's value with the homes a sight sees agrees
-    with the predicate over the decoded record on every row by construction (§7:3).
-    Deterministic, so SQLite may evaluate it once per distinct row.
-
-    Args:
-        conn: The store's connection.
-        decode: The store's record decoder; it raises ``MemoryStoreError`` on a row it
-            refuses.
+    The id is ``NULL`` for the hub's shared things, which name none (ADR-0383 §2:2).
     """
-
-    def home_of(stored: object) -> str | None:
-        # The row's bytes, decoded here as the driver decodes a row it hands the store,
-        # so a payload that is not UTF-8 is a row the decoder never reads, answered as
-        # no home rather than raised inside SQLite (§5:3, §11:1).
-        if not isinstance(stored, bytes):
-            return None
-        try:
-            return decode(stored.decode("utf-8")).home.model_dump_json()
-        except UnicodeDecodeError, MemoryStoreError:
-            return None
-
-    conn.create_function(HOME_READER, 1, home_of, deterministic=True)
+    return home.kind.value, home.id
 
 
-def read_home(rendered: object) -> RecordHome | None:
-    """A home :data:`STORED_HOME_SQL` rendered, read back; ``None`` where it rendered none."""
-    if not isinstance(rendered, str):
+def home_from_columns(kind: object, home_id: object) -> RecordHome | None:
+    """The home a row's two home columns name, or ``None`` where they name none.
+
+    ``None`` where the kind is ``NULL``, as it is on a row the upgrade could not read a
+    home from, or where the two do not make a home (ADR-0383 §5:3).
+    """
+    if not isinstance(kind, str) or not (home_id is None or isinstance(home_id, str)):
         return None
-    return RecordHome.model_validate_json(rendered)
+    try:
+        return RecordHome.model_validate({"kind": kind, "id": home_id})
+    except ValidationError:
+        return None
 
 
 def seen_sql(sight: Sight) -> tuple[str, list[object]]:
     """The persistent store's expression of ``sight`` over a ``records`` row (§7:3).
 
-    A row is seen where its home, read by the store's own record decoder
-    (:data:`STORED_HOME_SQL`, on a connection :func:`register_home_reader` prepared),
-    is one every bound sees (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or
-    where it is the episode of the sight's activation (§7:4) and carries a home the
-    decoder reads. A row with no home the decoder reads is seen by no sight, its own
-    activation's included (§5:3).
+    A row is seen where its home columns name one every bound sees
+    (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or where it is the episode of
+    the sight's activation (§7:4) and its columns name a home. A row whose columns name
+    none is seen by no sight, its own activation's included (§5:3).
+
+    The columns are written by the statement that writes the row, from the record the
+    row holds, and by the upgrade that added them, from the record as the store's
+    decoder reads it; nothing else writes them. So on every row the store wrote, the
+    condition answers as :meth:`~ai_assistant.core.types.Sight.withheld` does over the
+    decoded record.
 
     The condition is ``0`` or ``1`` on every row and never ``NULL``, so its negation
     selects exactly the rows it does not, which the write refusals read (§7:5). Only
@@ -149,13 +125,22 @@ def seen_sql(sight: Sight) -> tuple[str, list[object]]:
     """
     terms: list[str] = []
     params: list[object] = []
-    homes = sorted(home.model_dump_json() for home in sight.homes_seen)
-    if homes:
-        terms.append(f"{STORED_HOME_SQL} IN ({', '.join('?' * len(homes))})")
-        params.extend(homes)
+    for home in sorted(sight.homes_seen, key=home_columns_key):
+        kind, home_id = home_columns(home)
+        if home_id is None:
+            terms.append("(home_kind = ? AND home_id IS NULL)")
+            params.append(kind)
+        else:
+            terms.append("(home_kind = ? AND home_id = ?)")
+            params.extend([kind, home_id])
     if sight.activation is not None:
-        terms.append(f"(kind = ? AND id = ? AND {STORED_HOME_SQL} IS NOT NULL)")
+        terms.append("(kind = ? AND id = ? AND home_kind IS NOT NULL)")
         params.extend([MemoryKind.EPISODIC.value, episode_of(sight.activation)])
     if not terms:
         return "0", []
     return f"coalesce(({' OR '.join(terms)}), 0)", params
+
+
+def home_columns_key(home: RecordHome) -> tuple[str, str]:
+    """The order a sight's homes are written into its condition in, so the text is stable."""
+    return home.kind.value, home.id or ""

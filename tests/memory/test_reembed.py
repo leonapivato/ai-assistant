@@ -37,6 +37,7 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     BeliefBand,
     EpisodicMemory,
@@ -46,6 +47,8 @@ from ai_assistant.core.types import (
     MemoryWriterName,
     Provenance,
     RecordHome,
+    Sight,
+    SightMode,
     SituationLabel,
     Validity,
 )
@@ -75,8 +78,8 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: Every column of ``records``, for the case that asserts the migration changes
 #: none of them. A module-level literal, never caller data.
 _ALL_COLUMNS = (
-    "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, band "
-    "FROM records"
+    "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, band, "
+    "home_kind, home_id FROM records"
 )
 
 #: The two embedding spaces every case migrates between. Different widths, so the
@@ -253,6 +256,37 @@ async def test_rowids_and_stored_json_survive_the_migration_byte_for_byte(tmp_pa
     # `SqliteMemoryStore.export` orders by it, so renumbering would silently
     # reorder a data-rights export.
     assert after == before
+
+
+async def test_every_home_survives_a_re_embed_and_still_bounds_a_read(tmp_path: Path) -> None:
+    """ADR-0383 §7:3: the rebuilt rows carry each record's home in their columns.
+
+    A rebuild that left the columns ``NULL`` would withhold every record from every
+    sight while every record round-tripped intact, so each home is seeded, compared
+    before and after, and read back through stores bound to sights that see one each.
+    """
+    store = tmp_path / "memory.db"
+    records = [
+        _record("owners", "the owner's own"),
+        _record("shared", "the hub's shared").model_copy(update={"home": RecordHome.shared()}),
+    ]
+    await _seed(store, records)
+    before = _read(store, "SELECT id, home_kind, home_id FROM records ORDER BY rowid")
+
+    target = HashingEmbedder(dimensions=_NEW)
+    await Reembedder(store=store, embedder=target).run()
+
+    after = _read(store, "SELECT id, home_kind, home_id FROM records ORDER BY rowid")
+    assert after == before == [("owners", "person", OWNER_PERSON_ID), ("shared", "shared", None)]
+    opened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=store, embedder=target, sight_mode=SightMode.WITHHOLD
+    )
+    try:
+        for record in records:
+            found = await opened.bound(Sight.of_run(record.home)).export()
+            assert [one.id for one in found] == [record.id]
+    finally:
+        opened.close()
 
 
 async def test_every_band_survives_a_re_embed_and_still_scopes_a_search(tmp_path: Path) -> None:

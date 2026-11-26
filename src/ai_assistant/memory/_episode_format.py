@@ -203,16 +203,27 @@ CHECKED_RECORD_FORMAT: Final[int] = 26
 #: file at 27, whose episodes it would not read (ADR-0326 §5:3).
 CAME_THROUGH_RECORD_FORMAT: Final[int] = 27
 
-#: The memory store's own label, the one this build writes. It advances to 28 for
-#: ADR-0383 §5:1's record: ``EpisodicMemory`` and ``Memory`` gain ``home``, a required
-#: ``RecordHome`` carrying the closed ``RecordHomeKind``, the domain the record landed in
-#: (§2:2, §5:4): a field of a ``core`` model the store serialises in every record, and
-#: members of a closed enumeration a stored record names (ADR-0326 §2:3). A file at 27 is
-#: upgraded in place: every record it holds is rewritten carrying the owner's domain,
-#: whatever an episode's facts say of whom its work was for (ADR-0383 §5:1), and an older
-#: build, which serves 12 to 27, refuses a file at 28, whose records it would not read
-#: (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 28
+#: The memory store's label for ADR-0383 §5:1's record. It advances to 28 for the home:
+#: ``EpisodicMemory`` and ``Memory`` gain ``home``, a required ``RecordHome`` carrying the
+#: closed ``RecordHomeKind``, the domain the record landed in (§2:2, §5:4): a field of a
+#: ``core`` model the store serialises in every record, and members of a closed
+#: enumeration a stored record names (ADR-0326 §2:3). A file at 27 is upgraded in place:
+#: every record it holds is rewritten carrying the owner's domain, whatever an episode's
+#: facts say of whom its work was for (ADR-0383 §5:1), and an older build, which serves
+#: 12 to 27, refuses a file at 28, whose records it would not read (ADR-0326 §5:3).
+HOME_RECORD_FORMAT: Final[int] = 28
+
+#: The memory store's own label, the one this build writes. It advances to 29 for the
+#: ``home_kind`` and ``home_id`` columns of its ``records`` table: each row's home, as
+#: the record stored in the row carries it, written by the statement that writes the
+#: row, so a bound store's statements compare columns and decode no row to apply a
+#: sight (ADR-0383 §7:2, §7:3; #3732). The home stays in the record too. A file at 28 is
+#: upgraded in place: the columns are added and filled from each row's record as the
+#: store's decoder reads it, and a row the decoder cannot read, or whose home it cannot
+#: read, is left with none, which withholds it from every sight (ADR-0383 §5:3). An
+#: older build, which serves 12 to 28, refuses a file at 29, whose rows it would write
+#: without the columns (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 29
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -234,6 +245,7 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         UNREAD_RECORD_FORMAT,
         CHECKED_RECORD_FORMAT,
         CAME_THROUGH_RECORD_FORMAT,
+        HOME_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
 )
