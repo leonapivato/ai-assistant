@@ -53,10 +53,10 @@ class TestFakeStoryStoreContract(StoryStoreContract):
 
     @pytest.fixture
     def set_story_home(self) -> Callable[[StoryStore, str, RecordHome], None]:
-        """Give a stored story another home in the fake's state, as the suite's door asks."""
+        """Give a stored story another home, through the fake's own test-only method."""
 
         def rehome(store: StoryStore, story_id: str, home: RecordHome) -> None:
             assert isinstance(store, FakeStoryStore)
-            store._state.stories[story_id].home = home  # the test-only door
+            store.set_story_home(story_id, home)
 
         return rehome
