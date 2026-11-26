@@ -1,6 +1,6 @@
 # 383. Each record carries its home, and every read a work, a producer or a run makes is of a store bound to one sight, which answers as though it held only what that sight sees
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: decision D1 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
