@@ -334,20 +334,31 @@ class StoryStoreContract:
         assert made_off.home == RecordHome.shared()
 
     async def test_no_write_changes_a_storys_home_a_merge_included(self, store: StoryStore) -> None:
-        """ADR-0383 §4:6: every write that changes a story leaves its home as it was."""
-        shared = await store.create([act("a1")], home=RecordHome.shared(), actor=_OWNER)
-        owners = await made(store, act("a2"), act("a3"))
-        assert shared.story_id is not None
-        await store.link(owners, [act("a4")], actor=_OWNER)
-        await store.unlink(owners, [act("a4")], actor=_OWNER)
-        await noted(store, owners, "A note.", on="a2")
-        await store.merge(shared.story_id, owners, actor=_OWNER)
-        absorbed = await store.header(shared.story_id)
-        target = await store.header(owners)
+        """ADR-0383 §4:6: every write that changes a story leaves its home as it was.
+
+        Each write here joins records of one home: whether a write joining two homes is
+        refused is ADR-0383 §4:7's, which this suite does not yet hold.
+        """
+        shared = [
+            await store.create([act(one)], home=RecordHome.shared(), actor=_OWNER)
+            for one in ("a1", "a2", "a3")
+        ]
+        absorbed, target, moved = (one.story_id for one in shared)
         assert absorbed is not None
         assert target is not None
-        assert absorbed.merged_into == owners
-        assert (absorbed.home, target.home) == (RecordHome.shared(), RecordHome.owners())
+        assert moved is not None
+        await store.link(target, [act("a4")], actor=_OWNER)
+        await store.unlink(target, [act("a4")], actor=_OWNER)
+        await noted(store, absorbed, "A note.", on="a1")
+        await store.merge(absorbed, target, actor=_OWNER)
+        await store.move(target, moved, [act("a1")], actor=_OWNER)
+        for story_id in (absorbed, target, moved):
+            header = await store.header(story_id)
+            assert header is not None
+            assert header.home == RecordHome.shared(), story_id
+        merged = await store.header(absorbed)
+        assert merged is not None
+        assert merged.merged_into == target
 
     @pytest.mark.parametrize(
         "home",
