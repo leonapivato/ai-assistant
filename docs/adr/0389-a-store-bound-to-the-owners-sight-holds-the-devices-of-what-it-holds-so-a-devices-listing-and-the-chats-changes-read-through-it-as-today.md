@@ -1,6 +1,6 @@
 # 389. A store bound to the owner's sight holds the devices of what it holds, so a device's listing and the chat's changes read through it as today
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: an amendment to decisions D1 and D3 of milestone 22, "Every record has a home"
   (acceptance [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
