@@ -18,9 +18,11 @@ nested function and a closure count toward the class or function that encloses t
 handed a store :class:`BoundStores` gave for a sight, and is read as nothing else.
 **A store under another name is read as the store**: an import under another name
 (``from … import MemoryStore as Store``) and an alias anywhere in the package (``type
-Store = MemoryStore``, ``Store: TypeAlias = …``, ``Store = MemoryStore``) whose value
-names a store unbound, an alias of an alias included. An alias's own definition is a
-name for a shape, not a holder, and is not read as one.
+Store = MemoryStore``, ``Store: TypeAlias = …``, ``Store = MemoryStore``, an ``if
+TYPE_CHECKING:`` block's included) whose value names a store unbound, imports and
+aliases read together, so an alias of a renamed import or of another alias is one
+too. An alias's own definition is a name for a shape, not a holder, and is not read as
+one.
 
 **Closures** (the inventory's caveat). A closure made under ``orchestration/`` reaches a
 store only through a value its enclosing class or function holds, and that holder's
@@ -210,30 +212,41 @@ def _stores_named(annotation: ast.expr, names: frozenset[str] = STORES) -> Itera
 
 
 def _alias_values(tree: ast.Module) -> Iterator[tuple[str, ast.expr]]:
-    """Each module-level alias ``tree`` defines, by name, with its value.
+    """Each alias ``tree`` defines, by name, with what it names.
 
-    A ``type`` statement, an annotated ``TypeAlias`` and a plain assignment of one name.
+    A ``type`` statement and an assignment of one name, annotated (``TypeAlias``) or
+    plain, wherever each sits: a conditional block's and a function's included; and each
+    name an import gives another (``from … import MemoryStore as Store`` names
+    ``MemoryStore``).
     """
-    for top in tree.body:
-        if isinstance(top, ast.TypeAlias) and isinstance(top.name, ast.Name):
-            yield top.name.id, top.value
-        elif (
-            isinstance(top, ast.AnnAssign)
-            and isinstance(top.target, ast.Name)
-            and top.value is not None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+            yield node.name.id, node.value
+        elif isinstance(node, ast.ImportFrom):
+            for one in node.names:
+                if one.asname is not None:
+                    yield one.asname, ast.Name(id=one.name)
+    for statement in ast.walk(tree):
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
         ):
-            yield top.target.id, top.value
-        elif isinstance(top, ast.Assign) and len(top.targets) == 1:
-            (target,) = top.targets
+            yield statement.target.id, statement.value
+        elif isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            (target,) = statement.targets
             if isinstance(target, ast.Name):
-                yield target.id, top.value
+                yield target.id, statement.value
 
 
 def store_aliases(trees: Iterable[ast.Module]) -> frozenset[str]:
-    """Every name an alias anywhere in ``trees`` gives a store naming it unbound.
+    """Every name a store is known by anywhere in ``trees``: its own, each alias whose
+    value names one unbound, and each name one is imported under.
 
-    Read to a fixed point, so an alias of an alias is one too. By name alone, which can
-    only over-read: a name some module aliases to a store is read as one everywhere.
+    Imports and aliases are read together to a fixed point, so an alias of a renamed
+    import, a renamed import of an alias and an alias of an alias are each one. By name
+    alone, which can only over-read: a name some module gives a store is read as one
+    everywhere.
     """
     values = [one for tree in trees for one in _alias_values(tree)]
     names: frozenset[str] = STORES
@@ -242,19 +255,6 @@ def store_aliases(trees: Iterable[ast.Module]) -> frozenset[str]:
         if grown == names:
             return names
         names = grown
-
-
-def _names_here(tree: ast.Module, aliases: frozenset[str]) -> frozenset[str]:
-    """The names a store is held by in one module: its own, every alias of one, and every
-    name one is imported under (``from … import MemoryStore as Store``)."""
-    imported = {
-        one.asname
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for one in node.names
-        if one.asname is not None and one.name in aliases
-    }
-    return aliases | imported
 
 
 def _annotations(node: ast.AST) -> Iterator[ast.expr]:
@@ -304,7 +304,7 @@ def unbound_holders(root: Path = _ROOT) -> dict[str, frozenset[str]]:
         (*modules.values(), *(_parsed(path) for path in sorted(package.rglob("*.py"))))
     )
     for module, tree in modules.items():
-        names = _names_here(tree, aliases)
+        names = aliases
         for top in tree.body:
             name = _holder(top)
             if name is None:
@@ -383,6 +383,16 @@ type Kept = StoryStore
 Plain = PlanStore
 class Renamed:
     def __init__(self, memory: Store, stories: Kept, plans: list[Plain]) -> None: ...
+from ai_assistant.core.protocols import ConversationStore as ImportedChat
+type AliasedChat = ImportedChat
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import NotificationStore as Held
+    Notes: TypeAlias = Held
+class Chained:
+    def __init__(self, chat: AliasedChat, notes: Notes) -> None: ...
+def local() -> None:
+    Local = PersonModelStore
+    def inner(people: Local) -> None: ...
 """
     (tmp_path / "held.py").write_text(source, encoding="utf-8")
     assert unbound_holders(tmp_path) == {
@@ -394,4 +404,6 @@ class Renamed:
         "held.py:handed": frozenset({"PersonModelStore"}),
         "held.py:walks": frozenset({"Walk"}),
         "held.py:Renamed": frozenset({"Store", "Kept", "Plain"}),
+        "held.py:Chained": frozenset({"AliasedChat", "Notes"}),
+        "held.py:local": frozenset({"Local"}),
     }
