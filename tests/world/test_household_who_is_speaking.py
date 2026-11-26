@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     AuthorityKind,
     InputSender,
     ProposedCall,
+    RecordHome,
     RoundResponse,
     SupportHolder,
     Sureness,
@@ -301,12 +302,20 @@ async def test_a_second_person_writing_from_their_linked_device_fails_safe() -> 
     words are held as nobody identified's, the one person a party names being the owner
     (ADR-0351 §3:2). It is answered in its own place, shown as no person's, Sam's id
     shown to no model, and a stop it asks for is refused for want of authority. It never
-    runs as the owner's."""
+    runs as the owner's.
+
+    ADR-0383 §2:3, §4:1: a work for Sam would land in Sam's domain, which no write may
+    carry while the hub admits the owner alone, so its episode is refused with nothing
+    written, as a work for a group's is, and the work runs and answers all the same. What
+    follows reads the record it tried to write, which the store never held."""
     async with Household(_replies_and_stops) as home:
         sam = home.person("sam")
         phone = await home.device(sam, "sams-phone")
-        work = await home.say(phone, "What's on today?")
+        work = await home.say_unstored(phone, "What's on today?")
 
+    assert not work.stored
+    assert work.episode.home == RecordHome.person(sam.id)
+    assert {(one["stage"], one["reason"]) for one in work.losses} >= {("episode", "failed")}
     assert work.senders == (sam.at(Sureness.NORMAL),)
     assert work.facts == _theirs(sam, Sureness.NORMAL)
     assert work.record.trigger.parties == (SupportHolder.unknown(),)

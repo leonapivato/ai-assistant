@@ -45,7 +45,9 @@ written as that device (ADR-0298 §2:7), or the line, through
 sender id in that sender's private chat with the bot. :meth:`Household.say` writes one
 and waits for the work it started; :meth:`Household.say_together` writes several into
 one start wait (ADR-0332 §5:1), so they are one input of one work (ADR-0368 §4:5);
-:meth:`Household.post` writes one and waits for nothing.
+:meth:`Household.post` writes one and waits for nothing; :meth:`Household.say_unstored`
+writes one whose episode the store refuses, a work for a person the hub does not admit
+(ADR-0383 §2:3, §4:1), and reads back the record it tried to write.
 
 **What the hub recorded, and what it did** is a :class:`Work`: the frozen episode, its
 trigger's senders, the sender each line message records, the facts the work started
@@ -84,7 +86,16 @@ from itertools import count
 from typing import TYPE_CHECKING, Any, Final, Self
 
 from channel_receiver_contract import event_input
-from phases_support import event, frozen, input_of, phases_harness, processing, replies, until
+from phases_support import (
+    episodes,
+    event,
+    frozen,
+    input_of,
+    phases_harness,
+    processing,
+    replies,
+    until,
+)
 from structlog.testing import capture_logs
 from telegram_support import CASE_START_WAIT, REFERENCE, YieldingTelegram
 from telegram_support import text as line_update
@@ -92,11 +103,13 @@ from test_engine import AT as HARNESS_AT
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.device_context import serving_device
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     Account,
     ChatDevice,
     DeviceAccess,
+    EpisodicMemory,
     InputSender,
     LinkAct,
     LinkActHow,
@@ -131,15 +144,16 @@ from ai_assistant.testing import (
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, MutableMapping
+    from collections.abc import Callable, MutableMapping, Sequence
     from types import TracebackType
 
     from test_engine import Harness
 
     from ai_assistant.core.types import (
         EpisodeProcessingRecord,
-        EpisodicMemory,
         LinkWrite,
+        MemoryRecord,
+        MemoryWrite,
         WorkFacts,
     )
     from ai_assistant.testing.tool_calling import RoundCall, RoundReply
@@ -158,6 +172,9 @@ LINE_CHAT: Final = 424242
 
 #: The event every recording of a work's facts is logged under.
 _FACTS_LOGGED: Final = "work_facts_recorded"
+
+#: The event a capture logs for an episode write it could not keep.
+_CAPTURE_DEGRADED: Final = "activation_capture_degraded"
 
 #: How long the hub chat's start wait is held open while :meth:`Household.say_together`
 #: writes: far longer than any write takes, and handed back before the wait is released.
@@ -239,6 +256,11 @@ class Work:
             was shown, and the calls the rounds before it proposed, with their results.
         understood: Each understanding call the work made, as its user message: what
             understanding was shown (ADR-0353 §2).
+        stored: Whether the store holds the episode. ``False`` for a work whose episode
+            write was refused (:meth:`Household.say_unstored`): ``episode`` is then the
+            open record its admission tried to write, which the store never held.
+        losses: Each ``activation_capture_degraded`` log entry the work wrote, for a
+            work read by :meth:`Household.say_unstored`: what its capture could not keep.
     """
 
     episode: EpisodicMemory
@@ -246,6 +268,8 @@ class Work:
     replies: tuple[str, ...]
     rounds: tuple[RoundCall, ...] = ()
     understood: tuple[str, ...] = ()
+    stored: bool = True
+    losses: tuple[MutableMapping[str, Any], ...] = ()
 
     @property
     def record(self) -> EpisodeProcessingRecord:
@@ -335,10 +359,10 @@ class Household:
             send_bound=timedelta(seconds=1),
             start_wait=CASE_START_WAIT,
         )
-        knobs: dict[str, Any] = {}
+        self.memory = _WitnessedMemory(now=lambda: HARNESS_AT)
+        knobs: dict[str, Any] = {"memory": self.memory}
         if people is not None:
-            memory = FakeMemoryStore(now=lambda: HARNESS_AT)
-            knobs = {"memory": memory, "person_blocks": PersonBlocks(store=people, memory=memory)}
+            knobs["person_blocks"] = PersonBlocks(store=people, memory=self.memory)
         self.harness: Harness = phases_harness(
             self.planner,
             identities=self.identities,
@@ -499,6 +523,67 @@ class Household:
         """
         return await self._one_work(lambda: self.post(account, words))
 
+    async def say_unstored(self, account: HouseholdAccount, words: str) -> Work:
+        """Write ``words`` from ``account``, for a work whose episode write is refused.
+
+        A work for a person the hub does not admit writes no episode in this milestone
+        (ADR-0383 §2:3, §4:1): the store refuses the admission's write of its open
+        episode, capture ends there, and the work runs and answers all the same. The
+        :class:`Work` read back holds that refused record, as
+        :class:`_WitnessedMemory` kept it: its trigger, senders and facts are what the
+        work was admitted with. It is ``stored=False``.
+
+        Raises:
+            AssertionError: If not exactly one work ends for it, or the store holds any
+                episode of it.
+        """
+        before = {one.id for one in await episodes(self.memory)}
+        refused_before = len(self.memory.refused)
+        planned_before = len(self.planner.calls)
+        understood_before = len(self.understanding.calls)
+        sent_before = len(self.bot.messages)
+        written_before = len(await self._replies())
+        with capture_logs() as logs:
+            await self.post(account, words)
+
+            def tried() -> list[EpisodicMemory]:
+                return [
+                    one
+                    for one in self.memory.refused[refused_before:]
+                    if isinstance(one, EpisodicMemory)
+                ]
+
+            async def done() -> bool:
+                answered = len(self.bot.messages) > sent_before or (
+                    len(await self._replies()) > written_before
+                )
+                return bool(tried()) and answered and await self._idle()
+
+            await until(done, what="the work to end")
+        (episode,) = tried()
+        assert {one.id for one in await episodes(self.memory)} == before
+        activation = processing(episode).activation_id
+        line = processing(episode).trigger.channel == line_channel(REFERENCE, LINE_CHAT)
+        return Work(
+            episode=episode,
+            logged=tuple(
+                one
+                for one in logs
+                if one["event"] == _FACTS_LOGGED and one["activation_id"] == activation
+            ),
+            replies=(
+                tuple(body for _, body in self.bot.messages[sent_before:])
+                if line
+                else tuple(await self._replies())[written_before:]
+            ),
+            rounds=tuple(self.planner.calls[planned_before:]),
+            understood=tuple(
+                one.messages[-1].content for one in self.understanding.calls[understood_before:]
+            ),
+            stored=False,
+            losses=tuple(one for one in logs if one["event"] == _CAPTURE_DEGRADED),
+        )
+
     async def say_together(self, *said: tuple[Device, str]) -> Work:
         """Write each message into one start wait of the hub chat, as one work's input.
 
@@ -607,6 +692,38 @@ class Household:
         reader = self.harness.engine._chat_reader
         assert reader is not None
         return _HeldStartWait(reader)
+
+
+class _WitnessedMemory(FakeMemoryStore):
+    """The canonical fake memory store, keeping each record a write of it refused.
+
+    It refuses exactly what the fake refuses, and raises as it raises; it only keeps the
+    record, so a case can read what a work tried to write where the store kept nothing
+    of it (:meth:`Household.say_unstored`).
+
+    Attributes:
+        refused: Every record an ``add`` or a ``write_atomic`` was refused for, in order.
+    """
+
+    def __init__(self, **knobs: Any) -> None:
+        super().__init__(**knobs)
+        self.refused: list[MemoryRecord] = []
+
+    async def add(self, record: MemoryRecord) -> str:
+        """The fake's ``add``, keeping ``record`` where it is refused."""
+        try:
+            return await super().add(record)
+        except MemoryStoreError:
+            self.refused.append(record)
+            raise
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """The fake's ``write_atomic``, keeping each record of a refused batch."""
+        try:
+            return await super().write_atomic(writes)
+        except MemoryStoreError:
+            self.refused.extend(one.record for one in writes)
+            raise
 
 
 class _HeldStartWait:
