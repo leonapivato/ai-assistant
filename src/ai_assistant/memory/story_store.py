@@ -1229,30 +1229,35 @@ class SqliteStoryStore:
 
         Read off each story's home columns and merge target alone, decoding no row, so
         nothing of a story this store does not hold is read, and a held story is read no
-        more than the same store holding only what it holds reads it. Unbound, and
-        counting, every flag is.
+        more than the same store holding only what it holds reads it. **It decides
+        whether the stories are held and validates nothing**: a story is not held where
+        the file stores it and the sight does not see it, and the walk ends at a story
+        already walked, a merge target that is no id, or an id the file stores no story
+        under. Whatever is wrong with a held story's records is found, or not, where the
+        unbound store finds it, so the two answer alike (§7:2). Unbound, and counting,
+        every flag is.
         """
-        if self._seen() is None:
+        seen_where = self._seen()
+        if seen_where is None:
             return True
+        where, params = seen_where
         named = [one for one in (flag.story, flag.flag.story if flag.flag else None) if one]
         for story_id in named:
-            seen = {story_id}
-            current: str | None = story_id
-            while current is not None:
-                if not self._holds_story(conn, current):
-                    return False
+            walked = {story_id}
+            current = story_id
+            while True:
                 row = conn.execute(
-                    "SELECT merged_into FROM stories WHERE id = ?", (current,)
+                    f"SELECT merged_into, {where} FROM stories WHERE id = ?",  # noqa: S608 — module text; values bound
+                    (*params, current),
                 ).fetchone()
-                onward = None if row is None else row[0]
-                if onward is not None and type(onward) is not str:
-                    msg = f"a stored merge target is not an id: {describe_untrusted(onward)}"
-                    raise StoryStoreError(msg)
-                if onward in seen:
-                    msg = f"story {story_id!r} is merged into a chain that loops"
-                    raise StoryStoreError(msg)
-                if onward is not None:
-                    seen.add(onward)
+                if row is None:
+                    break
+                if not row[1]:
+                    return False
+                onward = row[0]
+                if type(onward) is not str or onward in walked:
+                    break
+                walked.add(onward)
                 current = onward
         return True
 
