@@ -2085,3 +2085,28 @@ async def test_a_bound_stores_claim_read_validates_nothing_it_does_not_hold() ->
             await store.effect_position(conversation, "effect-1")
     finally:
         store.close()
+
+
+async def test_a_bound_stores_change_read_decodes_no_device_set_it_does_not_hold() -> None:
+    """ADR-0383 §3:3, §7:2: a start is read with no devices before its set is decoded.
+
+    The set stored with a conversation's start is altered outside the store into one that
+    does not decode. Bound and withholding, the store holds no device row, so the start
+    is given back with none and the read answers; unbound, it is the fault it always was.
+    """
+    store = SqliteConversationStore(path=":memory:", now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        await store.set_my_devices([ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)])
+        conversation = (await store.start(home=RecordHome.owners())).id
+        store._conn.execute(
+            "UPDATE chat_changes SET devices = 'not json' WHERE kind = 'conversation_started'"
+        )
+        bound = store.bound(SIGHTS["owners-work"])
+        changes = (await bound.changes(after=0)).changes
+        assert [(one.conversation_id, getattr(one, "devices", None)) for one in changes] == [
+            (conversation, ())
+        ]
+        with pytest.raises(ConversationStoreError):
+            await store.changes(after=0)
+    finally:
+        store.close()

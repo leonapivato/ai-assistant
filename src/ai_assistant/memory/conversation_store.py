@@ -2478,7 +2478,7 @@ class SqliteConversationStore:
         async with self._lock:
             rows, head = await _run_to_completion(self._changes_sync, after, named, limit)
         self._counted("changes", (self._change_home(row) for row in rows))
-        page = tuple(self._without_devices(_change_from(row)) for row in rows)
+        page = tuple(_change_from(self._without_devices(row)) for row in rows)
         try:
             return ChatChanges(
                 changes=page, next_after=page[-1].seq if len(page) == limit else head
@@ -2549,15 +2549,17 @@ class SqliteConversationStore:
             return self._deciding(conversation, row[17:19])
         return conversation
 
-    def _without_devices(self, change: ChatChange) -> ChatChange:
-        """``change`` as a bound store holding no device row gives it back (ADR-0383 §3:3).
+    def _without_devices(self, row: Sequence[Any]) -> Sequence[Any]:
+        """A change's row as a bound store holding no device row reads it (ADR-0383 §3:3).
 
-        A conversation's start carries no devices through a store bound and withholding;
-        unbound, or counting, it is as recorded.
+        Bound and withholding, a conversation's start is read with no devices, put in
+        place of its stored set **before** anything is decoded, so a set the store does
+        not give back can neither be shown nor fail the read; unbound, or counting, the
+        row is as stored.
         """
-        if self._withholding() is None or not isinstance(change, ConversationStartedChange):
-            return change
-        return change.model_copy(update={"devices": ()})
+        if self._withholding() is None or row[1] != "conversation_started":
+            return row
+        return (*row[:4], "[]", *row[5:])
 
     async def my_devices(self) -> tuple[ChatDevice, ...]:
         """Return "my devices", ``device_id`` ascending (ADR-0293 §3:1).
@@ -2786,8 +2788,48 @@ class SqliteConversationStore:
             return []
         async with self._lock:
             rows = await _run_to_completion(self._awaiting_sync, limit, after_id)
-        self._counted("conversations_awaiting", (stored_home(*row[1:3]) for row in rows))
+            if self._sight is not None and self._sight_mode is SightMode.COUNT:
+                waiting = await _run_to_completion(self._waiting_homes_sync, rows)
+                self._counted(
+                    "conversations_awaiting",
+                    (
+                        self._awaiting_home(stored_home(*row[1:3]), homes)
+                        for row, homes in zip(rows, waiting, strict=True)
+                    ),
+                )
         return [_stamped_id_of(row[0]) for row in rows]
+
+    def _waiting_homes_sync(self, rows: Sequence[Sequence[Any]]) -> list[list[Any]]:
+        """For each conversation listed, the home columns of its messages not taken in."""
+        with self._transaction("read the homes of untaken messages", immediate=False) as conn:
+            return [
+                self._fetch(
+                    conn,
+                    "read the homes of untaken messages",
+                    "SELECT m.home_kind, m.home_id FROM messages m WHERE m.conversation_id = ? "
+                    "AND m.deleted = 0 AND m.author = ? AND NOT EXISTS (SELECT 1 FROM taken_in t "
+                    "WHERE t.conversation_id = m.conversation_id AND t.position = m.position) "
+                    "ORDER BY m.position ASC",
+                    (row[0], MessageAuthor.USER.value),
+                )
+                for row in rows
+            ]
+
+    def _awaiting_home(
+        self, conversation: RecordHome | None, waiting: Sequence[Sequence[Any]]
+    ) -> RecordHome | None:
+        """The home a conversation listed as awaiting is withheld by, for §11:1's count.
+
+        It is listed for its messages not taken in, so a sight withholds it where it does
+        not see the conversation, or sees none of those messages: its own home in the
+        first case, the first such message's in the second.
+        """
+        if self._sight is None or not self._sight.sees(conversation):
+            return conversation
+        homes = [stored_home(*one) for one in waiting]
+        if not homes or any(self._sight.sees(home) for home in homes):
+            return conversation
+        return homes[0]
 
     def _awaiting_sync(self, limit: int, after_id: str | None) -> list[Any]:
         held, held_params = self._seen("c.")
