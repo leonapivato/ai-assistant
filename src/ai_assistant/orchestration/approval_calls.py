@@ -60,7 +60,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.acting import Unwritten
-from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.activation_state import active_state, work_sight
 from ai_assistant.orchestration.approvals import REQUEST_APPROVAL_CAPABILITY, WHY_ARGUMENT
 from ai_assistant.orchestration.person_calls import NotDone, recorded_wording
 from ai_assistant.orchestration.planning import exact_line
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import ActivationEffect, RequestedCall, ToolCall
     from ai_assistant.orchestration.acting import ClaimingAnswer, OwnRecordsAnswer
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
 
 __all__ = [
     "OUTSIDE_LINE",
@@ -197,8 +198,15 @@ class CardPoster(Protocol):
     and says how it went. Where none is wired, every card is *not posted*.
     """
 
-    async def post(self, request: ApprovalRequest, facts: CardFacts) -> CardPosted:
-        """Post ``request``'s card, showing ``facts`` beside it, and say how it went."""
+    async def post(
+        self, request: ApprovalRequest, facts: CardFacts, *, plans: Bound[PlanStore]
+    ) -> CardPosted:
+        """Post ``request``'s card, showing ``facts`` beside it, and say how it went.
+
+        The card is recorded on its request through ``plans``, the plan store bound to the
+        sight of the work that asked: the request is that work's own (ADR-0383 §7:4,
+        §7:5).
+        """
         ...
 
 
@@ -234,13 +242,15 @@ class ApprovalCalls:
 
     Structurally acting's ``OwnRecordsCalls`` and its ``ClaimingOwnRecordsCalls``: the
     call runs directly against the plan store, its request and its effect record written
-    in one step, and is awaited to its end.
+    in one step, and is awaited to its end. The store is the one the holder binds to the
+    sight of the work that asks (ADR-0383 §7:4, §7:5, §7:7), read as the call runs: a
+    request is that work's own, whoever's sight it is.
     """
 
     def __init__(
         self,
         *,
-        plans: PlanStore,
+        stores: BoundStores,
         expiry: timedelta,
         now: Clock,
         wake: Callable[[], None] | None = None,
@@ -249,7 +259,9 @@ class ApprovalCalls:
         """Wire the runner.
 
         Args:
-            plans: The plan store, which holds the Approvals channel's content.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1): the plan
+                store, which holds the Approvals channel's content, is read and written
+                bound to the asking work's sight.
             expiry: How long a request waits on its person: the composition root's
                 constant (§3:5).
             now: The clock a request's write is stamped by.
@@ -262,7 +274,7 @@ class ApprovalCalls:
         if expiry.total_seconds() <= 0:
             msg = "a request waits on its person for a positive time (ADR-0361 §3:5)"
             raise ValueError(msg)
-        self._plans = plans
+        self._stores = stores
         self._expiry = expiry
         self._now = now
         self._wake = wake
@@ -303,6 +315,7 @@ class ApprovalCalls:
 
         Raises:
             ClaimStopped: If the store holds a stop record for the asking activation.
+            RuntimeError: If no admitted work is running, which has no sight to write by.
         """
         asker = current_asker()
         if asker is None or asker.activation_id != effect.activation_id:
@@ -335,8 +348,10 @@ class ApprovalCalls:
             # Its bound on ``why`` (core's APPROVAL_WHY_MAX_CHARS), or a call the store
             # could not hold: nothing is written.
             return Unwritten(reason=_MALFORMED)
+        # ADR-0383 §7:7: read after the clock, through the store bound to the work's sight.
+        plans = self._stores.plans(work_sight())
         try:
-            answer = await self._plans.write_approval_request(
+            answer = await plans.write_approval_request(
                 request,
                 effect.model_copy(update={"request": request.id}),
                 match=match,
@@ -361,7 +376,7 @@ class ApprovalCalls:
         assert written is not None  # noqa: S101 — the store's write answer carries it
         if self._wake is not None:
             self._wake()
-        posted = await self._card(written, asker)
+        posted = await self._card(written, asker, plans)
         card = posted.outcome
         if posted.delivered is not None:
             self._delivered[str(call.decision.id)] = posted.delivered
@@ -371,7 +386,9 @@ class ApprovalCalls:
             output={"card": _CARD_WORDS[card], "expires": _instant(written.expires_at)},
         )
 
-    async def _card(self, request: ApprovalRequest, asker: ApprovalAsker) -> CardPosted:
+    async def _card(
+        self, request: ApprovalRequest, asker: ApprovalAsker, plans: Bound[PlanStore]
+    ) -> CardPosted:
         """How the card went: the poster's answer, or *not posted* with none wired."""
         if self._cards is None:
             return CardPosted(CardOutcome.NOT_POSTED)
@@ -382,7 +399,7 @@ class ApprovalCalls:
             read_outside=asker.read_outside,
         )
         try:
-            return await self._cards.post(request, facts)
+            return await self._cards.post(request, facts, plans=plans)
         except Exception as exc:  # a card that fails leaves the request on the panel (§2:7)
             del exc
             _log.warning("approval_card_failed", stage="acting", reason="poster_raised")

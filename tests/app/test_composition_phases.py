@@ -100,19 +100,24 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
     try:
         phases = engine._phases
         assert isinstance(phases, PhasePath)
-        assert phases._plans is engine._plans
-        assert phases._acting._plans is engine._plans
+        # ADR-0383 §9:1: the path, acting and authorizing read through the one holder,
+        # over the engine's own plan, memory and story stores.
+        held = phases._stores
+        assert held is engine._stores
+        assert phases._acting._stores is held
+        assert held._plans is engine._plans
         authorizing = phases._authorizing
         assert authorizing._trail is engine._trail
-        assert authorizing._memory is engine._memory
-        assert authorizing._stories is engine._stories
+        assert authorizing._stores is held
+        assert held._memory is engine._memory
+        assert held._stories is engine._stories
         assert phases._round_limit == PHASES_ROUND_LIMIT
         assert phases._round_wait == PHASES_CALL_DEADLINE
         # ADR-0308 §2:5, §3: the second run's provisional cap, and the one memory store
         # recall searched, which planning fetches its finds from.
         assert phases._recall_cap == RECALL_SECOND_RUN_CAP
         assert 1 <= RECALL_SECOND_RUN_CAP <= RECALLED_ITEMS_MAX
-        assert phases._memory is engine._memory
+        assert phases._stores._memory is engine._memory
         assert engine._chat_turn_budget == PHASES_TURN_BUDGET
         # ADR-0306 §2:7: every capability the tools advertise — here remembering and
         # noting reliance (ADR-0329 §3:1, §6:7); no
@@ -188,8 +193,8 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         assert isinstance(matters, _Beside)
         assert set(matters._runners) == MATTER_CAPABILITIES
         runners = matters._beside._runners  # type: ignore[attr-defined]
-        held = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
-        (story_calls,) = held.values()
+        distinct = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
+        (story_calls,) = distinct.values()
         assert isinstance(story_calls, StoryCalls)
         assert all(runners[name] is look_ups for name in LOOK_UP_CAPABILITIES)
         # Every call but the tidy-up through the one holder (ADR-0383 §9:1); the tidy-up

@@ -55,7 +55,7 @@ from ai_assistant.testing import FakePermissionLineStore, FakePlanStore
 if TYPE_CHECKING:
     from test_engine import Harness
 
-    from ai_assistant.core.types import MemoryRecord, PlanningExchange, RecordedCall
+    from ai_assistant.core.types import MemoryRecord, PlanningExchange, RecordedCall, Sight
     from ai_assistant.orchestration.authorizer import (
         AuthorizingStage,
         RoundAuthorization,
@@ -83,9 +83,9 @@ def _recording(plans: FakePlanStore, rounds: _Rounds) -> type[AuthorizingStage]:
         stage = build(**seams)
         authorize = stage.authorize
 
-        async def noted(given: RoundToAuthorize) -> RoundAuthorization:
+        async def noted(given: RoundToAuthorize, *, sight: Sight) -> RoundAuthorization:
             rounds.handed.append(given)
-            return await authorize(given)
+            return await authorize(given, sight=sight)
 
         stage.authorize = noted  # type: ignore[method-assign]
         return stage

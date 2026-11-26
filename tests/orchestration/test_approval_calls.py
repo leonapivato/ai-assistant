@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
+from sight_support import holder, in_a_work
 
 from ai_assistant.core.channel_validation import APPROVALS, declared_input, origin_kind
 from ai_assistant.core.types import (
@@ -69,6 +70,7 @@ from ai_assistant.orchestration.approvals import (
 from ai_assistant.testing import FakePlanStore
 
 if TYPE_CHECKING:
+    from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import FrozenJson
 
 _AT: Final = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
@@ -145,10 +147,14 @@ class _Cards:
     def __init__(self, outcome: CardOutcome | None) -> None:
         self.posted: list[ApprovalRequest] = []
         self.facts: list[CardFacts] = []
+        self.stores: list[PlanStore] = []
         self._outcome = outcome
 
-    async def post(self, request: ApprovalRequest, facts: CardFacts) -> CardPosted:
+    async def post(
+        self, request: ApprovalRequest, facts: CardFacts, *, plans: PlanStore
+    ) -> CardPosted:
         self.posted.append(request)
+        self.stores.append(plans)
         self.facts.append(facts)
         if self._outcome is None:
             msg = "the line is down"
@@ -171,9 +177,9 @@ async def test_a_request_is_written_with_every_part_code_fills_in() -> None:
     plans = FakePlanStore()
     woken: list[None] = []
     runner = ApprovalCalls(
-        plans=plans, expiry=_DAY, now=lambda: _AT, wake=lambda: woken.append(None)
+        stores=holder(plans=plans), expiry=_DAY, now=lambda: _AT, wake=lambda: woken.append(None)
     )
-    with asking(_asker()):
+    with in_a_work(at=_AT), asking(_asker()):
         answer = await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
 
     assert isinstance(answer, ToolResult)
@@ -207,8 +213,10 @@ async def test_the_result_says_how_the_card_went(outcome: CardOutcome | None, sa
     """ADR-0364 §10:1: sent, not sent or unknown; a card that failed leaves the request on
     the panel alone."""
     cards = _Cards(outcome)
-    runner = ApprovalCalls(plans=FakePlanStore(), expiry=_DAY, now=lambda: _AT, cards=cards)
-    with asking(_asker()):
+    runner = ApprovalCalls(
+        stores=holder(plans=FakePlanStore()), expiry=_DAY, now=lambda: _AT, cards=cards
+    )
+    with in_a_work(at=_AT), asking(_asker()):
         answer = await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
 
     assert isinstance(answer, ToolResult)
@@ -220,8 +228,8 @@ async def test_the_result_says_how_the_card_went(outcome: CardOutcome | None, sa
 async def test_a_duplicate_of_a_pending_request_writes_nothing_and_says_since_when() -> None:
     """§2:8: the same capability, values and binding for the same person."""
     plans = FakePlanStore()
-    runner = ApprovalCalls(plans=plans, expiry=_DAY, now=lambda: _AT)
-    with asking(_asker()):
+    runner = ApprovalCalls(stores=holder(plans=plans), expiry=_DAY, now=lambda: _AT)
+    with in_a_work(at=_AT), asking(_asker()):
         await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
         again = _effect().model_copy(update={"id": "effect:again"})
         answer = await runner.run_claiming(_call(), again, match=None, deliberate_repeat=False)
@@ -235,9 +243,12 @@ async def test_a_duplicate_of_a_pending_request_writes_nothing_and_says_since_wh
 async def test_no_request_is_written_outside_the_phases_or_for_a_call_not_ruled() -> None:
     """§2:5: who asks is read from the activation, never from what the call carries."""
     plans = FakePlanStore()
-    runner = ApprovalCalls(plans=plans, expiry=_DAY, now=lambda: _AT)
+    runner = ApprovalCalls(stores=holder(plans=plans), expiry=_DAY, now=lambda: _AT)
     alone = await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
-    with asking(ApprovalAsker(person=OWNER_PERSON_ID, activation_id="act-ask", round_id="r")):
+    with (
+        in_a_work(at=_AT),
+        asking(ApprovalAsker(person=OWNER_PERSON_ID, activation_id="act-ask", round_id="r")),
+    ):
         unruled = await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
 
     assert isinstance(alone, Unwritten)
@@ -247,7 +258,7 @@ async def test_no_request_is_written_outside_the_phases_or_for_a_call_not_ruled(
 
 def test_the_expiry_is_positive() -> None:
     with pytest.raises(ValueError, match="positive"):
-        ApprovalCalls(plans=FakePlanStore(), expiry=timedelta(0), now=lambda: _AT)
+        ApprovalCalls(stores=holder(plans=FakePlanStore()), expiry=timedelta(0), now=lambda: _AT)
 
 
 # --- the declarations (§3:6, §5:1, §6:1) -------------------------------------------------
@@ -315,9 +326,11 @@ async def test_the_card_is_handed_what_its_request_does_not_record_and_its_deliv
     """ADR-0361 §2:11, §4:3: the outside-content fact from the round's ruling, and what
     the card sent kept by the call's decision until the phases record its entry, once."""
     cards = _Cards(CardOutcome.SENT)
-    runner = ApprovalCalls(plans=FakePlanStore(), expiry=_DAY, now=lambda: _AT, cards=cards)
+    runner = ApprovalCalls(
+        stores=holder(plans=FakePlanStore()), expiry=_DAY, now=lambda: _AT, cards=cards
+    )
     asker = replace(_asker(), read_outside=True)
-    with asking(asker):
+    with in_a_work(at=_AT), asking(asker):
         await runner.run_claiming(_call(), _effect(), match=None, deliberate_repeat=False)
 
     (facts,) = cards.facts

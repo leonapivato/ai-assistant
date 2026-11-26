@@ -155,8 +155,9 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
         plans = engine._plans
         assert isinstance(plans, SqlitePlanStore)
         phases = wired_phases(engine)
-        assert phases._plans is plans
-        assert phases._acting._plans is plans
+        # ADR-0383 §9:1: through the one holder, over that one store.
+        assert phases._stores._plans is plans
+        assert phases._acting._stores is phases._stores
         # The façade and authorizing read the very same audit trail.
         assert phases._authorizing._trail is engine._trail
     finally:

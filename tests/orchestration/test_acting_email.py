@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 import pytest
+from sight_support import SIGHT
 from test_acting import _AT, _Invoker, _round, _stage
 
 from ai_assistant.core.types import (
@@ -66,16 +67,18 @@ async def test_an_accidental_repeat_is_refused_and_a_deliberate_one_runs() -> No
     invoker = _Invoker()
     earlier = AuthorizedRound(activation_id="act-0", round_id="r0", calls=(_email("d0", "e0"),))
     await _stage(plans, invoker).act(
-        home=RecordHome.owners(), held=HeldResults(), authorized=earlier
+        home=RecordHome.owners(), sight=SIGHT, held=HeldResults(), authorized=earlier
     )
 
     refused = await _stage(plans, invoker).act(
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
         authorized=_round(_email("d1", "e1"), stories=("act-0",)),
     )
     repeated = await _stage(plans, invoker).act(
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
         authorized=_round(_email("d2", "e2", deliberate_repeat=True), stories=("act-0",)),
     )

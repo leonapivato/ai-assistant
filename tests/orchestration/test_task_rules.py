@@ -12,6 +12,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from sight_support import SIGHT, UNIDENTIFIED, holder, sight_of
 
 from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
@@ -21,6 +22,7 @@ from ai_assistant.core.types import (
     PersonModelAct,
     ProfileField,
     RuleDay,
+    SightMode,
     TaskRuleKind,
 )
 from ai_assistant.orchestration.task_rules import (
@@ -340,25 +342,59 @@ async def _people(zone: str | None) -> FakePersonModelStore:
     return people
 
 
-async def test_the_persons_zone_is_their_profiles_and_the_hubs_where_it_sets_none() -> None:
-    assert (
-        await PersonZones(default=UTC_ZONE, people=await _people("Asia/Tokyo")).of(OWNER_PERSON_ID)
-        == TOKYO
-    )
-    assert (
-        await PersonZones(default=UTC_ZONE, people=await _people(None)).of(OWNER_PERSON_ID)
-        == UTC_ZONE
-    )
-    assert await PersonZones(default=UTC_ZONE).of(OWNER_PERSON_ID) == UTC_ZONE
+def _zones(people: FakePersonModelStore | None) -> PersonZones:
+    """The zones over ``people``, a work's read through the holder over it (ADR-0383 §9:1)."""
+    if people is None:
+        return PersonZones(default=UTC_ZONE)
+    return PersonZones(default=UTC_ZONE, people=people, stores=holder(people=people))
+
+
+async def _read(zones: PersonZones, *, outside: bool) -> ZoneInfo:
+    """The owner's zone, by a work's read or by one outside any work."""
+    if outside:
+        return await zones.outside_a_work(OWNER_PERSON_ID)
+    return await zones.of(OWNER_PERSON_ID, sight=SIGHT)
+
+
+@pytest.mark.parametrize("outside", [False, True], ids=["a-work", "outside-a-work"])
+async def test_the_persons_zone_is_their_profiles_and_the_hubs_where_it_sets_none(
+    outside: bool,
+) -> None:
+    assert await _read(_zones(await _people("Asia/Tokyo")), outside=outside) == TOKYO
+    assert await _read(_zones(await _people(None)), outside=outside) == UTC_ZONE
+    assert await _read(_zones(None), outside=outside) == UTC_ZONE
 
 
 async def test_a_person_model_that_cannot_be_read_guesses_no_zone() -> None:
     """§3:3: a fault is no answer that the profile sets none, so the read raises."""
     people = await _people("Asia/Tokyo")
     people.fail_next()
-    zones = PersonZones(default=UTC_ZONE, people=people)
+    zones = _zones(people)
 
     with pytest.raises(PersonModelStoreError):
-        await zones.of(OWNER_PERSON_ID)
+        await zones.of(OWNER_PERSON_ID, sight=SIGHT)
     # The next read, the store back, is the profile's.
-    assert await zones.of(OWNER_PERSON_ID) == TOKYO
+    assert await zones.of(OWNER_PERSON_ID, sight=SIGHT) == TOKYO
+
+
+async def test_a_works_read_of_the_zone_is_bound_to_its_sight_and_the_store_is_needed() -> None:
+    """ADR-0383 §7:7, §8:2: a work's read goes through the store bound to its sight; one
+    whose sight does not see the owner's profile reads the hub's zone, as for a profile
+    never written; and a zones built over a store with no holder is refused."""
+    people = await _people("Asia/Tokyo")
+    withholding = FakePersonModelStore(now=lambda: FRIDAY_NOON, sight_mode=SightMode.WITHHOLD)
+    await withholding.set_field(
+        OWNER_PERSON_ID,
+        ProfileField.TIME_ZONE,
+        "Asia/Tokyo",
+        act=PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID),
+    )
+    zones = _zones(withholding)
+
+    assert await zones.of(OWNER_PERSON_ID, sight=SIGHT) == TOKYO
+    unidentified = sight_of(UNIDENTIFIED, at=FRIDAY_NOON)
+    assert await zones.of(OWNER_PERSON_ID, sight=unidentified) == UTC_ZONE
+    # The sensor's push reads outside any work, unbound (§7:8).
+    assert await zones.outside_a_work(OWNER_PERSON_ID) == TOKYO
+    with pytest.raises(ValueError, match="holder"):
+        PersonZones(default=UTC_ZONE, people=people)

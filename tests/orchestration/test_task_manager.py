@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from channel_episodes import conversation_episode
+from sight_support import holder, in_a_work
 from task_support import (
     AT,
     CHAT,
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
         FrozenJson,
         MemoryRecord,
         ScheduledTask,
+        Sight,
         ToolDefinition,
     )
     from ai_assistant.orchestration.activation_state import ActivationState
@@ -120,8 +122,10 @@ class _World:
         self.starting: set[str] = set()
         self.woken = 0
         self.manager = TaskManager(
+            # ADR-0383 §9:1: a work's calls read through the holder; the store itself is
+            # for removing finished tasks (§7:8) and the owner's replace.
+            stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
-            memory=self.memory,
             running=lambda: tuple(self.states),
             is_running=lambda one: one in self.running,
             starting=lambda one: one in self.starting,
@@ -163,7 +167,7 @@ def _spawner(parent: str, **changes: object) -> Spawner:
 
 async def _spawn(world: _World, spawner: Spawner, **arguments: FrozenJson) -> ToolResult | object:
     call = _call(SPAWN, {"instruction": "check back", **arguments})
-    with spawning(spawner):
+    with in_a_work(at=AT), spawning(spawner):
         return await world.calls.run_claiming(
             call, spawn_effect(spawner.activation_id), match=None, deliberate_repeat=False
         )
@@ -173,9 +177,11 @@ async def _spawn(world: _World, spawner: Spawner, **arguments: FrozenJson) -> To
 
 
 async def _still_live(world: _World, activation_id: str) -> StillLive:
-    return await world.manager.still_live(
-        activation_id, person=OWNER_PERSON_ID, viewer=activation(), supply=None
-    )
+    # ADR-0383 §7:7: the stop call's read, by the calling work's sight.
+    with in_a_work(at=AT):
+        return await world.manager.still_live(
+            activation_id, person=OWNER_PERSON_ID, viewer=activation(), supply=None
+        )
 
 
 async def test_nothing_set_up_is_still_live_for_an_activation_that_spawned_nothing() -> None:
@@ -291,6 +297,11 @@ async def test_a_step_that_runs_and_spawns_while_the_walk_reads_is_walked_too() 
             self.child: ScheduledTask | None = None
             self.grandchild: ScheduledTask | None = None
 
+        def bound(self, sight: Sight) -> _Moving:
+            # One store whose counters a bound read moves, whoever's sight it is read by.
+            del sight
+            return self
+
         async def spawned_tasks(
             self, activation_ids: Sequence[str], /
         ) -> tuple[ScheduledTask, ...]:
@@ -333,11 +344,11 @@ async def test_a_step_that_spawns_and_ends_while_the_zone_is_read_is_walked_too(
             super().__init__(default=ZoneInfo("UTC"))
             self.child: ScheduledTask | None = None
 
-        async def of(self, person: str) -> ZoneInfo:
+        async def of(self, person: str, *, sight: Sight) -> ZoneInfo:
             if self.child is not None:
                 found.append(await _advance(world, self.child))
                 self.child = None
-            return await super().of(person)
+            return await super().of(person, sight=sight)
 
     zones = _Held()
     world = _World(zones=zones)
@@ -362,6 +373,11 @@ async def test_a_step_that_spawns_and_ends_after_what_runs_is_read_is_walked_aga
             self.reads = 0
             self.child: ScheduledTask | None = None
             self.grandchild: ScheduledTask | None = None
+
+        def bound(self, sight: Sight) -> _Moving:
+            # One store whose counters a bound read moves, whoever's sight it is read by.
+            del sight
+            return self
 
         async def spawned_tasks(
             self, activation_ids: Sequence[str], /
@@ -479,7 +495,8 @@ async def test_a_task_is_kept_while_a_task_below_it_is_pending() -> None:
     await world.manager.tidy([task.id])
     assert await world.held(task.id) is OccurrenceState.DONE
 
-    await world.manager.cancel(below.id)
+    with in_a_work(at=AT):
+        await world.manager.cancel(below.id)
     assert await world.held(below.id) is None
     assert await world.held(task.id) is None
 
@@ -621,9 +638,9 @@ async def test_a_cancel_without_the_persons_authority_names_only_its_own_spawn()
     world = _World()
     task = await write_task(world.plans, activation(), when=DueAt(at=AT + timedelta(hours=1)))
 
-    with spawning(_spawner(activation(), authority=None)):
+    with in_a_work(at=AT), spawning(_spawner(activation(), authority=None)):
         refused = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
-    with spawning(_spawner(activation())):
+    with in_a_work(at=AT), spawning(_spawner(activation())):
         done = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
 
     assert isinstance(refused, NotDone)
@@ -639,7 +656,7 @@ async def test_the_list_pull_shows_each_pending_task_with_its_parent() -> None:
     one = await write_task(world.plans, parent, when=DueAt(at=AT + timedelta(hours=1)))
     other = await write_task(world.plans, parent, when=DueAt(at=AT + timedelta(hours=2)))
 
-    with spawning(_spawner(activation())):
+    with in_a_work(at=AT), spawning(_spawner(activation())):
         answer = await world.calls.run(_call(LIST_TASKS, {}))
 
     assert isinstance(answer, ToolResult)
@@ -751,10 +768,12 @@ async def test_a_cancel_and_a_push_racing_are_decided_by_whichever_lands_first()
     cancelled_first = await write_task(world.plans, activation())
     pushed_first = await write_task(world.plans, activation())
 
-    await world.manager.cancel(cancelled_first.id)
+    with in_a_work(at=AT):
+        await world.manager.cancel(cancelled_first.id)
     late_push = await world.plans.mark_occurrence_pushed(cancelled_first.id, 1, activation())
     started = await pushed(world.plans, pushed_first)
-    late_cancel = await world.manager.cancel(pushed_first.id)
+    with in_a_work(at=AT):
+        late_cancel = await world.manager.cancel(pushed_first.id)
 
     assert late_push.value == "not_pending"
     assert late_cancel.task is None
@@ -807,7 +826,7 @@ async def test_a_conversation_that_cannot_be_read_stays_on_the_list() -> None:
 
 
 async def _listing(world: _World) -> TaskListing:
-    with spawning(_spawner(activation())):
+    with in_a_work(at=AT), spawning(_spawner(activation())):
         answer = await world.calls.run(_call(LIST_TASKS, {}))
     assert isinstance(answer, ToolResult)
     listing = decode_listing(answer.output)
@@ -1048,7 +1067,7 @@ async def _spawn_under(
 ) -> object:
     call = _under(request, SPAWN, {"instruction": "check back", **arguments})
     effect = spawn_effect(spawner.activation_id).model_copy(update={"ticket": request.id})
-    with spawning(spawner):
+    with in_a_work(at=AT), spawning(spawner):
         return await world.calls.run_claiming(call, effect, match=None, deliberate_repeat=False)
 
 
@@ -1094,7 +1113,7 @@ async def test_a_cancel_under_a_ticket_reaches_a_task_its_work_did_not_spawn() -
     request = await _ticket(world, CANCEL_TASK, {"task": task.id})
     spawner = _spawner(activation(), authority=None)
 
-    with spawning(spawner):
+    with in_a_work(at=AT), spawning(spawner):
         refused = await world.calls.run(_call(CANCEL_TASK, {"task": task.id}))
         done = await world.calls.run(_under(request, CANCEL_TASK, {"task": task.id}))
 
@@ -1219,7 +1238,7 @@ async def test_a_call_under_a_ticket_whose_tap_cannot_be_read_is_not_done() -> N
     plans.unreadable = True
 
     spawned = await _spawn_under(world, request, _spawner(activation()), delay_minutes=30)
-    with spawning(_spawner(activation(), authority=None)):
+    with in_a_work(at=AT), spawning(_spawner(activation(), authority=None)):
         cancelled = await world.calls.run(_under(cancel, CANCEL_TASK, {"task": task.id}))
 
     assert isinstance(spawned, Unwritten)

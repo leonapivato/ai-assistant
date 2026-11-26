@@ -224,6 +224,7 @@ def _kept(memory_id: str) -> Recalled:
     )
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_stamped_fact_planning_fetches_of_what_recall_kept_places_the_episode() -> None:
     """Either run's kept records, as planning fetches them before its first round (§3).
 
@@ -252,6 +253,7 @@ async def test_a_stamped_fact_planning_fetches_of_what_recall_kept_places_the_ep
     assert state.facts.supplied_withheld
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_an_outside_fact_recalls_digest_reads_is_held_for_the_freeze() -> None:
     """What recall kept, digested (§5:10): the outside fact reaches only the digest.
 

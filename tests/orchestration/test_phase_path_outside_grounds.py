@@ -198,6 +198,7 @@ def _owners_work() -> Iterator[None]:
         yield
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_record_fetched_twice_is_named_once_by_its_id() -> None:
     """#2895: what understanding fetched and what recall found, both one episode.
 

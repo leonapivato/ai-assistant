@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import test_authorizer as plain
 import test_authorizer_approvals as cards
+from sight_support import SIGHT
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -85,7 +86,7 @@ async def test_under_a_ticket_a_pin_runs_as_any_approved_call(outcome: Permissio
     )
 
     decided = await hub.stage.authorize(
-        cards._ticket_round(hub, request, tickets=frozenset({str(request.id)}))
+        cards._ticket_round(hub, request, tickets=frozenset({str(request.id)})), sight=SIGHT
     )
 
     (verdict,) = decided.verdicts
@@ -104,7 +105,8 @@ async def test_without_the_ticket_the_same_pin_needs_you_again() -> None:
     await cards._approved(hub.plans, call=RequestedCall(tool=PIN, values={"memory": "m:diet"}))
 
     decided = await hub.authorize(
-        CallToAuthorize(plain._call("c1", "pin_memory", memory="m:diet")), person=OWNER_PERSON_ID
+        CallToAuthorize(plain._call("c1", "pin_memory", memory="m:diet")),
+        person=OWNER_PERSON_ID,
     )
 
     assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU

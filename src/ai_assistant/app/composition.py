@@ -3136,12 +3136,12 @@ def _build_phase_path(
             registry=tools,
             policy=policy,
             trail=seams.trail,
-            stories=seams.stories,
-            memory=seams.memory,
+            # ADR-0383 §7:7: the one holder, over the one story, memory and plan store,
+            # every read bound to the sight of the work whose round is authorized;
+            # ADR-0321 §4:4, §4:11, §6:1: the yes path's facts are read from the one plan
+            # store acting claims in.
+            stores=pass_stores,
             binder=seams.binder,
-            # ADR-0321 §4:4, §4:11, §6:1: the yes path's facts are read from the one
-            # plan store acting claims in.
-            plans=seams.plans,
             # ADR-0367 §4:1, §4:5: the check reads the standing lines and decides, first;
             # ADR-0381 §6:1: whose yes a grant that asks needs is read from its record.
             lines=seams.lines,
@@ -3157,7 +3157,9 @@ def _build_phase_path(
             diagnostics=seams.diagnostics,
         ),
         acting=ActingStage(
-            plans=seams.plans,
+            # ADR-0383 §7:4, §7:5: effect records claimed through the one holder, bound
+            # to the sight of the work whose round runs.
+            stores=pass_stores,
             invoker=tools,
             own_records=OwnRecordsByCapability(
                 {
@@ -3173,7 +3175,11 @@ def _build_phase_path(
             now=_utcnow,
         ),
         tools=tools,
-        plans=seams.plans,
+        # ADR-0383 §7:7: the one holder, over the one plan store a message's record is
+        # claimed in and the memory store planning and recall's digest fetch recall's
+        # kept records from (ADR-0308 §3, §4:4); the second run itself is the engine's
+        # recall stage, handed over with its first run (§2:1).
+        stores=pass_stores,
         # ADR-0387 §3: a message into one of a work's own places is written through the chat
         # space outside the filter, and into any other through the one holder, bound to the
         # work's sight.
@@ -3204,10 +3210,6 @@ def _build_phase_path(
         planning_prompt=planning_prompt,
         digesting_prompt=digesting_prompt,
         part_chars=PHASES_DIGEST_PART_CHARS,
-        # ADR-0308 §3, §4:4: planning and recall's digest fetch recall's kept records
-        # from the one memory store recall searched; the second run itself is the
-        # engine's recall stage, handed over with its first run (§2:1).
-        memory=seams.memory,
         recall_cap=RECALL_SECOND_RUN_CAP,
         recall_digest_wait=PHASES_RECALL_DIGEST_DEADLINE,
         story_reads=story_reads,

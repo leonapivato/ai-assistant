@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import pytest
 from identity_support import owners_identities
-from sight_support import sight_of
+from sight_support import SIGHT, sight_of
 from story_support import episode
 from telegram_support import (
     AT,
@@ -1472,7 +1472,11 @@ async def _card_on_the_line(line: _Line, plans: FakePlanStore) -> ApprovalReques
     )
     await plans.write_approval_request(request, effect, match=None)
     assert line.cards is not None
-    await line.cards.post(request, CardFacts(origin=line.seams.channel, read_outside=False))
+    await line.cards.post(
+        request,
+        CardFacts(origin=line.seams.channel, read_outside=False),
+        plans=plans.bound(SIGHT),
+    )
     (posted,) = await plans.approval_requests(["approval:1"])
     return posted
 
@@ -1713,7 +1717,7 @@ async def test_two_cards_of_one_round_each_show_their_own_request() -> None:
     assert line.cards is not None
     facts = CardFacts(origin=line.seams.channel, read_outside=False)
     for request in reversed(asked):
-        await line.cards.post(request, facts)
+        await line.cards.post(request, facts, plans=plans.bound(SIGHT))
     line.fake.hold(text(40, "and then?", message_id=990))
     line.start()
     await line.until(lambda: bool(line.inputs), what="the input was taken in")
@@ -1790,7 +1794,7 @@ async def test_after_a_start_the_window_shows_each_card_by_its_entry() -> None:
         )
         await plans.write_approval_request(request, effect, match=None)
         assert first.cards is not None
-        posted = await first.cards.post(request, facts)
+        posted = await first.cards.post(request, facts, plans=plans.bound(SIGHT))
         assert posted.delivered is not None
         entries.append(
             RecordedCall(

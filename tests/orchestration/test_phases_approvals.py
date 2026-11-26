@@ -208,7 +208,9 @@ def _authorizing(plans: FakePlanStore) -> type[AuthorizingStage]:
     """Authorizing over the harness's plan store, as the composition root wires it."""
 
     def build(**seams: Any) -> AuthorizingStage:
-        return AuthorizingStage(plans=plans, **seams)
+        # ADR-0383 §9:1: the harness hands it the one holder, over this plan store.
+        assert seams["stores"]._plans is plans
+        return AuthorizingStage(**seams)
 
     return cast("type[AuthorizingStage]", build)
 

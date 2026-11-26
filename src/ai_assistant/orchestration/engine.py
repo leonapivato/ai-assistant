@@ -2370,7 +2370,9 @@ class Engine:
             )
         )
         #: The one holder, which the place lists and the Connections section read a place
-        #: that is not one of the work's own through, bound to its sight (ADR-0387 §4:3).
+        #: that is not one of the work's own through, bound to its sight (ADR-0387 §4:3),
+        #: and the stages wired below read through: the Task Manager, the person's zone,
+        #: ``request_approval``'s runner and a task's lineage (ADR-0383 §9:1).
         self._stores = held
         self._matters = Matters(
             running=lambda: (one.state for one in self._running if one.state is not None),
@@ -7172,7 +7174,9 @@ class Engine:
             )
             raise ConfigurationError(msg)
         calls = ApprovalCalls(
-            plans=plans,
+            # ADR-0383 §7:4, §7:5: a request and its card are the asking work's own,
+            # written through the plan store bound to its sight.
+            stores=self._stores,
             expiry=seams.expiry,
             now=self._clock,
             wake=self.approvals_changed,
@@ -7807,12 +7811,17 @@ class Engine:
         # ``Settings.timezone`` otherwise.
         blocks = self._person_blocks
         self._task_zones = PersonZones(
-            default=ZoneInfo(seams.zone), people=None if blocks is None else blocks.store
+            default=ZoneInfo(seams.zone),
+            people=None if blocks is None else blocks.store,
+            # ADR-0383 §7:7: a work's read of the zone is bound to its sight.
+            stores=None if blocks is None else self._stores,
         )
         self._lateness_grace = seams.lateness_grace
         self._task_manager = TaskManager(
+            # ADR-0383 §7:7: a work's task calls read and write through the holder; the
+            # unbound store is for removing finished tasks (§7:8) and the owner's replace.
+            stores=self._stores,
             plans=plans,
-            memory=memory,
             running=lambda: (one.state for one in self._running if one.state is not None),
             # §7:8: a task is kept while its parent, the activation that spawned it, runs.
             is_running=lambda one: self._running_state(one) is not None,
@@ -8172,7 +8181,8 @@ class Engine:
         task = due.task
         occurrence = task.occurrence(due.number)
         assert occurrence is not None  # noqa: S101 — the store gave this occurrence as due
-        zone = await self._task_zones.of(task.person)
+        # ADR-0383 §7:8: the sensor's push, before the occurrence's work is admitted.
+        zone = await self._task_zones.outside_a_work(task.person)
         when = task.when
         if not isinstance(when, DueOnRule) or occurrence.activations or occurrence.due_at is None:
             return _OccurrencePush(
@@ -8317,7 +8327,8 @@ class Engine:
         assert phases is not None  # noqa: S101 — the Task Scheduler is wired only beside them
         state = active_state()
         trigger = None if state is None else state.trigger
-        steps, linked = await self._lineage(task, activation_id, zone)
+        # ADR-0383 §7:7: the task's work's window, read by its sight once admitted.
+        steps, linked = await self._lineage(task, activation_id, zone, sight=work_sight())
         payload = None if trigger is None else trigger.payload
         text = payload.text if isinstance(payload, RecordedTextInput) else task.instruction
         resolved = ResolvedChannelInput(
@@ -8394,21 +8405,25 @@ class Engine:
         await phases.run(event, lambda: self._controlled(event, stages), state=state)
 
     async def _lineage(
-        self, task: ScheduledTask, activation_id: str, zone: ZoneInfo
+        self, task: ScheduledTask, activation_id: str, zone: ZoneInfo, *, sight: Sight
     ) -> tuple[tuple[LineageStep, ...], tuple[str, ...]]:
         """The schedule's window for ``activation_id``, and the episodes its input links to.
 
         Its times are told in ``zone``, the person's as the push read it (ADR-0340 §6:1).
+        Every read is the task's work's, through the plan and memory stores bound to
+        ``sight``, its sight (ADR-0383 §7:7): a task, a step or an episode it does not
+        see is read as one never written (§8:2).
 
         The lineage is read from the tasks the Task Scheduler keeps (§6:5, §7:8); the
         links are its task's parent's episode and each waited-on task's (§6:5). A store
         that cannot be read leaves the current step alone, and links nothing it could not
         read.
         """
+        plans = self._stores.plans(sight)
         try:
-            lineage = await self._plans.scheduled_lineage(activation_id)
+            lineage = await plans.scheduled_lineage(activation_id)
             waited = (
-                await self._plans.scheduled_tasks(task.when.tasks)
+                await plans.scheduled_tasks(task.when.tasks)
                 if isinstance(task.when, DueAfterTasks)
                 else ()
             )
@@ -8431,7 +8446,7 @@ class Engine:
             | set(linked)
         )
         try:
-            found = without_open_episodes(await self._memory.get_many(addresses))
+            found = without_open_episodes(await self._stores.memory(sight).get_many(addresses))
         except MemoryStoreError:
             _log.warning("task_lineage_unread", stage="task_scheduler", reason="store_failed")
             found = {}

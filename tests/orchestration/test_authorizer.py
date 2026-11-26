@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from sight_support import SIGHT, holder
 
 from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.errors import AuditError, MemoryStoreError
@@ -275,11 +276,10 @@ class _Hub:
         self.memory = FakeMemoryStore(now=_now)
         self.episode = episode or _episode()
         self.stage = AuthorizingStage(
+            stores=holder(stories=self.stories, memory=self.memory, plans=FakePlanStore()),
             registry=self.registry,
             policy=self.policy,
             trail=self.trail,
-            stories=self.stories,
-            memory=self.memory,
             binder=binder,
             now=_now,
             new_decision_id=_Ids("decision"),
@@ -290,7 +290,7 @@ class _Hub:
     async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
         if await self.memory.get(self.episode.id) is None:
             await self.memory.add(self.episode)
-        return await self.stage.authorize(given)
+        return await self.stage.authorize(given, sight=SIGHT)
 
 
 async def _recorded(trail: FakeAuditTrail, decision_id: str | None) -> PermissionDecision:
@@ -332,7 +332,7 @@ async def test_a_call_that_gets_an_effect_record_carries_its_id_on_every_decisio
     hub.registry.register(risky)
 
     decided = await hub.authorize(
-        _round(_call("c1", "book", q="room for two"), _call("c2", "book_risky", q="suite"))
+        _round(_call("c1", "book", q="room for two"), _call("c2", "book_risky", q="suite")),
     )
 
     booked, refused = decided.verdicts
@@ -405,7 +405,7 @@ async def test_a_call_no_tool_can_take_is_not_done_and_rules_nothing() -> None:
             _call("c2", "lookup", q=3),
             _call("c3", "lookup", q="tie"),
             _call("c4", "book", q="disagree"),
-        )
+        ),
     )
 
     assert [one.verdict for one in decided.verdicts] == [Verdict.NOT_DONE] * 4
@@ -425,7 +425,7 @@ async def test_a_call_naming_an_argument_the_hub_fills_is_refused() -> None:
     hub = _Hub()
 
     decided = await hub.authorize(
-        _round(_call("c1", "remember_fact", **_fact("tea"), **{EPISODE_ARGUMENT: "activation:x"}))
+        _round(_call("c1", "remember_fact", **_fact("tea"), **{EPISODE_ARGUMENT: "activation:x"})),
     )
 
     (verdict,) = decided.verdicts
@@ -473,7 +473,7 @@ async def test_after_outside_content_a_call_leaving_the_hub_needs_you_and_one_in
             _call("c1", "lookup", q="x"),
             _call("c2", "book", q="y"),
             message=RoundMessage("On it.", _PLACE),
-        )
+        ),
     )
 
     looked, booked = decided.verdicts
@@ -711,7 +711,7 @@ async def test_a_note_the_owner_wrote_leaves_a_call_leaving_the_hub_and_a_rememb
             _call("c1", "lookup", q="x"),
             _call("c2", "remember_fact", **_fact("likes mornings")),
             working=held,
-        )
+        ),
     )
 
     assert decided.read_outside_content is False
@@ -833,7 +833,7 @@ async def test_a_text_call_is_checked_by_its_place_alone_as_the_rounds_message_i
             RoundMessage("Booked.", _PLACE, "c1"),
             RoundMessage("Psst.", "place:elsewhere", "c2"),
             RoundMessage("And done.", _PLACE, "c3"),
-        )
+        ),
     )
 
     assert decided.verdicts == ()
@@ -922,7 +922,7 @@ async def test_a_scheduled_activations_message_to_a_place_gone_since_its_list_is
 
     gone = await hub.authorize(given)
     other = await hub.authorize(
-        replace(given, message=RoundMessage("Time to move the car.", "telegram:ref/42"))
+        replace(given, message=RoundMessage("Time to move the car.", "telegram:ref/42")),
     )
 
     assert gone.message is not None
@@ -1001,7 +1001,7 @@ async def test_a_candidate_is_recorded_once_through_actings_own_records_seam() -
     hub = _Hub()
     plans = FakePlanStore()
     stage = ActingStage(
-        plans=plans,
+        stores=holder(plans=plans),
         invoker=_NoInvoker(),
         own_records=OwnRecordsByCapability(
             {"remember_fact": CandidateCalls(similar=_NoneSimilar(), limit=5)}
@@ -1011,9 +1011,13 @@ async def test_a_candidate_is_recorded_once_through_actings_own_records_seam() -
     )
 
     first = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
-    acted = await stage.act(_for_acting(first), home=RecordHome.owners(), held=HeldResults())
+    acted = await stage.act(
+        _for_acting(first), home=RecordHome.owners(), sight=SIGHT, held=HeldResults()
+    )
     again = await hub.authorize(_round(_call("c1", "remember_fact", **_fact("likes tea"))))
-    repeated = await stage.act(_for_acting(again), home=RecordHome.owners(), held=HeldResults())
+    repeated = await stage.act(
+        _for_acting(again), home=RecordHome.owners(), sight=SIGHT, held=HeldResults()
+    )
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
     (effect,) = await plans.activation_effects([_ACTIVATION])

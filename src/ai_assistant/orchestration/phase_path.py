@@ -527,6 +527,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActivationDigest,
         ActivationUnderstanding,
+        ApprovalRequest,
         ForecastOutcome,
         FrozenJson,
         JoinedInput,
@@ -837,6 +838,17 @@ def _work_home() -> RecordHome:
         msg = "no work is running, so a record has no home to be written in"
         raise RuntimeError(msg)
     return state.home
+
+
+def _running_sight() -> Sight | None:
+    """The running work's sight, or ``None`` where no work runs (ADR-0383 §7:7, §9:2).
+
+    What acting is handed beside :func:`_running_home`: the effect records a round's
+    calls are claimed, spent and finished in are written through the plan store bound to
+    it, and a round none of whose calls gets a record needs none.
+    """
+    state = active_state()
+    return None if state is None else state.sight
 
 
 def _running_home() -> RecordHome | None:
@@ -3976,7 +3988,7 @@ class PhasePath:
         authorizing: AuthorizingStage,
         acting: ActingStage,
         tools: PhaseTools,
-        plans: PlanStore,
+        stores: BoundStores,
         writer: MessageWriter,
         round_limit: int,
         round_wait: timedelta,
@@ -3984,7 +3996,6 @@ class PhasePath:
         planning_prompt: PromptTemplate,
         digesting_prompt: PromptTemplate,
         part_chars: int,
-        memory: MemoryStore,
         recall_cap: int,
         recall_digest_wait: timedelta,
         capabilities: Sequence[str] | None = None,
@@ -4010,7 +4021,11 @@ class PhasePath:
             authorizing: The authorizing stage, built over :class:`PhaseTools`.
             acting: The acting stage, its invoker :class:`PhaseTools`.
             tools: The thin path's registry and invoker.
-            plans: The plan store a message's effect record is claimed in.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1), wired with
+                the plan and memory stores, every read and write this path makes for a
+                work going through them bound to its sight (§7:7): the plan store a
+                message's effect record is claimed in, and the memory store planning
+                fetches recall's kept records from (ADR-0282 §2:4).
             writer: The place's writer.
             capabilities: The capabilities planning is offered, by name (§4:2), or
                 ``None``, the default, for every one ``tools`` advertises, read as each
@@ -4024,8 +4039,6 @@ class PhasePath:
             digesting_prompt: Digesting's instruction template, as the composition
                 root read it at start (ADR-0334 §3:5), handed on to digesting.
             part_chars: ``DIGEST_PART_CHARS`` (ADR-0308 §4:9).
-            memory: The memory store planning fetches recall's kept records from
-                (ADR-0282 §2:4).
             recall_cap: ``RECALL_SECOND_RUN_CAP``: how many records recall's second
                 run keeps in all (ADR-0308 §2:4-§2:5).
             recall_digest_wait: The deadline bounding recall's digest, its fetch
@@ -4105,13 +4118,12 @@ class PhasePath:
         self._authorizing = authorizing
         self._acting = acting
         self._tools = tools
-        self._plans = plans
+        self._stores = stores
         self._writer = writer
         self._capabilities = None if capabilities is None else tuple(capabilities)
         self._round_limit = round_limit
         self._round_wait = round_wait
         self._new_effect_id = new_effect_id
-        self._memory = memory
         self._recall_cap = recall_cap
         self._recall_digest_wait = recall_digest_wait
         self._story_reads = story_reads
@@ -4168,6 +4180,33 @@ class PhasePath:
         if closing is not None:
             self._closing = closing
 
+    def _work_plans(self) -> Bound[PlanStore]:
+        """The plan store, bound to the running work's sight (ADR-0383 §7:7).
+
+        Read, never made (§9:2), as each read is made, so a join that narrows the sight
+        narrows the next read (§6:6).
+
+        Raises:
+            RuntimeError: Where no admitted work is running here.
+        """
+        return self._stores.plans(work_sight())
+
+    def _work_memory(self) -> Bound[MemoryStore]:
+        """The memory store, bound to the running work's sight (ADR-0383 §7:7).
+
+        Raises:
+            RuntimeError: Where no admitted work is running here.
+        """
+        return self._stores.memory(work_sight())
+
+    async def _requests(self, request_ids: Sequence[str]) -> Sequence[ApprovalRequest]:
+        """The approval requests named, read by the calling work's sight (§7:4, §7:7).
+
+        What a change under a ticket reads its request from (ADR-0362 §2:1): a request
+        the sight does not see is read as one never written (§8:2).
+        """
+        return await self._work_plans().approval_requests(request_ids)
+
     def attach_person_model(self, blocks: PersonBlocks) -> None:
         """Offer planning the person model's three calls, over the stores ``blocks`` reads.
 
@@ -4192,7 +4231,8 @@ class PhasePath:
             raise ValueError(msg)
         # ADR-0362 §2:1: a change made under a ticket names the approval's own episode,
         # read from its request.
-        calls = PersonModelCalls(blocks=blocks, requests=self._plans.approval_requests)
+        # ADR-0383 §7:7: read through the plan store bound to the calling work's sight.
+        calls = PersonModelCalls(blocks=blocks, requests=self._requests)
         self._tools.add_own_records(PERSON_MODEL_CALLS)
         self._acting.add_own_records(dict.fromkeys(PERSON_MODEL_CAPABILITIES, calls))
         self._label_arguments.update(PERSON_MODEL_LABEL_ARGUMENTS)
@@ -5040,7 +5080,7 @@ class PhasePath:
         ids = sorted(work.shown.memories)
         if ids:
             try:
-                held = frozenset(await self._memory.get_history(ids))
+                held = frozenset(await self._work_memory().get_history(ids))
             except MemoryStoreError:
                 _log.warning("planning_memories_unread", stage="planning")
         matters = await self._matter_states(sorted(work.shown.matters))
@@ -5157,7 +5197,7 @@ class PhasePath:
             return meanings, {}
         addresses = [episode_address(one) for one in gone]
         try:
-            records = await self._memory.get_many(addresses)
+            records = await self._work_memory().get_many(addresses)
         except MemoryStoreError:
             # Nothing is established: none is named ended, and each is read again before
             # the next report, so its short view is not lost.
@@ -5332,7 +5372,7 @@ class PhasePath:
             fetched = given.understanding_fetch
             episodes = () if fetched is None or fetched.episodes is None else fetched.episodes
             try:
-                working.pending = await pending_candidates(self._plans, episodes)
+                working.pending = await pending_candidates(self._work_plans(), episodes)
             except PlanningError:
                 _log.warning("planning_candidates_unread", stage="planning")
                 working.pending = {}
@@ -5366,9 +5406,11 @@ class PhasePath:
             if item.episode_id is not None and item.author is PlaceAuthor.ASSISTANT
         }
         links: dict[str, str] = {}
+        plans = self._work_plans() if linked else None
         for activation_id in sorted(linked):
+            assert plans is not None  # noqa: S101 — bound above where anything is linked
             try:
-                lineage = await self._plans.scheduled_lineage(activation_id)
+                lineage = await plans.scheduled_lineage(activation_id)
             except PlanningError:
                 _log.warning("phase_task_links_unread", stage="planning", reason="store_failed")
                 break
@@ -5681,7 +5723,7 @@ class PhasePath:
                 )
             )
             working.found = await fetch_held(
-                self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+                self._work_memory(), episode_ids=None, recalled_ids=ids, audience=given.supply
             )
             working.supplied.obtained(working.found.recalled)
             _log.info(
@@ -5707,7 +5749,7 @@ class PhasePath:
             return
         ids = tuple(dict.fromkeys(one for kept in unfetched.values() for one in kept))
         fetched = await fetch_held(
-            self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+            self._work_memory(), episode_ids=None, recalled_ids=ids, audience=given.supply
         )
         working.search_fetches.append(fetched)
         working.supplied.obtained(fetched.recalled)
@@ -5818,7 +5860,7 @@ class PhasePath:
 
         async def fetch() -> tuple[Memory, ...]:
             fetched = await fetch_held(
-                self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
+                self._work_memory(), episode_ids=None, recalled_ids=ids, audience=given.supply
             )
             working.recall_digest_fetch = fetched
             working.supplied.obtained(fetched.recalled)
@@ -5950,7 +5992,8 @@ class PhasePath:
         )
         try:
             async with asyncio.timeout_at(given.deadline):
-                decided = await self._authorizing.authorize(given_round)
+                # ADR-0383 §7:7: authorizing's reads are bound to the work's sight.
+                decided = await self._authorizing.authorize(given_round, sight=work_sight())
         except TimeoutError:
             raise ModelTimeoutError(_AUTHORIZING_EXPIRED) from None
         latest.authorization = decided
@@ -6135,7 +6178,7 @@ class PhasePath:
         plan store that cannot be read leaves them unknown, as they are.
         """
         try:
-            recorded = await self._plans.activation_effects([working.activation_id])
+            recorded = await self._work_plans().activation_effects([working.activation_id])
         except Exception as exc:  # the round's own error is the one the stage ends on
             if is_defect(exc):
                 log_defect(
@@ -6283,7 +6326,11 @@ class PhasePath:
         ):
             if self._look_ups is None:
                 acted = await self._acting.act(
-                    authorized, held=working.held, home=_running_home(), on_acted=acted_one
+                    authorized,
+                    held=working.held,
+                    home=_running_home(),
+                    sight=_running_sight(),
+                    on_acted=acted_one,
                 )
                 self._peers(working, acted, caller)
                 return acted
@@ -6300,7 +6347,11 @@ class PhasePath:
                 ran: ActedRound | None = None
                 try:
                     ran = await self._acting.act(
-                        authorized, held=working.held, home=_running_home(), on_acted=acted_one
+                        authorized,
+                        held=working.held,
+                        home=_running_home(),
+                        sight=_running_sight(),
+                        on_acted=acted_one,
                     )
                 finally:
                     # Every view a story read read, and every record an episode look-up
@@ -6436,7 +6487,7 @@ class PhasePath:
             return dict(requested)
         held: Mapping[str, MemoryRecord]
         try:
-            held = await self._memory.get_many(sorted(set(named.values())))
+            held = await self._work_memory().get_many(sorted(set(named.values())))
         except MemoryStoreError:
             _log.warning("approval_wording_unread", stage="acting", reason="memory_fault")
             held = {}
@@ -6543,21 +6594,30 @@ class PhasePath:
             return
         self._spawn(
             self._tidy(
-                working, authorized_round(replace(decided, allowed=tidies)), home=_running_home()
+                working,
+                authorized_round(replace(decided, allowed=tidies)),
+                home=_running_home(),
+                sight=_running_sight(),
             )
         )
 
     async def _tidy(
-        self, working: PhaseWorking, tidies: AuthorizedRound, *, home: RecordHome | None
+        self,
+        working: PhaseWorking,
+        tidies: AuthorizedRound,
+        *,
+        home: RecordHome | None,
+        sight: Sight | None,
     ) -> None:
         """Run the tidy-ups through acting, logging rather than raising what escapes.
 
         Nobody awaits this coroutine, so an unexpected error is logged here by its class
         alone, never its message, which could carry a story's words (ADR-0275 §8).
-        ``home`` is the work's, read when the tidy-ups start (ADR-0383 §4:1).
+        ``home`` and ``sight`` are the work's, read when the tidy-ups start, since they
+        run in a context of their own (ADR-0383 §4:1, §7:7).
         """
         try:
-            await self._acting.act(tidies, held=working.held, home=home)
+            await self._acting.act(tidies, held=working.held, home=home, sight=sight)
         except Exception as exc:
             _log.error("phase_tidy_up_crashed", stage="acting", error=type(exc).__name__)
 
@@ -6664,7 +6724,10 @@ class PhasePath:
 
             async def fetch() -> tuple[Memory, ...]:
                 fetched = await fetch_held(
-                    self._memory, episode_ids=None, recalled_ids=records, audience=audience
+                    self._work_memory(),
+                    episode_ids=None,
+                    recalled_ids=records,
+                    audience=audience,
                 )
                 working.search_fetches.append(fetched)
                 working.supplied.obtained(fetched.recalled)
@@ -6844,8 +6907,11 @@ class PhasePath:
             if attempted is not None:
                 attempted.append(_Attempt(words=fitted.text, went=target.channel, delivery=refused))
             return refused, fitted.text, target.channel
+        # ADR-0383 §7:4, §7:5: the message's record is the work's own, written through the
+        # plan store bound to its sight.
+        plans = self._work_plans()
         try:
-            await self._plans.claim_activation_effect(effect, match=None)
+            await plans.claim_activation_effect(effect, match=None)
         except ClaimStopped:
             _log.info("phase_message_unwritten", stage="acting", reason="stopped")
             return None
@@ -6857,12 +6923,12 @@ class PhasePath:
         except Exception:
             # Whatever the writer raised, whether it wrote is not known; the record is
             # finished so, and the stage ends on the error.
-            await self._plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
+            await plans.finish_activation_effect(effect_id, ToolOutcome.INDETERMINATE)
             raise
         attempt.delivery = delivered
         if delivered.written is not None:
             working.messages.append(delivered.written)
-        await self._plans.finish_activation_effect(
+        await plans.finish_activation_effect(
             effect_id,
             delivered.outcome,
             reason=delivered.reason,
@@ -6923,7 +6989,7 @@ class PhasePath:
         outcome is listed as unknown, never as done (ADR-0307 §3:4-§3:5, ADR-0306 §5).
         """
         try:
-            recorded = await self._plans.activation_effects([working.activation_id])
+            recorded = await self._work_plans().activation_effects([working.activation_id])
         except Exception as exc:  # the store is down: list what this pass's working set knows
             if is_defect(exc):
                 log_defect(

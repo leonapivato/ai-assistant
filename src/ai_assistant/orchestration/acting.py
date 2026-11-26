@@ -1,9 +1,10 @@
 """The acting stage: a round's allowed calls run, claimed and recorded (ADR-0306 §5).
 
 One orchestration-local phase module, of the kind
-:class:`~ai_assistant.orchestration.recall.RecallStage` is (ADR-0309 §2:2). It holds an
-injected ``PlanStore`` and ``ToolInvoker``, a seam onto the assistant's own records,
-and the composition root's call deadline, and it is **not a Protocol**. It calls no
+:class:`~ai_assistant.orchestration.recall.RecallStage` is (ADR-0309 §2:2). It holds the
+holder that binds stores for a pass (:class:`~ai_assistant.orchestration.bound_stores.BoundStores`),
+an injected ``ToolInvoker``, a seam onto the assistant's own records, and the
+composition root's call deadline, and it is **not a Protocol**. It calls no
 model and decides nothing about whether a call should run: authorizing has done that,
 and acting is handed only the calls it allowed.
 
@@ -141,8 +142,10 @@ if TYPE_CHECKING:
         FrozenJson,
         FrozenJsonValue,
         RecordHome,
+        Sight,
         ToolDefinition,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.held_results import HeldResults
 
 __all__ = [
@@ -622,7 +625,7 @@ class ActingStage:
     def __init__(  # noqa: PLR0913 — the three seams, the deadline, the clock and the id source
         self,
         *,
-        plans: PlanStore,
+        stores: BoundStores,
         invoker: ToolInvoker,
         own_records: OwnRecordsCalls,
         timeout: timedelta,
@@ -632,7 +635,9 @@ class ActingStage:
         """Wire the stage to its seams, and to the deadline the composition root sets.
 
         Args:
-            plans: The plan store the effect records are claimed in.
+            stores: The holder that binds stores for a pass (ADR-0383 §9:1): the effect
+                records are claimed and finished in the plan store it binds to the sight
+                of the work whose round runs (§7:4, §7:5, §7:7).
             invoker: The invocation seam a call not on the assistant's own records
                 goes through.
             own_records: The seam a call on the assistant's own records runs through.
@@ -647,7 +652,7 @@ class ActingStage:
         if timeout <= timedelta(0):
             msg = "acting's call deadline must be positive (ADR-0029 §4)"
             raise ValueError(msg)
-        self._plans = plans
+        self._stores = stores
         self._invoker = invoker
         self._own_records = own_records
         self._timeout = timeout
@@ -684,6 +689,7 @@ class ActingStage:
         *,
         held: HeldResults,
         home: RecordHome | None,
+        sight: Sight | None,
         on_acted: Callable[[ActedCall], None] | None = None,
     ) -> ActedRound:
         """Run every call of ``authorized`` in parallel and say what came of each.
@@ -715,6 +721,11 @@ class ActingStage:
                 takes: the one whom the round's work is for gives (ADR-0383 §4:1), set
                 by code and never by a model (§4:6). ``None`` where no work is running,
                 which only a round none of whose calls gets a record may be run with.
+            sight: The sight of the work whose round this is, which every effect record
+                the round claims, spends a ticket by or finishes is written through,
+                in the plan store bound to it (ADR-0383 §7:4, §7:5, §7:7); read by code,
+                never made here (§9:2). ``None`` where no work is running, as for
+                ``home``.
             on_acted: Handed each call's outcome as it is known, once per call. It is
                 called synchronously and must not raise. ``None`` hands back nothing
                 but the round.
@@ -736,6 +747,7 @@ class ActingStage:
         match = tuple(str(one) for one in authorized.match)
         snapshots = [_snapshot(one) for one in authorized.calls]
         _distinct_decisions(snapshots)
+        plans = None if sight is None else self._stores.plans(sight)
         handed: set[str] = set()
 
         def hand_back(acted: ActedCall) -> None:
@@ -748,7 +760,9 @@ class ActingStage:
             on_acted(acted)
 
         async def each(one: AuthorizedCall) -> ActedCall:
-            acted = await self._act(activation_id, round_id, match, one, held, home, hand_back)
+            acted = await self._act(
+                _Round(activation_id, round_id, match, held, home, plans), one, hand_back
+            )
             hand_back(acted)
             return acted
 
@@ -769,14 +783,10 @@ class ActingStage:
             raise ExceptionGroup(msg, errors)
         return ActedRound(round_id=round_id, calls=tuple(acted))
 
-    async def _act(  # noqa: C901, PLR0911, PLR0913 — each way a call ends before it runs, the two routes it runs by and a ticket's, and the round's facts it runs under
+    async def _act(  # noqa: C901, PLR0911 — each way a call ends before it runs, the two routes it runs by and a ticket's
         self,
-        activation_id: str,
-        round_id: str,
-        match: tuple[str, ...],
+        facts: _Round,
         one: AuthorizedCall,
-        held: HeldResults,
-        home: RecordHome | None,
         hand_back: Callable[[ActedCall], None],
     ) -> ActedCall:
         """Claim one detached call where it gets a record, run it, and finish the record.
@@ -787,6 +797,8 @@ class ActingStage:
         cancels this task is handed back (``hand_back``) inside that wait, which a
         cancellation otherwise ends without its outcome.
         """
+        activation_id, round_id, match = facts.activation_id, facts.round_id, facts.match
+        held, home = facts.held, facts.home
         call = one.call
         tool = call.request.tool
         effect_id = call.decision.effect
@@ -821,6 +833,7 @@ class ActingStage:
                 # claimed or run: not done, never unknown.
                 _log.info("acting_call_not_done", stage="acting", reason="home_refused")
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED)
+            plans = facts.bound_plans()
             # A record the call gets only because it runs under an approval (ADR-0321
             # §4:10), as a cancel's or a list pull's under a ticket does, is no write's own:
             # acting claims it, as it claims any call's (ADR-0362 §3:4).
@@ -837,7 +850,12 @@ class ActingStage:
                 work = asyncio.ensure_future(
                     _handed_back(
                         self._claimed_by_runner(
-                            claiming, one, record, None if tool.safe_to_repeat else match, held
+                            plans,
+                            claiming,
+                            one,
+                            record,
+                            None if tool.safe_to_repeat else match,
+                            held,
                         ),
                         hand_back,
                     )
@@ -845,19 +863,19 @@ class ActingStage:
                 return await drain_registered(work, cancel_on_interrupt=False)
             if ticket is not None:
                 # ADR-0361 §5:5: the ticket is spent in the step that claims its call.
-                claimed = await self._ticket_claimed(one, record, match)
+                claimed = await self._ticket_claimed(plans, one, record, match)
                 if claimed is not None:
                     return claimed
                 if tool.effect is CapabilityEffect.OWN_RECORDS:
                     work = asyncio.ensure_future(
                         _handed_back(
-                            self._on_own_records(one, effect_id, round_id, held), hand_back
+                            self._on_own_records(plans, one, effect_id, round_id, held), hand_back
                         )
                     )
                     return await drain_registered(work, cancel_on_interrupt=False)
-                return await self._through_invoker(one, effect_id, round_id, held)
+                return await self._through_invoker(plans, one, effect_id, round_id, held)
             try:
-                answer = await self._plans.claim_activation_effect(
+                answer = await plans.claim_activation_effect(
                     record,
                     match=None if tool.safe_to_repeat else match,
                     deliberate_repeat=one.deliberate_repeat,
@@ -871,16 +889,24 @@ class ActingStage:
             if answer is ActivationEffectClaim.ALREADY_DONE:
                 _log.info("acting_call_not_done", stage="acting", reason="already_done")
                 return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_DONE)
+        # A call with no effect record finishes none, so it needs no plan store.
+        finish_in = None if effect_id is None else facts.bound_plans()
         if tool.effect is CapabilityEffect.OWN_RECORDS:
             # §3:3: awaited to its end, finish included, whatever cancels this task.
             work = asyncio.ensure_future(
-                _handed_back(self._on_own_records(one, effect_id, round_id, held), hand_back)
+                _handed_back(
+                    self._on_own_records(finish_in, one, effect_id, round_id, held), hand_back
+                )
             )
             return await drain_registered(work, cancel_on_interrupt=False)
-        return await self._through_invoker(one, effect_id, round_id, held)
+        return await self._through_invoker(finish_in, one, effect_id, round_id, held)
 
     async def _ticket_claimed(
-        self, one: AuthorizedCall, record: ActivationEffect, match: tuple[str, ...]
+        self,
+        plans: Bound[PlanStore],
+        one: AuthorizedCall,
+        record: ActivationEffect,
+        match: tuple[str, ...],
     ) -> ActedCall | None:
         """Claim a ticket's call, spending the ticket, or say why it is not run (§5:5).
 
@@ -888,7 +914,7 @@ class ActingStage:
         """
         tool = one.call.request.tool
         try:
-            answer = await self._plans.claim_ticket_call(
+            answer = await plans.claim_ticket_call(
                 record,
                 match=None if tool.safe_to_repeat else match,
                 deliberate_repeat=one.deliberate_repeat,
@@ -901,8 +927,9 @@ class ActingStage:
         _log.info("acting_call_not_done", stage="acting", reason=f"ticket_{answer.value}")
         return ActedCall(one, ActedOutcome.NOT_DONE, reason=TICKET_CLAIM_TEXT[answer])
 
-    async def _claimed_by_runner(  # noqa: PLR0911 — each answer a claiming runner gives
+    async def _claimed_by_runner(  # noqa: PLR0911, PLR0913 — each answer a claiming runner gives; the store, the runner, the call, its record, its match and the held results
         self,
+        plans: Bound[PlanStore],
         runner: ClaimingOwnRecordsCalls,
         one: AuthorizedCall,
         record: ActivationEffect,
@@ -934,27 +961,33 @@ class ActingStage:
         if isinstance(answer, ActivationEffectClaim | NeedsYou | NamedResult | HeldByIds):
             # No claiming runner answers these: the record was written, so it is finished
             # not done, and nothing is reported as having happened.
-            await self._plans.finish_activation_effect(
-                record.id, ToolOutcome.FAILED, reason=_REFUSED
-            )
+            await plans.finish_activation_effect(record.id, ToolOutcome.FAILED, reason=_REFUSED)
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED, effect_id=record.id)
         if isinstance(answer, NotDone):
-            return await self._refused(one, answer, record.id)
+            return await self._refused(plans, one, answer, record.id)
         result = _detached_result(answer)
-        await self._finish(record.id, result)
+        await _finish(plans, record.id, result)
         return self._acted(one, result, record.id, record.round or "", held)
 
     async def _on_own_records(
-        self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
+        self,
+        plans: Bound[PlanStore] | None,
+        one: AuthorizedCall,
+        effect_id: str | None,
+        round_id: str,
+        held: HeldResults,
     ) -> ActedCall:
-        """Run a call against the assistant's own records, then finish its record."""
+        """Run a call against the assistant's own records, then finish its record.
+
+        ``plans`` is ``None`` only for a call with no effect record, which finishes none.
+        """
         answer = await self._own_records.run(one.call)
         if isinstance(answer, NeedsYou):
-            return await self._needs_you(one, answer, effect_id)
+            return await self._needs_you(plans, one, answer, effect_id)
         if isinstance(answer, NotDone):
-            return await self._refused(one, answer, effect_id)
+            return await self._refused(plans, one, answer, effect_id)
         if isinstance(answer, NamedResult):
-            return await self._followed_up(one, answer, effect_id, round_id, held)
+            return await self._followed_up(plans, one, answer, effect_id, round_id, held)
         if isinstance(answer, HeldByIds):
             outside = tuple(str(one_id) for one_id in answer.outside)
             result = _detached_result(
@@ -963,8 +996,8 @@ class ActingStage:
         else:
             outside = ()
             result = _detached_result(answer)
-        if effect_id is not None:
-            await self._finish(effect_id, result)
+        if plans is not None and effect_id is not None:
+            await _finish(plans, effect_id, result)
         if isinstance(answer, HeldByIds):
             return self._held_by_ids(one, result, outside, effect_id, round_id, held)
         return self._acted(one, result, effect_id, round_id, held)
@@ -1011,7 +1044,11 @@ class ActingStage:
         )
 
     async def _needs_you(
-        self, one: AuthorizedCall, answer: NeedsYou, effect_id: str | None
+        self,
+        plans: Bound[PlanStore] | None,
+        one: AuthorizedCall,
+        answer: NeedsYou,
+        effect_id: str | None,
     ) -> ActedCall:
         """A call that wrote nothing because it needs the user's yes (ADR-0321 §5:5).
 
@@ -1021,10 +1058,8 @@ class ActingStage:
         # Detached and revalidated, so planning never holds the runner's own objects.
         replaces = tuple(Memory.model_validate(record.model_dump()) for record in answer.replaces)
         _log.info("acting_call_needs_you", stage="acting", reason="needs_you")
-        if effect_id is not None:
-            await self._plans.finish_activation_effect(
-                effect_id, ToolOutcome.FAILED, reason=_NEEDS_YOU
-            )
+        if plans is not None and effect_id is not None:
+            await plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=_NEEDS_YOU)
         return ActedCall(
             one,
             ActedOutcome.NEEDS_YOU,
@@ -1034,21 +1069,26 @@ class ActingStage:
         )
 
     async def _refused(
-        self, one: AuthorizedCall, answer: NotDone, effect_id: str | None
+        self,
+        plans: Bound[PlanStore] | None,
+        one: AuthorizedCall,
+        answer: NotDone,
+        effect_id: str | None,
     ) -> ActedCall:
         """A call its runner refused, writing nothing, with the reason (ADR-0338 §8:7).
 
         Its record is finished not done with that reason, and so is the call.
         """
         _log.info("acting_call_not_done", stage="acting", reason="refused_by_its_runner")
-        if effect_id is not None:
-            await self._plans.finish_activation_effect(
+        if plans is not None and effect_id is not None:
+            await plans.finish_activation_effect(
                 effect_id, ToolOutcome.FAILED, reason=answer.reason
             )
         return ActedCall(one, ActedOutcome.NOT_DONE, reason=answer.reason, effect_id=effect_id)
 
-    async def _followed_up(
+    async def _followed_up(  # noqa: PLR0913 — the store, the call, what it names, its record, its round and the held results
         self,
+        plans: Bound[PlanStore] | None,
         one: AuthorizedCall,
         named: NamedResult,
         effect_id: str | None,
@@ -1066,13 +1106,13 @@ class ActingStage:
         offered = held.offer_again(result_id, round_id=round_id, decision_id=one.call.decision.id)
         if offered is None:
             _log.info("acting_call_not_done", stage="acting", reason="nothing_held")
-            if effect_id is not None:
-                await self._plans.finish_activation_effect(
+            if plans is not None and effect_id is not None:
+                await plans.finish_activation_effect(
                     effect_id, ToolOutcome.FAILED, reason=_NOTHING_HELD
                 )
             return ActedCall(one, ActedOutcome.NOT_DONE, reason=_NOTHING_HELD, effect_id=effect_id)
-        if effect_id is not None:
-            await self._plans.finish_activation_effect(effect_id, ToolOutcome.SUCCEEDED)
+        if plans is not None and effect_id is not None:
+            await plans.finish_activation_effect(effect_id, ToolOutcome.SUCCEEDED)
         return ActedCall(
             one,
             ActedOutcome.DONE,
@@ -1081,14 +1121,25 @@ class ActingStage:
             effect_id=effect_id,
         )
 
-    async def _not_run(self, one: AuthorizedCall, effect_id: str | None, reason: str) -> ActedCall:
+    async def _not_run(
+        self,
+        plans: Bound[PlanStore] | None,
+        one: AuthorizedCall,
+        effect_id: str | None,
+        reason: str,
+    ) -> ActedCall:
         """A call the invocation seam stopped before its callable, finished not done."""
-        if effect_id is not None:
-            await self._plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=reason)
+        if plans is not None and effect_id is not None:
+            await plans.finish_activation_effect(effect_id, ToolOutcome.FAILED, reason=reason)
         return ActedCall(one, ActedOutcome.NOT_DONE, reason=reason, effect_id=effect_id)
 
     async def _through_invoker(
-        self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults
+        self,
+        plans: Bound[PlanStore] | None,
+        one: AuthorizedCall,
+        effect_id: str | None,
+        round_id: str,
+        held: HeldResults,
     ) -> ActedCall:
         """Send a call through ``ToolInvoker``, under its ledger claim (ADR-0306 §5:7).
 
@@ -1106,19 +1157,13 @@ class ActingStage:
             # A code-owned reason and never the exception's class name, which a
             # collaborator can make carry content (ADR-0004 §5, ADR-0192 §3).
             _log.info("acting_call_not_done", stage="acting", reason="not_taken")
-            return await self._not_run(one, effect_id, _NOT_TAKEN)
+            return await self._not_run(plans, one, effect_id, _NOT_TAKEN)
         except _REFUSED_BEFORE_THE_CALL:
             _log.info("acting_call_not_done", stage="acting", reason="refused_before_the_call")
-            return await self._not_run(one, effect_id, _REFUSED)
-        if effect_id is not None:
-            await self._finish(effect_id, result)
+            return await self._not_run(plans, one, effect_id, _REFUSED)
+        if plans is not None and effect_id is not None:
+            await _finish(plans, effect_id, result)
         return self._acted(one, result, effect_id, round_id, held)
-
-    async def _finish(self, effect_id: str, result: ToolResult) -> None:
-        """Write the outcome the call ended with onto its record (ADR-0306 §5:5)."""
-        await self._plans.finish_activation_effect(
-            effect_id, result.outcome, reason=_reason(result)
-        )
 
     def _acted(
         self,
@@ -1160,6 +1205,40 @@ class ActingStage:
         return ActedCall(
             one, outcome, route=ResultRoute.DIGEST, result_id=result_id, effect_id=effect_id
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Round:
+    """The facts every call of one round is run under, read once as the round starts.
+
+    ``plans`` is the plan store bound to the sight of the work whose round this is
+    (ADR-0383 §7:7), or ``None`` where no work is running, which only a round none of
+    whose calls gets a record may be run with, as ``home``.
+    """
+
+    activation_id: str
+    round_id: str
+    match: tuple[str, ...]
+    held: HeldResults
+    home: RecordHome | None
+    plans: Bound[PlanStore] | None
+
+    def bound_plans(self) -> Bound[PlanStore]:
+        """The plan store a record is claimed, spent and finished in, bound to the sight.
+
+        Raises:
+            RuntimeError: If no work is running, so a record has no sight to be read
+                and written by (ADR-0383 §7:7).
+        """
+        if self.plans is None:
+            msg = "no work is running, so an effect record has no sight to be claimed by"
+            raise RuntimeError(msg)
+        return self.plans
+
+
+async def _finish(plans: Bound[PlanStore], effect_id: str, result: ToolResult) -> None:
+    """Write the outcome the call ended with onto its record (ADR-0306 §5:5)."""
+    await plans.finish_activation_effect(effect_id, result.outcome, reason=_reason(result))
 
 
 async def _handed_back(

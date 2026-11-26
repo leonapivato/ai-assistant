@@ -350,6 +350,8 @@ def build_phases_world(
     # ``remember`` is the assistant's own records, reached through acting's own-records
     # seam (ADR-0306 §3:3), recording a candidate as the composition root wires it.
     tools = PhaseTools(registry=registry, invoker=registry, own_records=(REMEMBER_CANDIDATE,))
+    # ADR-0383 §9:1: the one holder, as the composition root builds it.
+    holder = bound_stores(store, stories, conversations=chat, plans=plans)
     phases = PhasePath(
         planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=planner,
@@ -358,13 +360,12 @@ def build_phases_world(
             registry=tools,
             policy=gate,
             trail=trail,
-            stories=stories,
-            memory=store,
+            stores=holder,
             binder=binder,
             now=lambda: NOW,
         ),
         acting=ActingStage(
-            plans=plans,
+            stores=holder,
             invoker=tools,
             own_records=OwnRecordsByCapability(
                 {
@@ -378,11 +379,9 @@ def build_phases_world(
             now=lambda: NOW,
         ),
         tools=tools,
-        plans=plans,
+        stores=holder,
         writer=ChatWriter(
-            conversations=chat,
-            stores=bound_stores(store, conversations=chat),
-            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
+            conversations=chat, stores=holder, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
         ),
         label_arguments=EMAIL_LABEL_ARGUMENTS,
         capabilities=(SEND,) if remembers is None else (SEND, REMEMBER_CAPABILITY),
@@ -390,7 +389,6 @@ def build_phases_world(
         round_wait=timedelta(seconds=5),
         excerpt_chars=2000,
         part_chars=4000,
-        memory=store,
         recall_cap=6,
         recall_digest_wait=timedelta(seconds=5),
         now=lambda: NOW,

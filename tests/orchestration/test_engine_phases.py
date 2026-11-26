@@ -485,12 +485,15 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 registry=tools,
                 policy=policy if policy is not None else _Policy(),
                 trail=harness.trail,
-                stories=(
-                    stories
-                    if calls is not None and stories is not None
-                    else FakeStoryStore(now=lambda: AT)
+                stores=bound_stores(
+                    harness.memory,
+                    (
+                        stories
+                        if calls is not None and stories is not None
+                        else FakeStoryStore(now=lambda: AT)
+                    ),
+                    plans=harness.plans,
                 ),
-                memory=harness.memory,
                 binder=binder,
                 registered_search=registered_search,
                 registered_forecast=registered_forecast,
@@ -500,7 +503,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 diagnostics=diagnostics,
             ),
             acting=ActingStage(
-                plans=harness.plans,
+                stores=holder,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
                     {
@@ -521,7 +524,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 now=lambda: AT,
             ),
             tools=tools,
-            plans=harness.plans,
+            stores=holder,
             writer=place if writer is None else writer,
             capabilities=(
                 *capabilities,
@@ -538,7 +541,6 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             round_wait=timedelta(seconds=5),
             excerpt_chars=2000,
             part_chars=4000,
-            memory=harness.memory,
             recall_cap=6,
             recall_digest_wait=recall_digest_wait,
             story_reads=reads,
@@ -1832,6 +1834,7 @@ def _begun(path: PhasePath) -> PhaseWorking:
     )
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_deadline_passing_inside_planning_is_the_classified_timeout() -> None:
     """ADR-0280 §5: a deadline met inside the round is a model timeout, not a fault."""
     completer = _GatedCompleter(RoundResponse(text="late"), gated=1)
@@ -1846,6 +1849,7 @@ async def test_a_deadline_passing_inside_planning_is_the_classified_timeout() ->
     assert isinstance(result.error, ModelTimeoutError)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_fetched_record_resting_on_outside_content_reaches_the_first_ruling() -> None:
     """ADR-0181 §4, ADR-0306 §4:6: what understanding read is read before any round.
 
@@ -1939,6 +1943,7 @@ async def _recall_digest(
     return _RecallDigest(working=working, given=given, digesting=digesting, memory=memory)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_recall_digest_reads_the_held_ids_and_is_decided_once() -> None:
     """ADR-0308 §4:4, ADR-0282 §2:7: fetched by id, what came back held, and decided."""
     digests = FakeModelProvider(reply=_RECALL_DIGESTED.replace("D2", "D1"))
@@ -1964,6 +1969,7 @@ async def test_recall_digest_reads_the_held_ids_and_is_decided_once() -> None:
     assert working.read_outside_content
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_recall_digest_whose_records_are_gone_reads_nothing_and_records_nothing() -> None:
     """ADR-0282 §2:6: an id with no record is not an error, and no call is made for none."""
     digests = FakeModelProvider(reply=_RECALL_DIGESTED)
@@ -1981,6 +1987,7 @@ async def test_a_recall_digest_whose_records_are_gone_reads_nothing_and_records_
     assert not working.read_outside_content
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_recall_record_no_longer_outside_is_not_digested() -> None:
     """§3:3: a record whose current version is not outside is shown by its fact instead."""
     digests = FakeModelProvider(reply=_RECALL_DIGESTED)
@@ -1995,6 +2002,7 @@ async def test_a_recall_record_no_longer_outside_is_not_digested() -> None:
     assert (case.working.digests, digests.calls) == ([], [])
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_recall_digest_whose_fetch_fails_is_recorded_failed_and_tolerated() -> None:
     """§4:12-§4:13: the records could not be read, so planning is told so and goes on."""
     digests = FakeModelProvider(reply=_RECALL_DIGESTED)
@@ -2013,6 +2021,7 @@ async def test_a_recall_digest_whose_fetch_fails_is_recorded_failed_and_tolerate
     assert not working.read_outside_content
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_recall_digest_past_its_deadline_is_recorded_failed_and_timed_out() -> None:
     """§4:11: the deadline bounding recall's digest passing first fails it, tolerated."""
     case = await _recall_digest(
@@ -2066,6 +2075,7 @@ def _found(*episode_ids: str) -> Recalled:
     )
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_found_episode_with_marked_notes_counts_as_the_episode_windows_do() -> None:
     """ADR-0303 §3:6, ADR-0306 §4:5: what the activation read includes what recall found.
 
@@ -2103,6 +2113,7 @@ async def test_a_found_episode_with_marked_notes_counts_as_the_episode_windows_d
     assert working.found.fetched == ("activation:found",)
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_found_episodes_evidence_reaches_the_ruling_with_no_notes_written() -> None:
     """ADR-0308 §5:4-§5:5, ADR-0306 §4:5: evidence planning is shown is outside content read.
 
@@ -2152,6 +2163,7 @@ async def test_a_found_episodes_evidence_reaches_the_ruling_with_no_notes_writte
     assert decided.read_outside_content
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_planning_fetches_what_recall_found_once_for_every_round() -> None:
     """ADR-0282 §2:4-§2:7: one read before the first round, held for the rest."""
     completer = FakeToolCallingCompleter.scripted(
@@ -2888,6 +2900,7 @@ def _from_outside(episode_id: str) -> EpisodicMemory:
     return record
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_an_outside_episode_in_the_episode_window_marks_the_rounds_notes() -> None:
     """#2876, ADR-0303 §3:2, ADR-0307 §4:3: the notes are marked, and authorizing agrees."""
     report = _from_outside("activation:report")
@@ -2907,6 +2920,7 @@ async def test_an_outside_episode_in_the_episode_window_marks_the_rounds_notes()
     assert remembered.call.request.parameters["rests_on_outside_content"] is True
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_an_outside_episode_recall_found_marks_the_rounds_notes() -> None:
     """#2876: recall's found episodes are counted as the episode window's are."""
     memory = FakeMemoryStore(now=lambda: AT)
@@ -3584,6 +3598,7 @@ async def test_a_follow_up_naming_a_result_with_nothing_held_comes_back_not_done
     assert record.digests == ()
 
 
+@pytest.mark.usefixtures("_owners_work")
 async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_fetch() -> None:
     """ADR-0282 §2:8: an id enters only once admitted, and each fetch applies it again.
 

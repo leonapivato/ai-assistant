@@ -9,6 +9,7 @@ every other call still reaches the seam the stage was built with.
 from __future__ import annotations
 
 import pytest
+from sight_support import SIGHT
 from test_acting import _approved, _Approving, _authorized, _now, _over, _round
 
 from ai_assistant.core.types import (
@@ -34,6 +35,7 @@ async def test_a_call_its_runner_refuses_is_not_done_with_the_runners_reason() -
 
     acted = await _over(plans, _Approving(NotDone(reason=_REASON))).act(
         home=RecordHome.owners(),
+        sight=SIGHT,
         held=HeldResults(),
         authorized=_round(_authorized("remember", effect="e1")),
     )
@@ -71,7 +73,10 @@ async def test_runners_added_beside_the_seam_reach_their_capabilities_alone() ->
     remember = _approved("remember", decision="d2", effect="e2", part=2)
 
     acted = await stage.act(
-        home=RecordHome.owners(), held=HeldResults(), authorized=_round(_pin(), remember)
+        home=RecordHome.owners(),
+        sight=SIGHT,
+        held=HeldResults(),
+        authorized=_round(_pin(), remember),
     )
 
     pinned, remembered = acted.calls

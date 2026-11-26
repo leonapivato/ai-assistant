@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from phases_composition_support import build_phased
+from sight_support import in_a_work
 
 from ai_assistant.app import build_engine
 from ai_assistant.app.composition import (
@@ -246,8 +247,10 @@ async def test_the_task_scheduler_reads_the_owners_profile_zone_not_settings(
     try:
         assert again.task_manager is not None
         assert off.task_manager is not None
-        assert await again.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Europe/Lisbon")
-        assert await off.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Asia/Tokyo")
+        # ADR-0383 §7:7: a work's read of the zone, by the owner's work's sight.
+        with in_a_work(at=datetime(2026, 1, 1, tzinfo=UTC)):
+            assert await again.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Europe/Lisbon")
+            assert await off.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Asia/Tokyo")
     finally:
         await again.aclose()
         await off.aclose()
