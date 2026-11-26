@@ -120,7 +120,13 @@ from ai_assistant.memory._home_guard import (
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
-from ai_assistant.memory._sight import count_given, count_records, made_by_id, seen_sql
+from ai_assistant.memory._sight import (
+    STORED_HOME_SQL,
+    count_given,
+    count_records,
+    made_by_id,
+    seen_sql,
+)
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._understanding_upgrade import understood_episode
 from ai_assistant.memory._walk import (
@@ -470,8 +476,8 @@ def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
 def _home_or_none(stored: object) -> RecordHome | None:
     """A stored home read back, or ``None`` where there is none or it cannot be read.
 
-    Read as :func:`seen_sql` reads it: only in the compact form every write stores, so
-    a home given in any other form is one the store cannot read (ADR-0383 §5:3).
+    ``stored`` is :data:`STORED_HOME_SQL`'s rendering, so the home read is the one the
+    record decoder and :func:`seen_sql` both read (ADR-0383 §5:3, §7:3).
     """
     if stored is None:
         return None
@@ -495,12 +501,11 @@ class SqliteMemoryStore:
     expression reads the home from the row's JSON: no column, index or format label
     is added for it.
 
-    Withholding reads a home only in the compact form every write stores
-    (:func:`seen_sql`). Counting classifies each record a read gave back by the home
-    its decoded record carries, the one exception being :meth:`channel_episode_ids`,
-    which decodes nothing and reads the stored form. The two differ only on a row
-    whose home is stored in a form no write leaves, which a count reads as its
-    decoded home and withholding holds back.
+    Withholding reads each row's home as the record decoder reads it
+    (:data:`STORED_HOME_SQL`), so the statement and the predicate over the decoded
+    record agree on every row. Counting classifies each record a read gave back by its
+    decoded home, and :meth:`channel_episode_ids`, which decodes nothing, by that same
+    expression.
     """
 
     def __init__(  # noqa: PLR0913 — each is a construction-fixed seam
@@ -3475,11 +3480,7 @@ class SqliteMemoryStore:
         The home is read from the blob only where this store counts for a sight, so
         an unbound enumeration still reads the channel index alone.
         """
-        home = (
-            "CASE WHEN json_valid(data) THEN data -> '$.home' END"
-            if self._counting() is not None
-            else "NULL"
-        )
+        home = STORED_HOME_SQL if self._counting() is not None else "NULL"
         sql = (
             f"SELECT rowid, id, kind, {home} FROM records "  # noqa: S608 — module text; values bound
             "WHERE channel_type = ? AND channel_instance = ?"
