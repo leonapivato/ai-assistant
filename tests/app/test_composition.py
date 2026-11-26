@@ -1833,12 +1833,13 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     try:
         holders = _holders_of(engine, built[0])
         # The memory store is the engine's own, reached first through the observer that
-        # holds it beside the engine (ADR-0329 §15:1); the writer's sink is the
-        # observer's write stage's since `remember` records candidates (§2:1, §12:1).
+        # holds it beside the engine (ADR-0329 §15:1); the writer's sink is reached
+        # through the holder the observer writes by, bound to each episode's sight
+        # (ADR-0383 §7:6), since `remember` records candidates (§2:1, §12:1).
         assert sorted(holders) == [
             "engine._notifications._traces._sink",
             "engine._observer._memory._traces._sink",
-            "engine._observer._writer._writes._writer._traces._sink",
+            "engine._observer._stores._writer._traces._sink",
             "engine._operation_traces._sink",
             "engine._traces",
         ], f"the trace store is reachable from {holders}"
