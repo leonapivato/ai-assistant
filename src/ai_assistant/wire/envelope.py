@@ -2905,7 +2905,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     which the engine sets (ADR-0383 §4:3). The method set does not move:
 #:     ``ConversationStore.start`` gains an argument and ``NewMessage`` a field, and
 #:     neither is on the wire.
-PROTOCOL_VERSION: Final[int] = 139
+#: 140: ADR-0124 §9 advances the version in the change that adds
+#:     :class:`~ai_assistant.core.errors.CrossHomeWriteError` (ADR-0383 §13), the memory
+#:     write path's refusal of a write crossing homes (§4:6, §4:7), a
+#:     ``MemoryStoreError`` a promoted-surface method that writes memory can emit. The
+#:     wire carries an error's concrete class name as its code, and a peer at 139 that
+#:     does not know the name raises ``ProtocolError`` (``wire/errors.py``), so the bump
+#:     and the error class are the same change (ADR-0219 §6's ground and its reading).
+#:     No frame's encoding, type or member changes, and the method set does not move.
+PROTOCOL_VERSION: Final[int] = 140
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
