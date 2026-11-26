@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from exchange_support import says
 from phases_support import hold_start_waits, phases_harness
+from sight_support import sight_of
 from test_engine import AT, Harness
 from understanding_support import STATED_PROPOSAL, Rendered, rendered, understanding_stage
 
@@ -40,6 +41,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
 )
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.chat import (
     COULDNT_FINISH,
     ChatInput,
@@ -52,6 +54,8 @@ from ai_assistant.testing import (
     FakeConversationStore,
     FakeMemoryStore,
     FakeModelProvider,
+    FakePlanStore,
+    FakeStoryStore,
     FakeToolCallingCompleter,
 )
 
@@ -60,6 +64,7 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import OfferedTool
     from ai_assistant.orchestration.understanding import TranscriptWindow
 
@@ -693,9 +698,13 @@ class _Writers:
         self.asked: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
 
     async def __call__(
-        self, conversation_id: str, activation_ids: Sequence[str], positions: Sequence[int]
+        self,
+        conversation_id: str,
+        activation_ids: Sequence[str],
+        positions: Sequence[int],
+        plans: PlanStore,
     ) -> dict[int, WrittenBy]:
-        del conversation_id
+        del conversation_id, plans
         self.asked.append((tuple(activation_ids), tuple(positions)))
         return {
             position: WrittenBy(activation_id=writer, round=f"round:{position}")
@@ -750,7 +759,8 @@ async def _window(
     tasks: list[asyncio.Future[None]] = []
 
     async def activate(one: ChatInput) -> bool:
-        taken.append(one)
+        # As the engine's activation does once admitted: the window, by its sight.
+        taken.append(await reader.windowed(one, sight=sight_of(at=AT)))
         return False
 
     reader = ChatReader(
@@ -760,11 +770,18 @@ async def _window(
         closing=lambda: False,
         mint=lambda: "00000000-0000-4000-8000-00000000000c",
         window_size=window_size,
+        stores=BoundStores(
+            memory=FakeMemoryStore(now=lambda: AT),
+            stories=FakeStoryStore(now=lambda: AT),
+            conversations=store,
+            plans=FakePlanStore(now=lambda: AT),
+        ),
         written=written,
     )
     reader.notice(conversation)
     await asyncio.wait_for(asyncio.gather(*tasks), _SETTLE)
     (one,) = taken
+    assert one.window is not None
     return one.window
 
 

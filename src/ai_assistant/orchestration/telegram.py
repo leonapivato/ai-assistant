@@ -70,7 +70,14 @@ the activation it records. The reader builds it as the chat's window is shaped
 messages, the user's from its recorded trigger and the assistant's from its message
 effect records, at their Telegram message ids; and a reply brings in the message it
 quotes, with its author (§4:12), linked to the activation that wrote it where the bot
-did (§4:13).
+did (§4:13). **It is read only once the work's sight is made** (ADR-0383 §7:9): the
+reader admits the activation with its own inputs, and the engine asks it for the window
+(:meth:`TelegramReader.windowed`) once the activation has marked them, by the sight its
+admission made. Every read made for it, the line's episodes, the Task Scheduler's, the
+effect records and the cards, is of a store
+:class:`~ai_assistant.orchestration.bound_stores.BoundStores` binds to that sight
+(§7:7). The read of the chat's last activation before the first poll is the engine's
+start's, and stays unbound (§7:8).
 
 **What goes out** (§6). The writer writes an activation's message only after it is
 claimed on its effect record (§11:3), only to the configured chat (§6:1), as plain text
@@ -105,8 +112,9 @@ tapped and the level (§4:1).
 **It logs code-owned reasons only.** No line, record or error here carries a message's
 text, and the bot's token never reaches this module: the client binds it (§11:8-§11:9).
 
-Nothing concrete is imported: the client, the intake record and the memory store arrive
-by injection and are seen only through their Protocols (CLAUDE.md golden rule 1).
+Nothing concrete is imported: the client, the intake record, the memory store and the
+holder arrive by injection and are seen only through their Protocols (CLAUDE.md golden
+rule 1).
 """
 
 from __future__ import annotations
@@ -123,6 +131,7 @@ import structlog
 
 from ai_assistant.core.channel_validation import message_party
 from ai_assistant.core.errors import (
+    ConfigurationError,
     MemoryStoreError,
     PlanningError,
     TelegramIntakeRecordError,
@@ -196,11 +205,13 @@ if TYPE_CHECKING:
         ApprovalRequest,
         ChannelEpisodePage,
         InputSender,
+        Sight,
         TelegramCallback,
         TelegramMessage,
         TelegramSendOutcome,
         TelegramUpdate,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.matters import HeldInput
     from ai_assistant.orchestration.phase_path import PlaceWriter
 
@@ -518,7 +529,8 @@ class TelegramInput:
             marked taken in by (§5:8).
         updates: The updates taken in, ascending: each a text message or a forward
             from the configured account.
-        window: The line's episode window, brought in with the input (§10).
+        window: The line's episode window (§10), read for the activation once its sight
+            is made (:meth:`TelegramReader.windowed`, ADR-0383 §7:9); ``None`` until then.
         senders: Who sent each message, by its id, as the engine found it from the
             Telegram account that sent it before admitting the input (ADR-0366 §4:1,
             ADR-0368 §2:6); empty until then. A forward's is who forwarded it.
@@ -527,7 +539,7 @@ class TelegramInput:
     channel: ChannelIdentity
     activation_id: str
     updates: tuple[TelegramUpdate, ...]
-    window: TranscriptWindow
+    window: TranscriptWindow | None = None
     senders: Mapping[int, InputSender] = field(default_factory=dict)
 
     @property
@@ -558,11 +570,15 @@ class TelegramInput:
         kept = frozenset(update_ids)
         updates = tuple(one for one in self.updates if one.update_id in kept)
         positions = {one.message.message_id for one in updates if one.message is not None}
-        window = replace(
-            self.window,
-            input_messages=tuple(
-                one for one in self.window.input_messages if one.position in positions
-            ),
+        window = (
+            None
+            if self.window is None
+            else replace(
+                self.window,
+                input_messages=tuple(
+                    one for one in self.window.input_messages if one.position in positions
+                ),
+            )
         )
         return replace(self, updates=updates, window=window)
 
@@ -1132,8 +1148,14 @@ class TelegramCards:
         carded = [one for one in requests if any(self._on_line(card) for card in one.cards)]
         self._watched.update(dict.fromkeys(str(one.id) for one in reversed(carded)))
 
-    async def on_line(self) -> dict[int, tuple[LineMessage, str]]:
+    async def on_line(
+        self, *, plans: Bound[PlanStore], memory: Bound[MemoryStore]
+    ) -> dict[int, tuple[LineMessage, str]]:
         """The cards the line's chat holds, each its asking activation's message (§4:3).
+
+        For a work's window, so read through the plan store and the memory store bound to
+        the work's sight (ADR-0383 §7:7): a request, or the episode its card's words are
+        read from, that the sight does not see is no card here (§8:3).
 
         The newest, as many as a window shows, whatever place asked (§4:2), each at its
         position, linked to its request's asking activation by the card's own record,
@@ -1150,7 +1172,7 @@ class TelegramCards:
             position.
         """
         try:
-            requests = await self._plans.person_approval_requests(
+            requests = await plans.person_approval_requests(
                 self._person, tuple(ApprovalRequestState)
             )
         except PlanningError:
@@ -1167,7 +1189,7 @@ class TelegramCards:
         )[-CHAT_WINDOW_SIZE:]
         shown: dict[int, tuple[LineMessage, str]] = {}
         for position, request, card in placed:
-            text = await self._posted_words(request, card)
+            text = await self._posted_words(request, card, memory=memory)
             if text is None:
                 continue
             message = LineMessage(
@@ -1219,20 +1241,23 @@ class TelegramCards:
             self._shown[key] = (text, bool(buttons))
         return settled, tried
 
-    async def _posted_words(self, request: ApprovalRequest, card: ApprovalCard) -> str | None:
+    async def _posted_words(
+        self, request: ApprovalRequest, card: ApprovalCard, *, memory: MemoryStore
+    ) -> str | None:
         """The words a card was posted with: as this process sent them, or by its entry.
 
-        After a start, from the asking episode: the ``request_approval`` entry of the
-        request's round delivered into the line's chat whose words are this card as it
-        was posted, pending, with the origin its trigger records and with or without the
-        outside line, so two cards of one round are never confused. ``None`` where no
-        entry holds them.
+        After a start, from the asking episode, read through ``memory``: the store bound
+        to a work's sight for its window (:meth:`on_line`), or the cards' own for an edit.
+        The ``request_approval`` entry of the request's round delivered into the line's
+        chat whose words are this card as it was posted, pending, with the origin its
+        trigger records and with or without the outside line, so two cards of one round
+        are never confused. ``None`` where no entry holds them.
         """
         held = self._posted.get(str(request.id))
         if held is not None:
             return held
         try:
-            record = await self._memory.get(f"activation:{request.activation_id}")
+            record = await memory.get(f"activation:{request.activation_id}")
         except MemoryStoreError:
             _log.warning("approval_card_facts_unread", stage="reader", reason="store_failed")
             return None
@@ -1322,7 +1347,10 @@ class TelegramCards:
         if held is not None:
             return held
         card = next((one for one in request.cards if self._on_line(one)), None)
-        if card is not None and await self._posted_words(request, card) is not None:
+        if (
+            card is not None
+            and await self._posted_words(request, card, memory=self._memory) is not None
+        ):
             # Its entry held the card as posted, and so the facts it was posted with.
             return self._facts[str(request.id)]
         try:
@@ -1645,7 +1673,7 @@ class TelegramReader:
     running then is drained as any other, the loop ending once they have.
     """
 
-    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs and stops, the engine's two seams, the writers' links, the hold, the links, and two bounds
+    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs and stops, the engine's two seams, the holder and the writers' links, the hold, the links, and two bounds
         self,
         *,
         seams: TelegramLineSeams,
@@ -1656,11 +1684,14 @@ class TelegramReader:
         closing: Callable[[], bool],
         mint: Callable[[], str],
         identities: IdentityStore | None = None,
+        stores: BoundStores | None = None,
         written: Callable[
-            [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
+            [str, Sequence[str], Sequence[int] | None, Bound[PlanStore]],
+            Awaitable[Mapping[int, WrittenBy]],
         ]
         | None = None,
-        elsewhere: Callable[[], Awaitable[Sequence[EpisodicMemory]]] | None = None,
+        elsewhere: Callable[[Bound[MemoryStore]], Awaitable[Sequence[EpisodicMemory]]]
+        | None = None,
         hold: Callable[[ChannelIdentity], HeldInput] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -1669,11 +1700,13 @@ class TelegramReader:
         Args:
             seams: The bot, the line's records, its channel and its bounds.
             writer: The line's writer, which answers by rule and shows typing.
-            memory: The store the window's episodes are read from (§10).
+            memory: The memory store, unbound, which the chat's last activation is read
+                from before the first poll, the engine's start's read (ADR-0383 §7:8).
+                No window is read through it.
             activate: Admits one activation for an input, which marks its updates taken
-                in (:meth:`take_in`) and writes its reply. It returns whether anything
-                was marked, once the activation has ended, or raises
-                ``CancelledError`` where a shutdown cancelled it.
+                in (:meth:`take_in`), has its window read (:meth:`windowed`) and writes
+                its reply. It returns whether anything was marked, once the activation
+                has ended, or raises ``CancelledError`` where a shutdown cancelled it.
             stop: Stops one running activation as ``stop_activation`` does (ADR-0332
                 §8:4), and answers whether it stopped it.
             closing: Whether the engine has begun shutting down, after which nothing
@@ -1682,12 +1715,18 @@ class TelegramReader:
             identities: The identity store a stop command's sender is read from
                 (ADR-0377 §5:1), or ``None`` where none is wired, which reads as links
                 that cannot be read (ADR-0374 §2:1): no stop command is then carried out.
+            stores: The holder every read made for a work's window goes through, each
+                store bound to the work's sight (ADR-0383 §7:7, §7:9, §9:1): the line's
+                episodes, the effect records and the cards' requests and episodes.
+                ``None`` reads no window: :meth:`windowed` refuses.
             written: Reads which activation wrote each message in a place, by its
-                effect record (ADR-0303 §7:1): the phases' ``written_in``. ``None``
-                links no assistant message, and the window then holds only the user's.
+                effect record (ADR-0303 §7:1), through the plan store it is handed bound
+                to the work's sight: the phases' ``written_in``. ``None`` links no
+                assistant message, and the window then holds only the user's.
             elsewhere: The recent episodes of activations started from another place that
                 may have written into the line's chat, the Task Scheduler's (ADR-0350
-                §9:1): the window shows each message one of them wrote here, linked to
+                §9:1), read through the memory store it is handed bound to the work's
+                sight: the window shows each message one of them wrote here, linked to
                 it, and nothing of its input. ``None`` reads none.
             hold: Tells the engine of an input the reader holds in its start wait,
                 given the line's place (ADR-0349 §7:12): the reader says which
@@ -1705,6 +1744,7 @@ class TelegramReader:
         self._poll_bound = seams.poll_bound
         self._writer = writer
         self._memory = memory
+        self._stores = stores
         self._activate = activate
         self._closing = closing
         self._mint = mint
@@ -2005,19 +2045,18 @@ class TelegramReader:
             held.release()
 
     async def _admit(self, updates: Sequence[TelegramUpdate]) -> None:
-        """Bring the updates in, with the window, as one activation's input (§5:5).
+        """Bring the updates in as one activation's input (§5:5).
 
         The activation runs beside the loop (ADR-0332 §8:7), beside any other running
         from the chat (ADR-0349 §8:1): the loop goes on polling while it runs, and its
-        updates are dealt with once a later poll finds them taken in.
+        updates are dealt with once a later poll finds them taken in. Its window is not
+        read here: the work's sight is made only as the activation is admitted, and the
+        window is read through it (:meth:`windowed`, ADR-0383 §7:9).
         """
-        page = await self._memory.channel_episodes(self._channel, limit=_WINDOW_EPISODES)
-        messages = [one.message for one in updates if one.message is not None]
         taken = TelegramInput(
             channel=self._channel,
             activation_id=self._mint(),
             updates=tuple(updates),
-            window=await self._window(messages, page),
         )
         held, self._held = self._held, None
         if held is not None:
@@ -2145,6 +2184,8 @@ class TelegramReader:
         that episode closed *interrupted*, and not by the user's stop, which writes
         nothing (ADR-0295 §3:3), the writer sends :data:`INTERRUPTED_LINE`, claimed once
         per activation (§6:10). Anything that cannot be read sends nothing.
+
+        Read unbound: it is the engine's start's read, for no work (ADR-0383 §7:8).
         """
         try:
             page = await self._memory.channel_episodes(self._channel, limit=1)
@@ -2164,14 +2205,49 @@ class TelegramReader:
 
     # --- the window (§10) ---
 
+    async def windowed(self, taken: TelegramInput, *, sight: Sight) -> TelegramInput:
+        """``taken`` with its window, read for its activation by the work's sight (§10).
+
+        Called by the activation once it is admitted, its sight made, and its updates
+        marked taken in (ADR-0383 §7:9, §5:8): every read the window needs is of a store
+        the holder binds to ``sight`` (§7:7), so an episode, a card, a link or a writer
+        the sight does not see is absent from it (§8:3). The line's episodes are its
+        frozen ones (ADR-0286 §6:1), so the activation's own open episode is no part of
+        it. The window is read for every message the reader handed the activation, as
+        before its marking, and the caller narrows it to what it marked
+        (:meth:`TelegramInput.narrowed`).
+
+        Raises:
+            ConfigurationError: If the reader was built without the holder.
+            MemoryStoreError: If the line's episodes cannot be read.
+        """
+        if self._stores is None:
+            msg = "a channel's reader reads a work's window through the holder (ADR-0383 §9:1)"
+            raise ConfigurationError(msg)
+        memory = self._stores.memory(sight)
+        page = await memory.channel_episodes(self._channel, limit=_WINDOW_EPISODES)
+        plans = None if self._written is None and self._cards is None else self._stores.plans(sight)
+        window = await self._window(taken.messages, page, memory=memory, plans=plans)
+        return replace(taken, window=window)
+
     async def _window(
-        self, messages: Sequence[TelegramMessage], page: ChannelEpisodePage
+        self,
+        messages: Sequence[TelegramMessage],
+        page: ChannelEpisodePage,
+        *,
+        memory: Bound[MemoryStore],
+        plans: Bound[PlanStore] | None,
     ) -> TranscriptWindow:
         """The line's episode window, with what the input replies to (§10, §4:12).
 
         Args:
             messages: The input's messages.
-            page: The line's recent episodes, the newest :data:`_WINDOW_EPISODES`.
+            page: The line's recent episodes, the newest :data:`_WINDOW_EPISODES`, read
+                through ``memory``.
+            memory: The memory store bound to the work's sight, the Task Scheduler's
+                episodes and the cards' are read through.
+            plans: The plan store bound to the work's sight, the effect records and the
+                cards' requests are read through; ``None`` where neither is read.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
@@ -2187,7 +2263,7 @@ class TelegramReader:
             held = {one.id for one in episodes}
             episodes.extend(
                 one
-                for one in await self._elsewhere()
+                for one in await self._elsewhere(memory)
                 if one.id not in held
                 and one.processing_record is not None
                 and one.processing_record.trigger.channel != self._channel
@@ -2199,12 +2275,16 @@ class TelegramReader:
         ]
         writes: Mapping[int, WrittenBy] = (
             {}
-            if self._written is None or not activations
-            else await self._written(self._place, activations, None)
+            if self._written is None or plans is None or not activations
+            else await self._written(self._place, activations, None, plans)
         )
         # ADR-0361 §4:3: an approval request's card is its asking activation's message,
         # whatever place asked (§4:2), linked by the card's own record.
-        carded = {} if self._cards is None else await self._cards.on_line()
+        carded = (
+            {}
+            if self._cards is None or plans is None
+            else await self._cards.on_line(plans=plans, memory=memory)
+        )
         inputs = tuple(self._input_message(one) for one in messages)
         taken = {one.position for one in inputs}
         shown: dict[int, LineMessage] = {}

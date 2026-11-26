@@ -39,13 +39,24 @@ it may have acted on them, or it did not, and they are taken in as usual. A mess
 never taken in is found by ``conversations_awaiting`` (:meth:`ChatReader.notice_awaiting`).
 
 **The window** (§6:4, §6:5) is the conversation's recent transcript, read by the
-reader with the input and handed to the activation beside it: each message keeps its
-author, and the window informs and never authorizes. The reader brings its bookkeeping
-with it: the activation that took in each message of the window, where one did, which
-is what the message links to (ADR-0303 §7:3). Where the phases write messages, it also
-brings the activation that **wrote** each assistant message, by acting's effect record
-(ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written`` reader it is handed, and
-the question each such message is, where it is one (ADR-0322 §4:2).
+reader for the input's activation and handed to it beside the input: each message keeps
+its author, and the window informs and never authorizes. The reader brings its
+bookkeeping with it: the activation that took in each message of the window, where one
+did, which is what the message links to (ADR-0303 §7:3). Where the phases write
+messages, it also brings the activation that **wrote** each assistant message, by
+acting's effect record (ADR-0303 §7:1, ADR-0306 §5:3), read through the ``written``
+reader it is handed, and the question each such message is, where it is one (ADR-0322
+§4:2).
+
+**The window is read only once the work's sight is made** (ADR-0383 §7:9): the reader
+admits the activation with its own inputs, the messages it takes in and their senders,
+and the engine asks it for the window (:meth:`ChatReader.windowed`) once the activation
+has marked them, by the sight its admission made. Every read made for the window, the
+transcript, the bookkeeping's links, the effect records and the Task Scheduler's
+episodes, is of a store :class:`~ai_assistant.orchestration.bound_stores.BoundStores`
+binds to that sight (§7:7). The reader's intake, its read of what waits, its marking and
+its walk of the conversations holding a message no activation took in, stays unbound:
+it is a sensor's finding of what is due (§7:8, ADR-0293 §1:2).
 
 **The writer** (§9, §10). The phases write the activation's messages into the
 conversation the input came from as it runs, and a pass that cannot finish writes the
@@ -54,8 +65,8 @@ fixed *couldn't finish* message, listing any effect that did happen
 an activation cancelled by a shutdown has its episode closed as interrupted and nothing
 is written for it, and the conversation's current state shows *interrupted* (§8:3).
 
-Nothing concrete is imported: the conversation store arrives by injection and is seen
-only through its Protocol (CLAUDE.md golden rule 1).
+Nothing concrete is imported: the conversation store and the holder arrive by injection,
+and each store is seen only through its Protocol (CLAUDE.md golden rule 1).
 """
 
 from __future__ import annotations
@@ -69,6 +80,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     ConversationStoreError,
     UnknownConversationError,
 )
@@ -84,13 +96,15 @@ from ai_assistant.orchestration.understanding import TranscriptWindow, WrittenBy
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
-    from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.core.protocols import ConversationStore, MemoryStore, PlanStore
     from ai_assistant.core.types import (
         ChannelIdentity,
         InputSender,
         MessageReceipt,
         RecordHome,
+        Sight,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.matters import HeldInput
 
 __all__ = [
@@ -163,7 +177,9 @@ class ChatInput:
         activation_id: The id the activation is admitted with, which the messages
             were marked taken in by (§6:6).
         messages: The user's messages taken in, ascending: the input.
-        window: The conversation's recent transcript, brought in with the input.
+        window: The conversation's recent transcript, read for the activation once its
+            sight is made (:meth:`ChatReader.windowed`, ADR-0383 §7:9); ``None`` until
+            then.
         senders: Who sent each message, by its position, as the engine found it from
             the device it was written from before admitting the input (ADR-0366 §4:1,
             ADR-0368 §2:6); empty until then.
@@ -172,7 +188,7 @@ class ChatInput:
     conversation_id: str
     activation_id: str
     messages: tuple[TranscriptMessage, ...]
-    window: TranscriptWindow
+    window: TranscriptWindow | None = None
     senders: Mapping[int, InputSender] = field(default_factory=dict)
 
     @property
@@ -188,9 +204,8 @@ class ChatInput:
         """
         kept = frozenset(positions)
         messages = tuple(message for message in self.messages if message.position in kept)
-        return replace(
-            self, messages=messages, window=replace(self.window, input_messages=messages)
-        )
+        window = None if self.window is None else replace(self.window, input_messages=messages)
+        return replace(self, messages=messages, window=window)
 
 
 @dataclass(slots=True)
@@ -302,7 +317,7 @@ class ChatReader:
     once the read has taken its input in starts a read of its own, whatever runs.
     """
 
-    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, four engine seams, the writers' links, the hold, and the waits with their clock
+    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, four engine seams, the holder and the writers' links, the hold, and the waits with their clock
         self,
         *,
         conversations: ConversationStore,
@@ -311,9 +326,13 @@ class ChatReader:
         closing: Callable[[], bool],
         mint: Callable[[], str],
         window_size: int = CHAT_WINDOW_SIZE,
-        written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, WrittenBy]]]
+        stores: BoundStores | None = None,
+        written: Callable[
+            [str, Sequence[str], Sequence[int], Bound[PlanStore]],
+            Awaitable[Mapping[int, WrittenBy]],
+        ]
         | None = None,
-        writers: Callable[[], Awaitable[Sequence[str]]] | None = None,
+        writers: Callable[[Bound[MemoryStore]], Awaitable[Sequence[str]]] | None = None,
         hold: Callable[[ChannelIdentity], HeldInput] | None = None,
         start_wait: timedelta | None = None,
         composing_lapse: timedelta = DEFAULT_CHAT_COMPOSING_LAPSE,
@@ -324,29 +343,34 @@ class ChatReader:
         """Wire the reader.
 
         Args:
-            conversations: The chat space, whose bookkeeping, waiting messages and
-                transcript the reader reads and writes.
+            conversations: The chat space, unbound: the reader's intake, its read of
+                what waits, its marking and its walk of what no activation took in, a
+                sensor's finding of what is due (ADR-0383 §7:8). No window is read
+                through it.
             activate: Admits one activation for an input, which marks the input taken
-                in (:meth:`take_in`) and writes its reply. It returns whether anything
-                was marked, once the reply is written, or raises ``CancelledError``
-                where a shutdown cancelled it.
+                in (:meth:`take_in`), has its window read (:meth:`windowed`) and writes
+                its reply. It returns whether anything was marked, once the reply is
+                written, or raises ``CancelledError`` where a shutdown cancelled it.
             spawn: Starts a read as a task the engine tracks, so shutdown drains it.
             closing: Whether the engine has begun shutting down, after which no new
                 input is taken in.
             mint: The activation id the next input is admitted with, and marked taken
                 in by.
             window_size: How many recent messages the window holds.
+            stores: The holder every read made for a work's window goes through, each
+                store bound to the work's sight (ADR-0383 §7:7, §7:9, §9:1). ``None``
+                reads no window: :meth:`windowed` refuses.
             written: Reads which activation wrote each assistant message, by its
                 effect record, where the phases write messages (ADR-0303 §7:1):
-                given the conversation, the candidate activations and the assistant
-                messages' positions, it answers the activation, and the question the
-                message is where it is one, by position, a position no record names
-                simply missing. ``None``, the default, links no assistant message, as
-                before the phases.
+                given the conversation, the candidate activations, the assistant
+                messages' positions and the plan store bound to the work's sight, it
+                answers the activation, and the question the message is where it is
+                one, by position, a position no record names simply missing. ``None``,
+                the default, links no assistant message, as before the phases.
             writers: The activations started from no conversation that may have
-                written into one, the Task Scheduler's (ADR-0350 §9:1), read as further
-                candidates for what wrote an assistant message of the window; ``None``
-                reads none.
+                written into one, the Task Scheduler's (ADR-0350 §9:1), read through
+                the memory store bound to the work's sight as further candidates for
+                what wrote an assistant message of the window; ``None`` reads none.
             hold: Tells the engine of an input a read holds in its start wait, given
                 its place (ADR-0349 §7:12): the read says which activation it admitted
                 it as, and lets it go once that activation has ended or nothing was
@@ -378,6 +402,7 @@ class ChatReader:
             )
             raise ValueError(msg)
         self._conversations = conversations
+        self._stores = stores
         self._written = written
         self._activate = activate
         self._spawn = spawn
@@ -466,6 +491,9 @@ class ChatReader:
         Run at start, after a restart closed what a dead process left open, and on each
         later sweep, so a message that waited past a missed notice is still taken in.
 
+        Read unbound, through the reader's intake: the engine's start's and a sensor's
+        finding of what is due, for no work (ADR-0383 §7:8).
+
         Returns:
             How many conversations were noticed.
 
@@ -528,6 +556,7 @@ class ChatReader:
         Raises:
             ConversationStoreError: If the store cannot be written.
         """
+        # ADR-0383 §7:8, ADR-0293 §1:2: the reader's own bookkeeping, unbound.
         positions = [message.position for message in taken.messages]
         kept = self._marked.setdefault(taken.activation_id, set())
         for start in range(0, len(positions), _MARK_CHUNK):
@@ -553,6 +582,7 @@ class ChatReader:
                     return
                 read.again = False
                 read.queried = 0 if read.held is None else read.held.notices
+                # ADR-0383 §7:8: the reader's intake, a sensor's finding, reads unbound.
                 waiting = await self._conversations.untaken_messages(
                     conversation_id, limit=_WAITING_ALL
                 )
@@ -592,7 +622,10 @@ class ChatReader:
     async def _admit(
         self, conversation_id: str, read: _Read, waiting: Sequence[TranscriptMessage]
     ) -> bool:
-        """Bring the waiting messages in, with the window, as one activation's input.
+        """Bring the waiting messages in as one activation's input.
+
+        Its window is not read here: the work's sight is made only as the activation is
+        admitted, and the window is read through it (:meth:`windowed`, ADR-0383 §7:9).
 
         From here a message noticed starts a read of its own, which neither waits for
         this activation nor takes its messages in (ADR-0349 §8:1, §6:6). Once it has
@@ -619,7 +652,6 @@ class ChatReader:
             if read.held is not None and successor is not None and successor.held is not None:
                 read.held.moved_to(successor.held, after=read.queried)
         try:
-            window = await self._window(conversation_id, waiting)
             current = self._current.setdefault(conversation_id, [])
             current.append(activation_id)
             self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
@@ -631,7 +663,6 @@ class ChatReader:
                         conversation_id=conversation_id,
                         activation_id=activation_id,
                         messages=tuple(waiting),
-                        window=window,
                     )
                 )
             finally:
@@ -695,8 +726,40 @@ class ChatReader:
                 one.cancel()
             await asyncio.gather(napping, closed, return_exceptions=True)
 
+    async def windowed(self, taken: ChatInput, *, sight: Sight) -> ChatInput:
+        """``taken`` with its window, read for its activation by the work's sight (§6:4).
+
+        Called by the activation once it is admitted, its sight made, and its input
+        marked taken in (ADR-0383 §7:9, ADR-0293 §6:8): every read the window needs is
+        of a store the holder binds to ``sight`` (§7:7), so a message, a link or a writer
+        the sight does not see is absent from it (§8:3). The window is read for every
+        message the reader handed the activation, as before its marking, and the caller
+        narrows it to what it marked (:meth:`ChatInput.narrowed`).
+
+        Raises:
+            ConfigurationError: If the reader was built without the holder.
+            ConversationStoreError: If the transcript or its bookkeeping cannot be read.
+        """
+        if self._stores is None:
+            msg = "a channel's reader reads a work's window through the holder (ADR-0383 §9:1)"
+            raise ConfigurationError(msg)
+        window = await self._window(
+            taken.conversation_id,
+            taken.messages,
+            conversations=self._stores.conversations(sight),
+            plans=None if self._written is None else self._stores.plans(sight),
+            memory=None if self._writers is None else self._stores.memory(sight),
+        )
+        return replace(taken, window=window)
+
     async def _window(
-        self, conversation_id: str, waiting: Sequence[TranscriptMessage]
+        self,
+        conversation_id: str,
+        waiting: Sequence[TranscriptMessage],
+        *,
+        conversations: Bound[ConversationStore],
+        plans: Bound[PlanStore] | None,
+        memory: Bound[MemoryStore] | None,
     ) -> TranscriptWindow:
         """The conversation's recent transcript and what the input replies to (§6:4).
 
@@ -704,7 +767,7 @@ class ChatReader:
         input message replies to that they do not show, read by its position.
         """
         positions = {message.position for message in waiting}
-        page = await self._conversations.transcript(
+        page = await conversations.transcript(
             conversation_id, limit=self._window_size + len(positions)
         )
         entries = () if page is None else page.entries
@@ -718,12 +781,17 @@ class ChatReader:
         for wanted in sorted({one.replies_to for one in waiting if one.replies_to is not None}):
             if wanted in shown:
                 continue
-            earlier = await self._conversations.transcript(
-                conversation_id, before=wanted + 1, limit=1
-            )
+            earlier = await conversations.transcript(conversation_id, before=wanted + 1, limit=1)
             if earlier is not None and earlier.entries and earlier.entries[-1].position == wanted:
                 replied.append(earlier.entries[-1])
-        links = await self._links(conversation_id, recent, replied)
+        links = await self._links(
+            conversation_id,
+            recent,
+            replied,
+            conversations=conversations,
+            plans=plans,
+            memory=memory,
+        )
         return TranscriptWindow(
             conversation=conversation_channel(conversation_id),
             messages=recent,
@@ -732,11 +800,15 @@ class ChatReader:
             links=links,
         )
 
-    async def _links(
+    async def _links(  # noqa: PLR0913 — the window's messages, and the three stores bound to its sight
         self,
         conversation_id: str,
         recent: Sequence[TranscriptMessage],
         replied: Sequence[TranscriptMessage | DeletedMessage],
+        *,
+        conversations: Bound[ConversationStore],
+        plans: Bound[PlanStore] | None,
+        memory: Bound[MemoryStore] | None,
     ) -> dict[int, str]:
         """The activation each window message links to (ADR-0303 §7:1-§7:3).
 
@@ -751,15 +823,19 @@ class ChatReader:
         writer whose whole input lies further back is not found, and its message stays
         not linkable, the conservative direction (§7:5). A message nothing links is
         simply missing.
+
+        Each read is of a store bound to the work's sight: ``conversations`` for the
+        bookkeeping, ``plans`` for the effect records ``written`` reads, and ``memory``
+        for the Task Scheduler's episodes ``writers`` reads (ADR-0383 §7:7).
         """
         shown = [one.position for one in (*recent, *replied)]
-        links = await self._taken_in(conversation_id, shown)
+        links = await self._taken_in(conversations, conversation_id, shown)
         writes = [
             one.position
             for one in (*recent, *replied)
             if isinstance(one, TranscriptMessage) and one.author is MessageAuthor.ASSISTANT
         ]
-        if self._written is None or not writes:
+        if self._written is None or plans is None or not writes:
             return links
         recent_positions = {one.position for one in recent}
         heads = {min(recent_positions)} if recent_positions else set()
@@ -771,26 +847,29 @@ class ChatReader:
                 for position in range(max(1, head - self._window_size), head)
             }
         )
-        before = await self._taken_in(conversation_id, looked)
+        before = await self._taken_in(conversations, conversation_id, looked)
         # ADR-0350 §9:1: a scheduled task's activation took nothing in here, so it is
         # read as a candidate writer of its own.
-        elsewhere = () if self._writers is None else await self._writers()
+        elsewhere = () if self._writers is None or memory is None else await self._writers(memory)
         candidates = list(dict.fromkeys((*links.values(), *before.values(), *elsewhere)))
         if not candidates:
             return links
-        written = await self._written(conversation_id, candidates, writes)
+        written = await self._written(conversation_id, candidates, writes, plans)
         for position in writes:
             writer = written.get(position)
             if writer is not None and position not in links:
                 links[position] = writer.activation_id
         return links
 
-    async def _taken_in(self, conversation_id: str, positions: Sequence[int]) -> dict[int, str]:
+    @staticmethod
+    async def _taken_in(
+        conversations: Bound[ConversationStore], conversation_id: str, positions: Sequence[int]
+    ) -> dict[int, str]:
         """The bookkeeping for ``positions``, in as many calls as the store's bound needs."""
         links: dict[int, str] = {}
         for start in range(0, len(positions), _MARK_CHUNK):
             links.update(
-                await self._conversations.taken_in(
+                await conversations.taken_in(
                     conversation_id, positions=positions[start : start + _MARK_CHUNK]
                 )
             )

@@ -431,6 +431,9 @@ def build_phases_world(
             budget=timedelta(seconds=2),
         ),
         phases=phases,
+        # ADR-0383 §7:9, §9:1: the holder the chat's reader reads a work's window
+        # through, over the same stores, as the composition root's is.
+        stores=BoundStores(memory=store, stories=stories, conversations=chat, plans=plans),
         now=lambda: NOW,
         # ADR-0366 §4:1: the owner's phone is linked to them, as a hub links an admitted
         # device, so what it writes is the owner's (ADR-0368 §9:1); and the hub's own

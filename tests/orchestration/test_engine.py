@@ -484,6 +484,14 @@ class Harness:
             # in-process deployment that serves no poll.
             notification_outbox=notification_outbox,
             chat_reader=phases is not None if chat_reader is None else chat_reader,
+            # ADR-0383 §7:9, §9:1: the holder the channels' readers read a work's window
+            # through, over this harness's own stores, as the composition root's is.
+            stores=BoundStores(
+                memory=self.memory,
+                stories=FakeStoryStore() if stories is None else stories,
+                conversations=self.conversation_store,
+                plans=self.plans,
+            ),
             phases=None if phases is None else phases(self),
             diagnostics=diagnostics,
             telegram=telegram,

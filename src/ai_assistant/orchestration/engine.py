@@ -191,6 +191,7 @@ from ai_assistant.orchestration.activation_state import (
     active_state,
     admit_channel,
     terminal_status,
+    work_sight,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.approval_calls import (
@@ -444,6 +445,7 @@ if TYPE_CHECKING:
         UserMessage,
         WithdrawLoweringResult,
     )
+    from ai_assistant.orchestration.bound_stores import Bound
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
@@ -2177,9 +2179,10 @@ class Engine:
             stores: The holder that binds stores for a pass (ADR-0383 §9:1), over the
                 **same** stores handed here: the composition root's one, which the
                 running-work coordinator reads the peer view and writes a merge's stop
-                record through, bound to the sight of the work that makes each. ``None``
-                builds one over ``memory``, ``stories``, ``plans`` and the person
-                block's store, which binds them alike.
+                record through, and the channels' readers read a work's window through
+                once its sight is made (§7:7, §7:9), bound to the sight of the work that
+                makes each. ``None`` builds one over ``memory``, ``stories``, ``plans``,
+                the person block's store and the chat space, which binds them alike.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2354,20 +2357,23 @@ class Engine:
             raise ConfigurationError(msg)
         # ADR-0349 §5-§7: what crosses the activations this engine runs, over its own
         # account of them; the stop call runs the Task Manager's stop through it (§4:7).
+        # ADR-0383 §9:1: the one holder this engine's converted readers read through.
+        held = (
+            stores
+            if stores is not None
+            else BoundStores(
+                memory=memory,
+                stories=stories,
+                plans=plans,
+                people=None if person_blocks is None else person_blocks.store,
+                conversations=conversations.chat_space,
+            )
+        )
         self._matters = Matters(
             running=lambda: (one.state for one in self._running if one.state is not None),
             # ADR-0383 §9:1: the peer view's reads and a merge's stop record go through
             # the holder, bound to the sight of the work that makes them.
-            stores=(
-                stores
-                if stores is not None
-                else BoundStores(
-                    memory=memory,
-                    stories=stories,
-                    plans=plans,
-                    people=None if person_blocks is None else person_blocks.store,
-                )
-            ),
+            stores=held,
             stop=self._stop,
             held_input_limit=held_input_limit,
             in_progress_limit=in_progress_limit,
@@ -2399,6 +2405,9 @@ class Engine:
                 spawn=self._spawn_read,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
+                # ADR-0383 §7:9: the window, read once the work's sight is made, through
+                # the stores the holder binds to it.
+                stores=held,
                 # ADR-0303 §7:1: where the phases write messages, an assistant message
                 # links to the activation that wrote it, by its effect record.
                 written=None if phases is None else phases.written,
@@ -2476,6 +2485,9 @@ class Engine:
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
                 identities=identities,
+                # ADR-0383 §7:9: the window, read once the work's sight is made, through
+                # the stores the holder binds to it.
+                stores=held,
                 # ADR-0323 §4:13, §10: the window's messages, and a quoted one, link
                 # to the activation that wrote them, by their effect records.
                 written=self._phases.written_in,
@@ -6712,13 +6724,16 @@ class Engine:
                 await reader.take_in(taken, into=marked)
                 if not marked:
                     raise _NothingTakenInError
+                # ADR-0383 §7:9: the window is read only now, the work's sight made at
+                # its admission, through the stores bound to that sight (§7:7).
+                windowed = await reader.windowed(taken, sight=work_sight())
                 # §6:6: the pass runs on what it took in alone. A message read as
                 # waiting and not marked — deleted, or taken in elsewhere, in between —
                 # reaches no stage. The episode keeps the text the activation was
                 # admitted with: an open episode is only ever extended (ADR-0286 §3:4,
                 # §12:2), and what an episode records is never kept in step with the
                 # transcript (ADR-0293 §5:5).
-                await self._chat_input_turn(taken.narrowed(marked))
+                await self._chat_input_turn(windowed.narrowed(marked))
             except Exception:
                 # §9:1, §10:2: what was marked is consumed, so its failure is written.
                 # Once the phases' run has begun, the controller holding the pass's
@@ -6842,8 +6857,11 @@ class Engine:
                 await reader.take_in(taken, into=marked)
                 if not marked:
                     raise _NothingTakenInError
+                # ADR-0383 §7:9: the window is read only now, the work's sight made at
+                # its admission, through the stores bound to that sight (§7:7).
+                windowed = await reader.windowed(taken, sight=work_sight())
                 # §5:9: the pass runs on what it took in alone.
-                await self._line_turn(taken.narrowed(marked), target)
+                await self._line_turn(windowed.narrowed(marked), target)
             except Exception:
                 # As the chat's: what was marked is consumed, so a failure before the
                 # phases' run began writes *couldn't finish* here (ADR-0317 §3:3).
@@ -6890,6 +6908,8 @@ class Engine:
         """
         phases = self._phases
         assert phases is not None  # noqa: S101 — the line is wired only beside them
+        window = taken.window
+        assert window is not None  # noqa: S101 — read once the work's sight is made
         state = active_state()
         trigger = None if state is None else state.trigger
         if state is not None and trigger is not None:
@@ -6918,13 +6938,13 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
-            transcript=taken.window,
+            transcript=window,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
             story_links_wired=self._story_links is not None,
             phases=phases.begin_line(
                 activation_id=taken.activation_id,
-                window=taken.window,
+                window=window,
                 target=target,
                 description=TELEGRAM.description,
                 trigger=trigger,
@@ -6967,6 +6987,8 @@ class Engine:
         """
         phases = self._phases
         assert phases is not None  # noqa: S101 — the reader is wired only beside them
+        window = taken.window
+        assert window is not None  # noqa: S101 — read once the work's sight is made
         state = active_state()
         trigger = None if state is None else state.trigger
         if state is not None and trigger is not None:
@@ -7005,13 +7027,13 @@ class Engine:
             supply=BoundedAudienceSupply(
                 speakable_attested_sources=self._speakable_attested_sources
             ),
-            transcript=taken.window,
+            transcript=window,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
             story_links_wired=self._story_links is not None,
             phases=phases.begin(
                 activation_id=taken.activation_id,
-                window=taken.window,
+                window=window,
                 conversation_id=taken.conversation_id,
                 trigger=trigger,
                 owner_records=True,
@@ -8024,11 +8046,12 @@ class Engine:
             return PlaceTarget(channel=channel, writer=writer.for_place(channel))
         return None
 
-    async def _task_writers(self) -> tuple[str, ...]:
+    async def _task_writers(self, memory: Bound[MemoryStore]) -> tuple[str, ...]:
         """The activations the Task Scheduler started lately, which may be a message's writer.
 
         ADR-0350 §9:1: a message such an activation wrote into a place a reader's window
-        shows links to it. Those running, and those frozen on the schedule.
+        shows links to it. Those running, and those frozen on the schedule, read through
+        ``memory``, bound to the sight of the work whose window this is (ADR-0383 §7:7).
         """
         if self._task_manager is None:
             return ()
@@ -8043,17 +8066,21 @@ class Engine:
             *running,
             *(
                 one.processing_record.activation_id
-                for one in await self._schedule_episodes()
+                for one in await self._schedule_episodes(memory)
                 if one.processing_record is not None
             ),
         )
 
-    async def _schedule_episodes(self) -> tuple[EpisodicMemory, ...]:
-        """The schedule's recent frozen episodes, newest last (ADR-0350 §7:9, §9:1)."""
+    async def _schedule_episodes(self, memory: Bound[MemoryStore]) -> tuple[EpisodicMemory, ...]:
+        """The schedule's recent frozen episodes, newest last (ADR-0350 §7:9, §9:1).
+
+        For a channel's reader's window, so read through ``memory``, the store bound to
+        the sight of the work whose window this is (ADR-0383 §7:7, §7:9).
+        """
         if self._task_manager is None:
             return ()
         try:
-            page = await self._memory.channel_episodes(SCHEDULE, limit=CHAT_WINDOW_SIZE)
+            page = await memory.channel_episodes(SCHEDULE, limit=CHAT_WINDOW_SIZE)
         except MemoryStoreError:
             _log.warning("schedule_episodes_unread", stage="reader", reason="store_failed")
             return ()

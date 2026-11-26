@@ -2079,7 +2079,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # every other reader holds. A converted stage holds it and never a store, and asks
         # it for a store only for the sight its pass carries; whether a bound store
         # withholds or counts is each store's construction (§7:10), not the holder's. The
-        # person-model store is in it where the switch is on.
+        # person-model store is in it where the switch is on. The channels' readers read
+        # a work's window through it (§7:9).
         pass_stores = BoundStores(
             memory=memory,
             stories=stories,
@@ -2449,7 +2450,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # event is read. The engine reads no record (§6:4).
             things=thing_records,
             # ADR-0383 §9:1: the one holder, which the running-work coordinator's peer
-            # view and a merge's stop record go through, bound to the work's sight.
+            # view and a merge's stop record go through, and the hub chat's reader and the
+            # line's read a work's window through once its sight is made (§7:9), bound to
+            # the work's sight.
             stores=pass_stores,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
