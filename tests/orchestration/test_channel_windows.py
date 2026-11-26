@@ -18,7 +18,15 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from phases_support import frozen, open_conversation, phases_harness, say, until
+from phases_support import (
+    answered,
+    frozen,
+    open_conversation,
+    phases_harness,
+    processing,
+    say,
+    until,
+)
 from sight_support import OWNER_WEAK, UNIDENTIFIED, sight_of
 from structlog.testing import capture_logs
 from task_support import schedule_episode
@@ -35,6 +43,7 @@ from test_telegram_reader import (
     _sent,
 )
 
+from ai_assistant.core.errors import ConversationStoreError, MemoryStoreError
 from ai_assistant.core.types import (
     ActivationEffect,
     CallOutcomeKind,
@@ -43,17 +52,19 @@ from ai_assistant.core.types import (
     DeviceAccess,
     MessageAuthor,
     NewMessage,
+    ProcessingStatus,
     RecordedCall,
     RecordedDelivery,
     RecordedInputMessage,
     RecordHome,
     SightMode,
+    TelegramIntakeKind,
     ToolOutcome,
 )
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.channel_kinds import place_of
-from ai_assistant.orchestration.chat import ChatInput, ChatReader
+from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatInput, ChatReader
 from ai_assistant.orchestration.task_scheduler import SCHEDULE
 from ai_assistant.orchestration.telegram import line_channel
 from ai_assistant.orchestration.understanding import WrittenBy
@@ -62,6 +73,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakePlanStore,
     FakeStoryStore,
+    FakeToolCallingCompleter,
 )
 from ai_assistant.testing.parties import OWNER_SENDER
 
@@ -441,3 +453,81 @@ async def test_the_lines_window_is_read_inside_the_admitted_work_by_its_sight() 
     assert windows[channel], "the line's episodes were read for the window"
     assert windows[SCHEDULE], "the Task Scheduler's were read for a writer"
     assert all(bound == working for each in windows.values() for bound, working in each)
+
+
+# --- a window that cannot be read: the work's failure, its input consumed (FLAG 1) ---------
+
+
+class _UnreadableWindowChat(FakeConversationStore):
+    """A chat space whose transcript cannot be read through a store bound to a sight: the
+    window's, and no other read of it."""
+
+    async def transcript(self, conversation_id: str, **page: Any) -> TranscriptPage | None:
+        if self._sight is not None:
+            msg = "the window's transcript cannot be read"
+            raise ConversationStoreError(msg)
+        return await super().transcript(conversation_id, **page)
+
+
+async def test_a_hub_chat_window_that_cannot_be_read_fails_the_work_once_its_input_is_marked() -> (
+    None
+):
+    """The window is read after the input is marked (§7:9, ADR-0293 §6:8), so a store that
+    fails then fails the work: its input stays consumed, no stage runs, *couldn't finish*
+    is written once, and its episode closes failed (ADR-0317 §3:3)."""
+    completer = FakeToolCallingCompleter.scripted()
+    store = _UnreadableWindowChat(now=lambda: AT)
+    harness = phases_harness(completer, conversation_store=store)
+    conversation = await open_conversation(harness)
+    with capture_logs():
+        await say(harness, conversation, "hello")
+        messages = await answered(harness, conversation, 1)
+    await harness.engine.aclose()
+
+    assert [one.text for one in messages if one.author is MessageAuthor.ASSISTANT] == [
+        COULDNT_FINISH
+    ]
+    (first,) = [one for one in messages if one.author is MessageAuthor.USER]
+    (episode,) = await frozen(harness)
+    record = processing(episode)
+    assert await store.taken_in(conversation, positions=[first.position]) == {
+        first.position: record.activation_id
+    }, "consumed: marked by the work it was admitted with"
+    assert completer.calls == [], "no stage ran"
+    assert record.status is ProcessingStatus.FAILED
+
+
+class _UnreadableWindowMemory(FakeMemoryStore):
+    """A memory store whose line episodes cannot be read through a store bound to a sight:
+    the window's; the start's unbound read of the chat's last activation still answers."""
+
+    async def channel_episodes(
+        self, channel: ChannelIdentity, *, after: int | None = None, limit: int
+    ) -> ChannelEpisodePage:
+        if self._sight is not None and channel.channel_type == "telegram":
+            msg = "the window's episodes cannot be read"
+            raise MemoryStoreError(msg)
+        return await super().channel_episodes(channel, after=after, limit=limit)
+
+
+async def test_a_line_window_that_cannot_be_read_fails_the_work_once_its_input_is_marked() -> None:
+    completer = FakeToolCallingCompleter.scripted()
+    line = _EngineLine()
+    line.fake.hold(text(1, "What's on today?", message_id=40))
+    harness = _line_harness(line, completer, memory=_UnreadableWindowMemory(now=lambda: AT))
+    with capture_logs():
+        await harness.engine.start()
+        (episode,) = await _line_settled(harness)
+
+        async def written_once() -> bool:
+            return bool(line.sent())
+
+        await until(written_once, what="the line's message")
+    await harness.engine.aclose()
+
+    record = processing(episode)
+    assert line.sent() == [COULDNT_FINISH]
+    (held,) = (await line.intake.recorded([1])).values()
+    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, record.activation_id)
+    assert completer.calls == [], "no stage ran"
+    assert record.status is ProcessingStatus.FAILED
