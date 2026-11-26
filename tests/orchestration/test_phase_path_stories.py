@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    RecordHome,
     StoryActor,
     StoryEffectState,
     StoryNoteAuthor,
@@ -78,7 +79,9 @@ class _World:
 
     async def story(self, *activations: str) -> str:
         outcome = await self.stories.create(
-            [activation(one) for one in activations], actor=StoryActor.OWNER
+            [activation(one) for one in activations],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
         assert outcome.story_id is not None
         return outcome.story_id

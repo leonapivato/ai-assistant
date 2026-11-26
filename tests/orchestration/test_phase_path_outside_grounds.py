@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     RoundResponse,
     StageOutcome,
     StoryActor,
@@ -243,6 +244,7 @@ async def test_a_story_view_names_its_summary_note_and_moment_once_each_every_ro
                 StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION),
                 StoryMember(kind=StoryMemberKind.ACTIVATION, id="report"),
             ],
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
     ).story_id
@@ -314,7 +316,9 @@ async def test_a_story_read_names_the_marked_note_its_view_shows_once() -> None:
     stories = FakeStoryStore(now=lambda: _AT)
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None

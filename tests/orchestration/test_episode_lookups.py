@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     ProposedCall,
     RecordedCall,
+    RecordHome,
     ShownRecord,
     ShownRecordKind,
     StoryHeader,
@@ -149,6 +150,7 @@ class _Stories:
     async def stories_of(self, member: StoryMember) -> tuple[StoryHeader, ...]:
         return tuple(
             StoryHeader(
+                home=RecordHome.owners(),
                 story_id=one,
                 created_at=_AT,
                 merged_into="story:other" if one in self.merged else None,
@@ -160,7 +162,9 @@ class _Stories:
         if story_id not in self.summaries:
             return None
         return StorySummaryState(
-            story=StoryHeader(story_id=story_id, created_at=_AT, merged_into=None),
+            story=StoryHeader(
+                home=RecordHome.owners(), story_id=story_id, created_at=_AT, merged_into=None
+            ),
             summary=self.summaries[story_id],
             pending_notes=(),
             pending_episodes=(),

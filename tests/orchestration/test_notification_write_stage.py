@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
 )
 from ai_assistant.orchestration import NotificationWriteStage
 from ai_assistant.testing import (
@@ -103,6 +104,25 @@ async def test_the_seam_rules_through_the_store_and_reports_what_it_ruled() -> N
     assert ruling.kind is NotificationDispositionKind.INTERRUPT
     held = await store.held(limit=10)
     assert [record.id for record in held] == [ruling.notification_id]
+
+
+async def test_the_record_takes_the_home_of_whoever_the_source_belongs_to() -> None:
+    """ADR-0383 §4:3, ADR-0386 §3:2: the seam supplies the home, the owner's domain here.
+
+    No work makes a notification: a producer makes it from a source, whose home is the
+    one rule ``source_home`` reads, and the candidate carries none.
+    """
+    store = await _interrupting_store()
+    stage = NotificationWriteStage(
+        store=store, policy=FakeNotificationPolicy(), outbox=FakeNotificationOutbox()
+    )
+
+    ruling = await stage.offer(_candidate())
+
+    assert ruling.notification_id is not None
+    record = await store.get(ruling.notification_id)
+    assert record is not None
+    assert record.home == RecordHome.owners()
 
 
 async def test_an_actionable_interrupt_reaches_the_outbox_before_the_call_returns() -> None:

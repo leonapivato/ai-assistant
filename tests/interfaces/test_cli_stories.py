@@ -723,7 +723,9 @@ def test_list_shows_each_summary_first_line_its_mark_or_that_it_was_withheld(
     assert output.getvalue().splitlines() == lines
 
     # A view that says the summary was withheld is rendered as such, and nothing of it.
-    header = StoryHeader(story_id="story:w", created_at=_AT, merged_into=None)
+    header = StoryHeader(
+        home=RecordHome.owners(), story_id="story:w", created_at=_AT, merged_into=None
+    )
     listing = story_inspection.StoryListing(
         StoryPage(stories=(header,), next_cursor=None),
         MappingProxyType(
@@ -842,7 +844,9 @@ def test_move_may_name_notes_and_no_member_and_show_logs_them_on_both_stories(
 
 def test_show_renders_a_carried_note_with_its_trigger() -> None:
     """ADR-0304 §9:6: the note, the other story, and the activation that triggered it."""
-    header = StoryHeader(story_id="story:x", created_at=_AT, merged_into=None)
+    header = StoryHeader(
+        home=RecordHome.owners(), story_id="story:x", created_at=_AT, merged_into=None
+    )
     log = tuple(
         StoryLogLine(
             sequence=sequence,
@@ -880,7 +884,9 @@ def test_every_decision_has_a_rendering() -> None:
 
 def test_show_renders_a_decision_with_its_outcome_and_the_flag_by_identity() -> None:
     """ADR-0302 §8:2: a ``decided`` line names its outcome and the flag it answers."""
-    header = StoryHeader(story_id="story:x", created_at=_AT, merged_into=None)
+    header = StoryHeader(
+        home=RecordHome.owners(), story_id="story:x", created_at=_AT, merged_into=None
+    )
 
     def decided(sequence: int, flag: StoryFlagName, outcome: StoryDecision) -> StoryLogLine:
         return StoryLogLine(
@@ -1105,7 +1111,9 @@ def test_summary_renders_the_tidied_summary_its_mark_and_its_notes_newest_first(
 
 def test_summary_renders_a_withheld_summary_an_empty_one_and_the_notes_beyond_the_bound() -> None:
     """ADR-0303 §3:7, §5:3, §10:2: the reader is told what it is not shown."""
-    header = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
+    header = StoryHeader(
+        home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into=None
+    )
     for view, expected in (
         (
             StorySummaryView(story=header, version=4, tidied_at=_AT, withheld=True, more_notes=3),
@@ -1149,7 +1157,9 @@ def test_standing_renders_what_was_done_and_the_earlier_episodes() -> None:
     """What acting will fill (§8:1), rendered now so its shape is fixed."""
     buffer = StringIO()
     console = Console(file=buffer, force_terminal=False, width=400)
-    header = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
+    header = StoryHeader(
+        home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into=None
+    )
     standing = StoryStanding(
         story=header,
         done=(

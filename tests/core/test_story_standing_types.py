@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     STORY_STANDING_RECENT,
+    RecordHome,
     StoryEffectState,
     StoryHeader,
     StoryRelated,
@@ -21,8 +22,12 @@ from ai_assistant.core.types import (
 )
 
 _AT: Final = datetime(2026, 10, 1, tzinfo=UTC)
-_STORY: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
-_MERGED: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into="story:b")
+_STORY: Final = StoryHeader(
+    home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into=None
+)
+_MERGED: Final = StoryHeader(
+    home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into="story:b"
+)
 
 
 def _moment(activation_id: str, at: datetime) -> StoryStandingEpisode:

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import pytest
 from exchange_support import reported
 from structured_support import structured
+from test_activation_state import _admitted
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
@@ -56,6 +57,11 @@ from ai_assistant.orchestration.acting import (
     AuthorizedCall,
     AuthorizedRound,
     OwnRecordsByCapability,
+)
+from ai_assistant.orchestration.activation_state import (
+    CURRENT_ACTIVATION,
+    ActivationScope,
+    ActivationState,
 )
 from ai_assistant.orchestration.held_results import HeldResults
 from ai_assistant.orchestration.phase_path import PhaseTools
@@ -109,6 +115,8 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from ai_assistant.core.protocols import StoryStore
     from ai_assistant.core.types import FrozenJson, ToolDefinition
 
@@ -119,6 +127,16 @@ _EPISODE: Final = f"activation:{_ACTIVATION}"
 
 def _now() -> datetime:
     return _AT
+
+
+@pytest.fixture(autouse=True)
+def _owners_work() -> Iterator[None]:
+    """A work of the owner's is running, as acting runs every story call inside one."""
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        yield
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
 
 def _episode(episode_id: str) -> EpisodicMemory:
@@ -164,6 +182,7 @@ async def _stores() -> tuple[FakeStoryStore, FakeMemoryStore]:
 async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
     created = await stories.create(
         list(members) or [StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-0")],
+        home=RecordHome.owners(),
         actor=StoryActor.OWNER,
     )
     assert created.story_id is not None
@@ -298,6 +317,61 @@ def test_story_arguments_are_labels() -> None:
 
 
 # --- start ---------------------------------------------------------------------------------
+
+
+async def test_a_start_and_a_group_mint_their_story_in_the_home_whom_the_work_is_for_gives() -> (
+    None
+):
+    """ADR-0383 §4:1, ADR-0386 §2:2: the running work's home, the owner's here."""
+    stories, memory = await _stores()
+    trip = await _story(stories)
+    calls = StoryCalls(stories=stories, memory=memory)
+    state = CURRENT_ACTIVATION.get()
+    assert state is not None
+    assert state.state is not None
+    assert state.state.home == RecordHome.owners()
+
+    started = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
+    grouped = await calls.run(_call(GROUP_STORY, {STORIES_ARGUMENT: [trip], NOTES_ARGUMENT: []}))
+
+    assert started.outcome is grouped.outcome is ToolOutcome.SUCCEEDED
+    page = await stories.stories()
+    assert len(page.stories) == 3
+    assert {header.home for header in page.stories} == {RecordHome.owners()}
+
+
+async def test_a_start_in_a_work_whose_home_no_write_may_carry_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0383 §2:3, §4:1, ADR-0386 §6:2: the store refuses it, and nothing is written."""
+    stories, memory = await _stores()
+    calls = StoryCalls(stories=stories, memory=memory)
+    monkeypatch.setattr(
+        ActivationState, "home", property(lambda _: RecordHome.person("person:sam"))
+    )
+
+    result = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
+
+    assert result.outcome is ToolOutcome.FAILED
+    assert result.failure is not None
+    assert result.failure.kind is ToolFailureKind.INVALID_REQUEST
+    assert (await stories.stories()).stories == ()
+
+
+async def test_a_start_outside_any_work_has_no_home_to_carry_and_starts_nothing() -> None:
+    """ADR-0383 §4:1: a story a call starts takes its work's home, and there is none."""
+    stories, memory = await _stores()
+    calls = StoryCalls(stories=stories, memory=memory)
+    token = CURRENT_ACTIVATION.set(None)
+    try:
+        result = await calls.run(_call(START_STORY, {NOTES_ARGUMENT: ["A camping trip."]}))
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    assert result.outcome is ToolOutcome.FAILED
+    assert result.failure is not None
+    assert result.failure.kind is ToolFailureKind.INTERNAL
+    assert (await stories.stories()).stories == ()
 
 
 async def test_a_start_holds_this_activation_its_first_notes_and_sits_inside_a_story() -> None:
@@ -570,7 +644,9 @@ class _MergedInALoop:
         onward = self._LOOP.get(story_id)
         if onward is None:
             return await self.inner.header(story_id)
-        return StoryHeader(story_id=story_id, created_at=_AT, merged_into=onward)
+        return StoryHeader(
+            home=RecordHome.owners(), story_id=story_id, created_at=_AT, merged_into=onward
+        )
 
 
 async def test_a_loop_of_merges_is_the_store_s_failure_and_writes_nothing() -> None:

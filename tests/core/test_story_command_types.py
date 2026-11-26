@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     STORY_NOTE_MAX_CHARS,
+    RecordHome,
     StoryHeader,
     StoryMember,
     StoryMemberKind,
@@ -23,8 +24,12 @@ from ai_assistant.core.types import (
 )
 
 _AT: Final = datetime(2026, 10, 8, tzinfo=UTC)
-_STORY: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into=None)
-_MERGED: Final = StoryHeader(story_id="story:a", created_at=_AT, merged_into="story:b")
+_STORY: Final = StoryHeader(
+    home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into=None
+)
+_MERGED: Final = StoryHeader(
+    home=RecordHome.owners(), story_id="story:a", created_at=_AT, merged_into="story:b"
+)
 _LINE: Final = StorySummaryLine(text="A camping trip in October")
 _NOTE: Final = StoryNote(
     note_id=2,

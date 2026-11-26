@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     RecallOutcome,
+    RecordHome,
     StageOutcome,
     StoryActor,
     StoryChange,
@@ -110,7 +111,11 @@ async def _recall_seeded() -> FakeMemoryStore:
 
 
 async def _story(stories: FakeStoryStore, activation_id: str) -> str:
-    story_id = (await stories.create([activation(activation_id)], actor=StoryActor.OWNER)).story_id
+    story_id = (
+        await stories.create(
+            [activation(activation_id)], home=RecordHome.owners(), actor=StoryActor.OWNER
+        )
+    ).story_id
     assert story_id is not None
     return story_id
 
@@ -317,7 +322,9 @@ def _linked(
 
 async def test_a_turn_links_its_activation_into_the_story_it_named() -> None:
     stories = _stories()
-    trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
+    trip = (
+        await stories.create([activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER)
+    ).story_id
     assert trip is not None
     model = FakeModelProvider(_proposal(belongs_to=["S1"]))
     harness = _linked(await _seeded(), stories, model=model)
@@ -409,7 +416,9 @@ async def test_a_deployment_without_the_story_pieces_runs_as_before() -> None:
 
 async def test_an_event_s_links_are_recorded_before_planning() -> None:
     stories = _stories()
-    trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
+    trip = (
+        await stories.create([activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER)
+    ).story_id
     assert trip is not None
     harness = _linked(
         await _seeded(), stories, model=FakeModelProvider(_proposal(belongs_to=["S1"]))
@@ -431,7 +440,9 @@ async def test_an_event_s_links_are_recorded_before_planning() -> None:
 
 async def test_a_story_store_failure_in_the_stage_is_tolerated_and_the_turn_goes_on() -> None:
     stories = _stories()
-    trip = (await stories.create([activation("a-1")], actor=StoryActor.OWNER)).story_id
+    trip = (
+        await stories.create([activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER)
+    ).story_id
     assert trip is not None
     stories = failing(stories, "link")
     harness = _linked(
@@ -520,7 +531,11 @@ async def test_recalls_story_is_recorded_and_joins_the_candidates_after_the_wind
 async def test_a_story_already_a_candidate_through_the_window_is_not_repeated() -> None:
     stories = _stories()
     both = (
-        await stories.create([activation("a-new"), activation("a-old")], actor=StoryActor.OWNER)
+        await stories.create(
+            [activation("a-new"), activation("a-old")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
+        )
     ).story_id
     assert both is not None
     model = FakeModelProvider(STATED_PROPOSAL)

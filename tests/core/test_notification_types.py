@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
     minute_of_day,
 )
 
@@ -56,6 +57,7 @@ def _record(**overrides: object) -> HeldNotification:
     """One held record, likewise."""
     fields: dict[str, object] = {
         "id": "ntf-1",
+        "home": RecordHome.owners(),
         "candidate": _candidate(),
         "kind": NotificationDispositionKind.HOLD,
         "reason": NotificationCondition.PERISHABLE,

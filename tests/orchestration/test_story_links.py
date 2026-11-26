@@ -27,6 +27,7 @@ from story_support import (
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
+    RecordHome,
     StageOutcome,
     StoryActor,
     StoryChange,
@@ -56,7 +57,7 @@ def _stories() -> FakeStoryStore:
 
 
 async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
-    outcome = await stories.create(members, actor=StoryActor.OWNER)
+    outcome = await stories.create(members, home=RecordHome.owners(), actor=StoryActor.OWNER)
     assert outcome.story_id is not None
     return outcome.story_id
 
@@ -567,7 +568,9 @@ async def test_a_story_link_links_the_activation_with_the_understanding_actor() 
     stories = _stories()
     trip = await _story(stories, activation("a-1"))
 
-    decision = await StoryLinksStage(stories=stories).record([story(trip)], activation_id="now")
+    decision = await StoryLinksStage(stories=stories).record(
+        [story(trip)], home=RecordHome.owners(), activation_id="now"
+    )
 
     assert (decision.outcome, decision.linked, decision.started) == (
         StageOutcome.DONE,
@@ -593,7 +596,9 @@ async def test_a_link_to_a_merged_story_follows_it_to_where_it_went() -> None:
     await stories.merge(absorbed, middle, actor=StoryActor.OWNER)
     await stories.merge(middle, last, actor=StoryActor.OWNER)
 
-    decision = await StoryLinksStage(stories=stories).record([story(absorbed)], activation_id="now")
+    decision = await StoryLinksStage(stories=stories).record(
+        [story(absorbed)], home=RecordHome.owners(), activation_id="now"
+    )
 
     assert decision.linked == (last,)
     assert (StoryChange.ADDED, "now") in await _lines_of(stories, last)
@@ -605,7 +610,9 @@ async def test_every_merge_is_followed_however_long_the_chain() -> None:
     for absorbed, into in itertools.pairwise(chain):
         await stories.merge(absorbed, into, actor=StoryActor.OWNER)
 
-    decision = await StoryLinksStage(stories=stories).record([story(chain[0])], activation_id="now")
+    decision = await StoryLinksStage(stories=stories).record(
+        [story(chain[0])], home=RecordHome.owners(), activation_id="now"
+    )
 
     assert (decision.linked, decision.refused) == ((chain[-1],), ())
 
@@ -627,8 +634,8 @@ async def test_two_activations_linking_one_unstoried_episode_start_one_story() -
     stage = StoryLinksStage(stories=stories)
 
     first, second = await asyncio.gather(
-        stage.record([activation("e-1")], activation_id="a"),
-        stage.record([activation("e-1")], activation_id="b"),
+        stage.record([activation("e-1")], home=RecordHome.owners(), activation_id="a"),
+        stage.record([activation("e-1")], home=RecordHome.owners(), activation_id="b"),
     )
 
     assert first.started is not None
@@ -646,7 +653,7 @@ async def test_an_earlier_episode_s_stories_take_the_activation() -> None:
     second = await _story(stories, activation("a-1"), activation("a-2"))
 
     decision = await StoryLinksStage(stories=stories).record(
-        [activation("a-1"), story(first)], activation_id="now"
+        [activation("a-1"), story(first)], home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.linked == (second, first)
@@ -658,7 +665,9 @@ async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation(
     trip = await _story(stories, activation("a-9"))
 
     decision = await StoryLinksStage(stories=stories).record(
-        [activation("a-1"), story(trip), activation("a-2")], activation_id="now"
+        [activation("a-1"), story(trip), activation("a-2")],
+        home=RecordHome.owners(),
+        activation_id="now",
     )
 
     assert decision.started is not None
@@ -673,10 +682,29 @@ async def test_earlier_episodes_in_no_story_start_one_story_with_the_activation(
     assert {entry.actor for entry in view.entries} == {StoryActor.UNDERSTANDING}
 
 
+@pytest.mark.parametrize(
+    "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "no-one's-work"]
+)
+async def test_a_story_the_run_starts_takes_the_home_it_is_handed(home: RecordHome) -> None:
+    """ADR-0383 §4:1, ADR-0386 §2:2: the home whom the activation's work is for gives."""
+    stories = _stories()
+
+    decision = await StoryLinksStage(stories=stories).record(
+        [activation("a-1")], home=home, activation_id="now"
+    )
+
+    assert decision.started is not None
+    header = await stories.header(decision.started)
+    assert header is not None
+    assert header.home == home
+
+
 async def test_no_links_write_nothing() -> None:
     stories = _stories()
 
-    decision = await StoryLinksStage(stories=stories).record((), activation_id="now")
+    decision = await StoryLinksStage(stories=stories).record(
+        (), home=RecordHome.owners(), activation_id="now"
+    )
 
     assert (decision.outcome, decision.linked, decision.started) == (StageOutcome.DONE, (), None)
     assert (await stories.stories()).stories == ()
@@ -687,7 +715,7 @@ async def test_a_refused_link_is_recorded_and_the_rest_goes_on() -> None:
     trip = await _story(stories, activation("a-1"))
 
     decision = await StoryLinksStage(stories=stories).record(
-        [story("story:missing"), story(trip)], activation_id="now"
+        [story("story:missing"), story(trip)], home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.outcome is StageOutcome.DONE
@@ -697,12 +725,14 @@ async def test_a_refused_link_is_recorded_and_the_rest_goes_on() -> None:
 
 async def test_a_story_store_error_is_a_failed_decision_carrying_it() -> None:
     stories = _stories()
-    created = await stories.create([activation("a-1")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     stories = failing(stories, "link")
 
     decision = await StoryLinksStage(stories=stories).record(
-        [story(created.story_id)], activation_id="now"
+        [story(created.story_id)], home=RecordHome.owners(), activation_id="now"
     )
 
     assert decision.outcome is StageOutcome.FAILED

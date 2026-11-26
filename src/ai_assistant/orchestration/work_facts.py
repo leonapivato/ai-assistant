@@ -178,6 +178,7 @@ __all__ = [
     "record_started",
     "sender_of",
     "senders_of",
+    "source_home",
     "started",
     "tap_runs_for",
     "unread",
@@ -635,6 +636,20 @@ def work_home(facts: WorkFacts | None) -> RecordHome:
         The home.
     """
     return RecordHome.of_work(WorkFor.no_one() if facts is None else facts.for_whom)
+
+
+def source_home() -> RecordHome:
+    """The home of a record brought in outside any work, from its source (ADR-0383 §4:3).
+
+    A notification a producer makes from a source takes the home of whoever its
+    connection, account or source belongs to, read by the one rule the code reads ADR-0368
+    §3:3's "whoever the connection it came by belongs to" by (:func:`_its_owner`): in this
+    milestone, the owner's domain.
+
+    Returns:
+        The home.
+    """
+    return RecordHome.of_work(_its_owner())
 
 
 def authority_persons(facts: WorkFacts | None) -> tuple[str, ...]:

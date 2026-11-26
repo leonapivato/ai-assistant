@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     PersonModelWriteKind,
     ProfileField,
     QuietWindow,
+    RecordHome,
 )
 from ai_assistant.memory import DefaultNotificationPolicy
 from ai_assistant.memory.person_model_store import SqlitePersonModelStore
@@ -340,6 +341,7 @@ async def test_a_held_record_is_reconsidered_in_the_owners_quiet_window(
                 confidence=0.5,
                 sensitivity=DataTier.PERSONAL,
             ),
+            home=RecordHome.owners(),
             policy=DefaultNotificationPolicy(),
         )
         assert held.kind is NotificationDispositionKind.HOLD, "every class holds by default"

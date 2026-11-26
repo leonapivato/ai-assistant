@@ -105,6 +105,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     Reversibility,
     RiskLevel,
     RoundResponse,
@@ -128,6 +129,7 @@ from ai_assistant.core.types import (
     parties_are_outside,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
+from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
@@ -2406,7 +2408,9 @@ async def _story_harness(
     await memory.add(_past_episode("activation:past"))
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None
@@ -2509,6 +2513,7 @@ async def test_a_marked_story_summary_reaches_the_first_ruling() -> None:
     trip = (
         await stories.create(
             [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
     ).story_id
@@ -2549,7 +2554,9 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None
@@ -2558,6 +2565,7 @@ async def test_an_outside_episode_of_an_inherited_story_is_outside_content_read(
             StoryMember(kind=StoryMemberKind.ACTIVATION, id="report"),
             StoryMember(kind=StoryMemberKind.STORY, id=trip),
         ],
+        home=RecordHome.owners(),
         actor=StoryActor.OWNER,
     )
     path = _phases(completer, stories=stories)(harness)
@@ -2595,6 +2603,7 @@ async def test_a_later_round_is_handed_the_story_views_its_work_was_first_shown(
     trip = (
         await stories.create(
             [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
     ).story_id
@@ -2719,6 +2728,7 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
     trip = (
         await stories.create(
             [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
     ).story_id
@@ -3018,7 +3028,9 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None
@@ -3044,7 +3056,11 @@ async def test_a_note_is_marked_where_the_activation_read_outside_content(
 
 
 async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_writes() -> None:
-    """ADR-0307 §6:5: planning can still write notes and change stories on such a pass."""
+    """ADR-0307 §6:5: planning can still write notes and change stories on such a pass.
+
+    The stages run inside a work of the owner's, as the engine runs every pass, so the
+    story the start mints takes that work's home (ADR-0383 §4:1).
+    """
     completer = FakeToolCallingCompleter.scripted(_STARTED)
     harness = _harness(completer)
     await harness.memory.add(_episode())
@@ -3060,12 +3076,23 @@ async def test_on_a_pass_that_may_not_show_the_owners_records_planning_still_wri
     given = _Given(deadline=asyncio.get_running_loop().time() + _SETTLE, phases=working)
     stages = {one.name: one for one in path.stages()}
 
-    for stage in (ControllerStage.PLANNING, ControllerStage.AUTHORIZING, ControllerStage.ACTING):
-        assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    token = CURRENT_ACTIVATION.set(ActivationScope(_admitted()))
+    try:
+        for stage in (
+            ControllerStage.PLANNING,
+            ControllerStage.AUTHORIZING,
+            ControllerStage.ACTING,
+        ):
+            assert (await stages[stage].run(given)).outcome is StageOutcome.DONE
+    finally:
+        CURRENT_ACTIVATION.reset(token)
 
     offered = {one.name for one in completer.calls[0].tools}
     assert set(STORY_CALL_CAPABILITIES) <= offered
     story = await _the_story(stories, _ACTIVATION)
+    header = await stories.header(story)
+    assert header is not None
+    assert header.home == RecordHome.owners()
     page = await stories.notes(story)
     assert page is not None
     assert [one.text for one in page.notes] == ["A camping trip to Riverside."]
@@ -3121,7 +3148,10 @@ async def _labelled_stories(
     """Two stories holding this activation, a note on each, and their recorded labels."""
     own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
     other = StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-other")
-    made = [await stories.create([own, other], actor=StoryActor.OWNER) for _ in range(2)]
+    made = [
+        await stories.create([own, other], home=RecordHome.owners(), actor=StoryActor.OWNER)
+        for _ in range(2)
+    ]
     trip, dog = (str(one.story_id) for one in made)
     notes = [
         await stories.append_note(story, text, author=StoryNoteAuthor.OWNER)
@@ -3233,7 +3263,9 @@ async def test_the_story_standing_command_lists_what_was_done() -> None:
     await harness.memory.add(_past_episode("activation:past"))
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None
@@ -3499,7 +3531,9 @@ async def _page_read(
     await harness.memory.add(_past_episode("activation:past"))
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None

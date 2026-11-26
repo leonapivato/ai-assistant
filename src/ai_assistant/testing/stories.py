@@ -11,7 +11,9 @@ summary a later write replaced, kept and read by its version (ADR-0347 §2), and
 is pending on it — and the decisions on flags, written as ``decided`` lines
 with the change they record (ADR-0302 §§2-4), ``left`` or ``not_applied`` where none
 changed (ADR-0303 §8), and a summary write refused over what its story does not hold
-(ADR-0302 §7).
+(ADR-0302 §7). Each story carries its home (ADR-0386 §2): ``create`` writes the one it
+is handed, a split's new story takes its source's, and a home no write may carry is a
+``ValueError`` before any check or write, as the durable store refuses it (§6:2).
 
 **Atomic by construction.** Every write computes its refusal and applies its changes
 with no ``await`` in between, so on one event loop a write is never interleaved with
@@ -43,6 +45,7 @@ from ai_assistant.core.types import (
     STORY_ID_PREFIX,
     STORY_SUMMARY_CAP_CHARS,
     Identifier,
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -74,6 +77,7 @@ from ai_assistant.core.types import (
     check_story_as_of,
     check_story_page,
     check_story_version,
+    home_may_be_written,
     story_members,
     story_note_ids,
 )
@@ -108,6 +112,18 @@ def _checked_write(actor: object, trigger: object) -> tuple[StoryActor, str | No
 
 def _unique[T](items: Sequence[T]) -> list[T]:
     return list(dict.fromkeys(items))
+
+
+def _checked_home(home: object) -> RecordHome:
+    """Refuse a home that is no ``RecordHome``, or one no write may carry (ADR-0386 §6:2)."""
+    if not isinstance(home, RecordHome):
+        msg = f"a story's home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
 
 
 def _answers(answers: object) -> StoryFlagName | None:
@@ -237,6 +253,7 @@ class _Story:
 
     created_seq: int
     created_at: datetime
+    home: RecordHome
     merged_into: str | None = None
     entries: dict[StoryMember, StoryEntry] = field(default_factory=dict)
     pending: dict[str, int] = field(default_factory=dict)
@@ -341,7 +358,10 @@ class FakeStoryStore:
     @staticmethod
     def _header_of(story_id: str, story: _Story) -> StoryHeader:
         return StoryHeader(
-            story_id=story_id, created_at=story.created_at, merged_into=story.merged_into
+            story_id=story_id,
+            created_at=story.created_at,
+            merged_into=story.merged_into,
+            home=story.home,
         )
 
     @staticmethod
@@ -524,7 +544,7 @@ class FakeStoryStore:
             if (held := state.notes.get(note_id)) is not None and held.story_id == story_id
         )
 
-    def _mint(self, state: _State, stamp: _Stamp) -> str:
+    def _mint(self, state: _State, stamp: _Stamp, home: RecordHome) -> str:
         suffix = self._new_id()
         if type(suffix) is not str or not suffix.strip():
             msg = f"the story id source returned an unusable id: {suffix!r}"
@@ -534,7 +554,7 @@ class FakeStoryStore:
             msg = f"the story id source minted {story_id!r}, which the store already holds"
             raise StoryStoreError(msg)
         sequence = self._append(state, story_id, StoryChange.CREATED, stamp)
-        state.stories[story_id] = _Story(created_seq=sequence, created_at=stamp.at)
+        state.stories[story_id] = _Story(created_seq=sequence, created_at=stamp.at, home=home)
         return story_id
 
     # --- writes --------------------------------------------------------------
@@ -543,11 +563,13 @@ class FakeStoryStore:
         self,
         members: Sequence[StoryMember],
         *,
+        home: RecordHome,
         actor: StoryActor,
         trigger: Identifier | None = None,
         answers: StoryFlagName | None = None,
     ) -> StoryOutcome:
-        """Mint a story holding ``members`` (ADR-0289 §3, ADR-0302 §4)."""
+        """Mint a story holding ``members``, in ``home`` (ADR-0289 §3, ADR-0386 §2:2)."""
+        checked_home = _checked_home(home)
         named = story_members(members)
         checked_actor, checked_trigger = _checked_write(actor, trigger)
         flag = _answers(answers)
@@ -560,7 +582,7 @@ class FakeStoryStore:
         if flag is not None and (refused := self._flag_refusal(state, flag)):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
-        story_id = self._mint(state, stamp)
+        story_id = self._mint(state, stamp, checked_home)
         unique = _unique(named)
         for member in unique:
             self._add(state, story_id, member, stamp)
@@ -754,7 +776,8 @@ class FakeStoryStore:
         if flag is not None and (refused := self._flag_refusal(state, flag)):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
-        split_off = self._mint(state, stamp)
+        # The story a split mints takes the home of the story it is split from (§2:3).
+        split_off = self._mint(state, stamp, state.stories[source].home)
         self._append(state, source, StoryChange.SPLIT_OFF, stamp, other=split_off)
         self._append(state, split_off, StoryChange.SPLIT_OFF, stamp, other=source)
         for member in moved:

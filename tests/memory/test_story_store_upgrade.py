@@ -14,7 +14,9 @@ Beside it, ``stories-before-adr-0347.json`` is what that release's
 The head opens a copy and must upgrade it in place: never refuse it (ADR-0326 §5:1),
 drop nothing (§4:4), read back every record as that release did, and keep each story's
 current summary as the text of the version that wrote it, no earlier version gaining
-any (ADR-0347 §5:1).
+any (ADR-0347 §5:1). The head reads back one field that release did not: each story's
+home, which the upgrade through ADR-0383 §5:1 writes as the owner's
+(``test_story_store_upgrade_home.py`` holds that upgrade on its own file).
 """
 
 from __future__ import annotations
@@ -28,7 +30,12 @@ from typing import Any
 
 import pytest
 
-from ai_assistant.core.types import MAX_STORY_PAGE, StorySummaryDraft, StorySummaryLine
+from ai_assistant.core.types import (
+    MAX_STORY_PAGE,
+    RecordHome,
+    StorySummaryDraft,
+    StorySummaryLine,
+)
 from ai_assistant.memory import SqliteStoryStore
 
 pytestmark = pytest.mark.integration
@@ -56,6 +63,22 @@ def _label(path: Path) -> int:
     with sqlite3.connect(path) as conn:
         (version,) = conn.execute("PRAGMA user_version").fetchone()
     return int(version)
+
+
+def _homeless(value: Any) -> Any:
+    """``value`` with each story header's home taken out, and every one held to be the owner's.
+
+    The previous release's read-back has no home on any header: the head's adds it
+    (ADR-0383 §5:1), and every other byte must read back the same.
+    """
+    if isinstance(value, dict):
+        if {"story_id", "created_at", "merged_into"} <= value.keys():
+            assert value.get("home") == RecordHome.owners().model_dump(mode="json"), value
+            value = {key: one for key, one in value.items() if key != "home"}
+        return {key: _homeless(one) for key, one in value.items()}
+    if isinstance(value, list):
+        return [_homeless(one) for one in value]
+    return value
 
 
 def _previous() -> dict[str, Any]:
@@ -97,7 +120,7 @@ async def test_every_record_the_previous_release_read_back_reads_back_the_same(
                 head[f"{name}/{story}"] = value.model_dump(mode="json")
     finally:
         store.close()
-    assert head == _previous()
+    assert _homeless(head) == _previous()
 
 
 async def test_each_current_summary_is_kept_as_its_versions_text_and_no_earlier_one_gains_any(
@@ -130,7 +153,7 @@ async def test_each_current_summary_is_kept_as_its_versions_text_and_no_earlier_
         assert await store.position() == previous[f"summary/{_TRIP}"]["as_of"] == 17
     finally:
         store.close()
-    assert _label(path) == 6
+    assert _label(path) == 7
     with sqlite3.connect(path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     assert "pages" not in tables

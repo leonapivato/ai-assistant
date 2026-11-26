@@ -2879,10 +2879,20 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     required ``RecordHome`` carrying the closed ``RecordHomeKind`` (§2:2, §5:4), on
 #:     every ``MemoryRecord`` a frame carries, the wire-carried episode included. A
 #:     peer at 136 refuses a ``Memory`` carrying it as extra and sends records without
-#:     it, which this version refuses (ADR-0124 §9:2). The homes the milestone's later
-#:     lanes put on other carried types ride this same advance. The method set does not
-#:     move: no ``Protocol`` gains a member.
-PROTOCOL_VERSION: Final[int] = 137
+#:     it, which this version refuses (ADR-0124 §9:2). A later lane that puts a home on
+#:     another carried type advances the version again, by ADR-0124 §9:2 (138). The
+#:     method set does not move: no ``Protocol`` gains a member.
+#: 138: ADR-0124 §9:2 advances the version in the change that adds ADR-0383 §2's home to
+#:     two more types the wire carries (ADR-0386 §2:1, §3:1; ADR-0386 §1:3 leaves the
+#:     version to §9:2, and ADR-0383 §13's "advances once" is no Normative clause):
+#:     ``StoryHeader`` gains ``home``, on every header ``story``, ``story_log``,
+#:     ``stories`` and ``activation_stories`` return, and ``HeldNotification`` gains it,
+#:     on every record ``notifications`` returns, each a required ``RecordHome``
+#:     (ADR-0383 §5:4). A peer at 137 refuses either carrying it as extra and sends
+#:     them without it, which this version refuses. The method set does not move:
+#:     ``StoryStore.create`` and ``NotificationStore.admit`` gain an argument, and
+#:     neither is on the wire.
+PROTOCOL_VERSION: Final[int] = 138
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

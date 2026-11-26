@@ -762,9 +762,11 @@ async def test_a_call_not_safe_to_repeat_takes_its_stories_activations_once() ->
     hub = _Hub()
     member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)
     other = StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-0")
-    await hub.stories.create([other, member], actor=StoryActor.OWNER)
+    await hub.stories.create([other, member], home=RecordHome.owners(), actor=StoryActor.OWNER)
     await hub.stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="unrelated")], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="unrelated")],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
 
     decided = await hub.authorize(
@@ -779,7 +781,9 @@ async def test_a_call_not_safe_to_repeat_takes_its_stories_activations_once() ->
 async def test_no_story_is_read_where_every_allowed_call_is_safe_to_repeat() -> None:
     hub = _Hub()
     await hub.stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=_ACTIVATION)],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
 
     decided = await hub.authorize(_round(_call("c1", "lookup", q="x")))

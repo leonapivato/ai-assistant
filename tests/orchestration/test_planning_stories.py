@@ -15,6 +15,7 @@ from test_planning import _AT, _episode, _inputs, _recorded_trigger, _sent, _sta
 from ai_assistant.core.types import (
     LabelKind,
     PlanningLabel,
+    RecordHome,
     RoundResponse,
     StoryEffectState,
     StoryHeader,
@@ -54,7 +55,10 @@ def _lines(*texts: str) -> tuple[StorySummaryLine, ...]:
 
 def _standing(story_id: str, **fields: Any) -> StoryStanding:
     return StoryStanding(
-        story=StoryHeader(story_id=story_id, created_at=_TIDIED, merged_into=None), **fields
+        story=StoryHeader(
+            home=RecordHome.owners(), story_id=story_id, created_at=_TIDIED, merged_into=None
+        ),
+        **fields,
     )
 
 
@@ -339,7 +343,12 @@ async def test_nothing_done_is_said_and_a_merged_story_names_where_it_went() -> 
     merged = _story(
         story_id="story:old",
         standing=StoryStanding(
-            story=StoryHeader(story_id="story:old", created_at=_TIDIED, merged_into="story:new")
+            story=StoryHeader(
+                home=RecordHome.owners(),
+                story_id="story:old",
+                created_at=_TIDIED,
+                merged_into="story:new",
+            )
         ),
     )
 

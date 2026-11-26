@@ -1,0 +1,214 @@
+{
+ "export": [
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "dentist",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": "2026-12-26T09:00:00Z",
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "calendar",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About dentist."
+   },
+   "dismissed_at": null,
+   "dropped_at": null,
+   "failed": [],
+   "id": "note-1",
+   "kind": "interrupt",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "parcel",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": null,
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "delivery",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About parcel."
+   },
+   "dismissed_at": null,
+   "dropped_at": null,
+   "failed": [
+    "perishable",
+    "reach_interrupt"
+   ],
+   "id": "note-2",
+   "kind": "hold",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "bill",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": "2026-12-26T09:00:00Z",
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "finance",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About bill."
+   },
+   "dismissed_at": "2026-11-26T09:00:00Z",
+   "dropped_at": null,
+   "failed": [
+    "reach_interrupt"
+   ],
+   "id": "note-3",
+   "kind": "hold",
+   "reason": "reach_interrupt",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  }
+ ],
+ "held": [
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "dentist",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": "2026-12-26T09:00:00Z",
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "calendar",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About dentist."
+   },
+   "dismissed_at": null,
+   "dropped_at": null,
+   "failed": [],
+   "id": "note-1",
+   "kind": "interrupt",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "parcel",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": null,
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "delivery",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About parcel."
+   },
+   "dismissed_at": null,
+   "dropped_at": null,
+   "failed": [
+    "perishable",
+    "reach_interrupt"
+   ],
+   "id": "note-2",
+   "kind": "hold",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "admitted_at": "2026-11-26T09:00:00Z",
+   "candidate": {
+    "candidate_key": "bill",
+    "confidence": 0.8,
+    "detail": null,
+    "expires_at": "2026-12-26T09:00:00Z",
+    "noticed_at": "2026-11-26T08:55:00Z",
+    "notification_class": "finance",
+    "producer": "upcoming",
+    "references": [],
+    "sensitivity": "personal",
+    "summary": "About bill."
+   },
+   "dismissed_at": "2026-11-26T09:00:00Z",
+   "dropped_at": null,
+   "failed": [
+    "reach_interrupt"
+   ],
+   "id": "note-3",
+   "kind": "hold",
+   "reason": "reach_interrupt",
+   "reconsider_at": null,
+   "retention": "P7D",
+   "ruled_at": "2026-11-26T09:00:00Z"
+  }
+ ],
+ "preferences": {
+  "budget_window": "P1D",
+  "interruption_budget": 3,
+  "quiet_windows": [],
+  "reaches": [
+   {
+    "notification_class": "calendar",
+    "reach": "interrupt"
+   }
+  ]
+ },
+ "rulings": [
+  {
+   "failed": [],
+   "kind": "interrupt",
+   "notification_class": "calendar",
+   "notification_id": "note-1",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "failed": [
+    "perishable",
+    "reach_interrupt"
+   ],
+   "kind": "hold",
+   "notification_class": "delivery",
+   "notification_id": "note-2",
+   "reason": "perishable",
+   "reconsider_at": null,
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "failed": [
+    "reach_interrupt"
+   ],
+   "kind": "hold",
+   "notification_class": "finance",
+   "notification_id": "note-3",
+   "reason": "reach_interrupt",
+   "reconsider_at": null,
+   "ruled_at": "2026-11-26T09:00:00Z"
+  },
+  {
+   "failed": [],
+   "kind": "drop",
+   "notification_class": "calendar",
+   "notification_id": null,
+   "reason": "duplicate",
+   "reconsider_at": null,
+   "ruled_at": "2026-11-26T09:00:00Z"
+  }
+ ]
+}

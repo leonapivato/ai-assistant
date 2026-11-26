@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     MemorySource,
     Message,
+    RecordHome,
     ReplyFailure,
     Role,
     StoryActor,
@@ -128,7 +129,9 @@ def _shown(model: FakeModelProvider) -> dict[str, Any]:
 
 async def _story(stories: FakeStoryStore, *activations: str) -> str:
     created = await stories.create(
-        [activation(a) for a in activations], actor=StoryActor.UNDERSTANDING
+        [activation(a) for a in activations],
+        home=RecordHome.owners(),
+        actor=StoryActor.UNDERSTANDING,
     )
     assert created.story_id is not None
     return created.story_id

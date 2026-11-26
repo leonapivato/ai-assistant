@@ -35,6 +35,13 @@ them and the scaffolding they need
 (:mod:`ai_assistant.testing.cancellation`) is a second subject the triad check
 would have to be taught about. Issue filed rather than smuggled in.
 
+**ADR-0386 §3 adds a record's home** (ADR-0383 §§3-4): the store writes the home its
+admission is handed beside the candidate, every read gives it back and no later write
+changes it, and a home ``home_may_be_written`` does not allow is a ``ValueError`` before
+the atomic act, so the policy is not asked and no record and no unit of budget is
+written (ADR-0386 §6:2). The writer supplies the home a producer's notification takes,
+the owner's domain in this milestone (ADR-0383 §4:3).
+
 Named ``*_contract`` (not ``test_*``) so pytest collects these only via a
 ``Test``-prefixed subclass, never the abstract bases directly.
 """
@@ -59,6 +66,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
 )
 
 if TYPE_CHECKING:
@@ -818,13 +826,112 @@ class NotificationStoreContract(ABC):
         assert isinstance(store.cap, int)
         assert 0 < store.cap < 2**63
 
+    # --- a record's home (ADR-0386 §3, ADR-0383 §§3-4) ----------------------
+
+    @pytest.mark.parametrize(
+        "home", [RecordHome.owners(), RecordHome.shared()], ids=["owners", "shared"]
+    )
+    async def test_an_admission_writes_the_home_it_is_handed_and_every_read_gives_it(
+        self, factory: StoreFactory, policy: NotificationPolicy, home: RecordHome
+    ) -> None:
+        """ADR-0386 §3:1, §3:2: the record carries it; the candidate carries none."""
+        clock = MutableClock()
+        store = factory(now=clock)
+        await store.set_preferences(
+            NotificationPreferences(
+                quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
+                reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            )
+        )
+        ruling = await store.admit(
+            candidate(expires_at=NOW + timedelta(days=1)), home=home, policy=policy
+        )
+        assert ruling.notification_id is not None
+        clock.advance(timedelta(hours=1))
+
+        record = await store.get(ruling.notification_id)
+        assert record is not None
+        assert record.home == home
+        assert await store.held() == [record]
+        assert await store.export() == [record]
+        assert await store.due() == [record]
+
+    async def test_no_later_write_changes_a_records_home(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """ADR-0383 §4:6: a reconsideration and a dismissal leave it as it was."""
+        clock = MutableClock()
+        store = factory(now=clock)
+        await store.set_preferences(
+            NotificationPreferences(
+                quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
+                reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            )
+        )
+        held = await store.admit(
+            candidate(expires_at=NOW + timedelta(days=1)), home=RecordHome.shared(), policy=policy
+        )
+        assert held.notification_id is not None
+        clock.advance(timedelta(hours=1))
+        again = await store.reconsider(held.notification_id, policy=policy)
+        assert again is not None
+        assert again.kind is NotificationDispositionKind.INTERRUPT
+        reconsidered = await store.get(held.notification_id)
+        assert reconsidered is not None
+        assert reconsidered.home == RecordHome.shared()
+
+        assert await store.dismiss(held.notification_id)
+        dismissed = await store.get(held.notification_id)
+        assert dismissed is not None
+        assert dismissed.dismissed_at is not None
+        assert dismissed.home == RecordHome.shared()
+
+    @pytest.mark.parametrize(
+        "home",
+        [RecordHome.person("person:sam"), RecordHome.group("group:house")],
+        ids=["another-person", "a-group"],
+    )
+    async def test_a_home_no_write_may_carry_is_refused_before_the_atomic_act(
+        self, factory: StoreFactory, policy: NotificationPolicy, home: RecordHome
+    ) -> None:
+        """ADR-0383 §2:3, §4:7, ADR-0386 §6:2: no record, and no unit of budget.
+
+        Not a ``DROP``, which names a §5 condition, and not a store fault: the policy
+        is never asked. A budget of one interruption shows no unit was spent, since the
+        next admission the store may write still interrupts.
+        """
+        store = factory(now=MutableClock())
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+                interruption_budget=1,
+            )
+        )
+        asked: list[NotificationCandidate] = []
+
+        class _Asked:
+            async def rule(self, offered: NotificationCandidate, **facts: object) -> object:
+                asked.append(offered)
+                # A spy forwarding whatever the store hands it; the facts' types are §4's.
+                return await policy.rule(offered, **facts)  # type: ignore[arg-type]
+
+        perishing = candidate(key="k1", expires_at=NOW + timedelta(days=1))
+        with pytest.raises(ValueError, match="home"):
+            # The spy takes the facts as keywords, not the Protocol's exact signature.
+            await store.admit(perishing, home=home, policy=_Asked())  # type: ignore[arg-type]
+
+        assert asked == []
+        assert await store.export() == []
+        spent = await store.admit(perishing, home=RecordHome.owners(), policy=policy)
+        assert spent.kind is NotificationDispositionKind.INTERRUPT
+
     # --- §8: what writes a record, and what does not ----------------------
 
     async def test_a_hold_writes_a_record_and_names_it(
         self, store: NotificationStore, policy: NotificationPolicy
     ) -> None:
         """§8: ``HOLD`` and ``INTERRUPT`` write durable records."""
-        ruling = await store.admit(candidate(), policy=policy)
+        ruling = await store.admit(candidate(), home=RecordHome.owners(), policy=policy)
 
         assert ruling.kind is NotificationDispositionKind.HOLD
         assert ruling.notification_id is not None
@@ -842,9 +949,9 @@ class NotificationStoreContract(ABC):
         and marked it a duplicate would fill its own cap with the repetition it
         exists to absorb.
         """
-        first = await store.admit(candidate(key="k1"), policy=policy)
+        first = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
-        second = await store.admit(candidate(key="k1"), policy=policy)
+        second = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
         assert second.kind is NotificationDispositionKind.DROP
         assert second.reason is NotificationCondition.DUPLICATE
@@ -871,13 +978,17 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock)
         expiry = NOW + timedelta(hours=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
         assert await store.dismiss(first.notification_id) is True
 
         clock.advance(timedelta(minutes=30))
         second = await store.admit(
-            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at),
+            home=RecordHome.owners(),
+            policy=policy,
         )
 
         assert second.kind is NotificationDispositionKind.DROP
@@ -900,18 +1011,19 @@ class NotificationStoreContract(ABC):
         store = factory(now=clock)
         expiry = NOW + timedelta(hours=1)
         perishing = candidate(key="k1", expires_at=expiry)
-        first = await store.admit(perishing, policy=policy)
+        first = await store.admit(perishing, home=RecordHome.owners(), policy=policy)
         assert first.notification_id is not None
         assert await store.dismiss(first.notification_id) is True
 
         clock.at = expiry
-        stale = await store.admit(perishing, policy=policy)
+        stale = await store.admit(perishing, home=RecordHome.owners(), policy=policy)
 
         assert stale.kind is NotificationDispositionKind.DROP
         assert stale.reason is NotificationCondition.EXPIRED
 
         afresh = await store.admit(
             candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
 
@@ -934,11 +1046,11 @@ class NotificationStoreContract(ABC):
         ADR-0130 §5 making a declared expiry the first condition of ``INTERRUPT``,
         so it cannot produce #1372's failure either.
         """
-        first = await store.admit(candidate(key="k1"), policy=policy)
+        first = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         assert first.notification_id is not None
         await store.dismiss(first.notification_id)
 
-        second = await store.admit(candidate(key="k1"), policy=policy)
+        second = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
         assert second.kind is not NotificationDispositionKind.DROP
         assert second.notification_id != first.notification_id
@@ -959,7 +1071,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock)
         expiry = NOW + timedelta(days=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
         await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
         dropped = await store.reconsider(first.notification_id, policy=policy)
@@ -970,7 +1084,9 @@ class NotificationStoreContract(ABC):
         clock.advance(timedelta(minutes=5))
         await store.set_preferences(reaching(CLASS, NotificationReach.INTERRUPT))
         again = await store.admit(
-            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at),
+            home=RecordHome.owners(),
+            policy=policy,
         )
 
         assert again.kind is not NotificationDispositionKind.DROP
@@ -1000,7 +1116,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock)
         expiry = NOW + timedelta(days=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
         clock.advance(timedelta(hours=1))
         await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
@@ -1011,7 +1129,9 @@ class NotificationStoreContract(ABC):
         clock.at = NOW + timedelta(minutes=30)  # before the drop this store holds
         await store.set_preferences(reaching(CLASS, NotificationReach.HOLD))
         again = await store.admit(
-            candidate(key="k1", expires_at=expiry, noticed_at=clock.at), policy=policy
+            candidate(key="k1", expires_at=expiry, noticed_at=clock.at),
+            home=RecordHome.owners(),
+            policy=policy,
         )
 
         assert again.kind is NotificationDispositionKind.DROP
@@ -1032,7 +1152,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock, retention=None)
         expiry = NOW + timedelta(hours=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
 
         clock.at = expiry
@@ -1040,6 +1162,7 @@ class NotificationStoreContract(ABC):
 
         afresh = await store.admit(
             candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
         assert afresh.kind is not NotificationDispositionKind.DROP
@@ -1049,6 +1172,7 @@ class NotificationStoreContract(ABC):
         clock.advance(timedelta(days=3650))
         later = await store.admit(
             candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
 
@@ -1074,13 +1198,17 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock, retention=None)
         first_expiry = NOW + timedelta(hours=1)
-        first = await store.admit(candidate(key="k1", expires_at=first_expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=first_expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
 
         clock.at = first_expiry
         second_expiry = clock.at + timedelta(hours=1)
         second = await store.admit(
-            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at), policy=policy
+            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert second.kind is not NotificationDispositionKind.DROP
         assert second.notification_id is not None
@@ -1088,7 +1216,9 @@ class NotificationStoreContract(ABC):
 
         clock.advance(timedelta(minutes=30))
         suppressed = await store.admit(
-            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at), policy=policy
+            candidate(key="k1", expires_at=second_expiry, noticed_at=clock.at),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert suppressed.kind is NotificationDispositionKind.DROP
         assert suppressed.reason is NotificationCondition.DUPLICATE
@@ -1096,6 +1226,7 @@ class NotificationStoreContract(ABC):
         clock.at = second_expiry
         third = await store.admit(
             candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
 
@@ -1114,11 +1245,14 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock)
         expiry = NOW + timedelta(hours=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         clock.advance(timedelta(hours=2))
 
         second = await store.admit(
             candidate(key="k1", expires_at=clock.at + timedelta(hours=1), noticed_at=clock.at),
+            home=RecordHome.owners(),
             policy=policy,
         )
 
@@ -1141,9 +1275,9 @@ class NotificationStoreContract(ABC):
         one unrelaxable.
         """
         store = factory(now=MutableClock(), cap=1)
-        admitted = await store.admit(candidate(key="k1"), policy=policy)
+        admitted = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
-        refused = await store.admit(candidate(key="k2"), policy=policy)
+        refused = await store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy)
 
         assert refused.kind is NotificationDispositionKind.DROP
         assert refused.reason is NotificationCondition.AT_CAP
@@ -1167,15 +1301,21 @@ class NotificationStoreContract(ABC):
         """
         store = factory(now=MutableClock(), cap=1)
         expiry = NOW + timedelta(hours=1)
-        first = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        first = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert first.notification_id is not None
         assert await store.dismiss(first.notification_id) is True
 
-        admitted = await store.admit(candidate(key="k2", expires_at=expiry), policy=policy)
+        admitted = await store.admit(
+            candidate(key="k2", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
 
         assert admitted.kind is not NotificationDispositionKind.DROP
 
-        still_shut = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        still_shut = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
 
         assert still_shut.kind is NotificationDispositionKind.DROP
         assert still_shut.reason is NotificationCondition.DUPLICATE
@@ -1200,7 +1340,9 @@ class NotificationStoreContract(ABC):
                 quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             )
         )
-        held = await store.admit(candidate(expires_at=NOW + timedelta(days=1)), policy=policy)
+        held = await store.admit(
+            candidate(expires_at=NOW + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+        )
         assert held.kind is NotificationDispositionKind.HOLD
         assert held.reason is NotificationCondition.QUIET_WINDOW
         assert held.notification_id is not None
@@ -1235,12 +1377,16 @@ class NotificationStoreContract(ABC):
             )
         )
         spent = await store.admit(
-            candidate(key="k1", expires_at=NOW + timedelta(days=1)), policy=policy
+            candidate(key="k1", expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert spent.kind is NotificationDispositionKind.INTERRUPT
 
         held = await store.admit(
-            candidate(key="k2", expires_at=NOW + timedelta(days=1)), policy=policy
+            candidate(key="k2", expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert held.kind is NotificationDispositionKind.HOLD
         assert held.reason is NotificationCondition.BUDGET
@@ -1270,7 +1416,9 @@ class NotificationStoreContract(ABC):
                 quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             )
         )
-        held = await store.admit(candidate(expires_at=NOW + timedelta(days=1)), policy=policy)
+        held = await store.admit(
+            candidate(expires_at=NOW + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+        )
         assert held.notification_id is not None
 
         assert await store.reconsider(held.notification_id, policy=policy) is None
@@ -1290,7 +1438,9 @@ class NotificationStoreContract(ABC):
         """
         clock = MutableClock()
         store = factory(now=clock)
-        held = await store.admit(candidate(expires_at=NOW + timedelta(days=1)), policy=policy)
+        held = await store.admit(
+            candidate(expires_at=NOW + timedelta(days=1)), home=RecordHome.owners(), policy=policy
+        )
         assert held.reason is NotificationCondition.REACH_INTERRUPT
         assert held.reconsider_at is None
         assert held.notification_id is not None
@@ -1327,6 +1477,7 @@ class NotificationStoreContract(ABC):
         await store.set_preferences(settings)
         spent = await store.admit(
             candidate(key="k0", noticed_at=opened, expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
             policy=policy,
         )
         assert spent.kind is NotificationDispositionKind.INTERRUPT
@@ -1334,6 +1485,7 @@ class NotificationStoreContract(ABC):
         clock.advance(timedelta(minutes=75))  # 12:15, inside the window
         held = await store.admit(
             candidate(key="k1", noticed_at=clock.at, expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
             policy=policy,
         )
         assert held.failed == (
@@ -1373,12 +1525,14 @@ class NotificationStoreContract(ABC):
         """
         clock = MutableClock()
         store = factory(now=clock)
-        no_expiry = await store.admit(candidate(key="k1"), policy=policy)
+        no_expiry = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         assert no_expiry.reason is NotificationCondition.PERISHABLE
         assert no_expiry.reconsider_at is None
         assert no_expiry.notification_id is not None
         elsewhere = await store.admit(
-            candidate(key="k2", notification_class=OTHER_CLASS), policy=policy
+            candidate(key="k2", notification_class=OTHER_CLASS),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert elsewhere.notification_id is not None
 
@@ -1409,7 +1563,7 @@ class NotificationStoreContract(ABC):
         store = factory(now=clock)
         await store.set_preferences(reaching(CLASS, NotificationReach.INTERRUPT))
         interrupted = await store.admit(
-            candidate(expires_at=NOW + timedelta(days=1)), policy=policy
+            candidate(expires_at=NOW + timedelta(days=1)), home=RecordHome.owners(), policy=policy
         )
         assert interrupted.kind is NotificationDispositionKind.INTERRUPT
         assert interrupted.notification_id is not None
@@ -1436,8 +1590,8 @@ class NotificationStoreContract(ABC):
         store = factory(now=MutableClock(), cap=1)
 
         rulings = await asyncio.gather(
-            store.admit(candidate(key="k1"), policy=policy),
-            store.admit(candidate(key="k2"), policy=policy),
+            store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy),
+            store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy),
         )
 
         kinds = [ruling.kind for ruling in rulings]
@@ -1464,8 +1618,12 @@ class NotificationStoreContract(ABC):
         expires = NOW + timedelta(days=1)
 
         rulings = await asyncio.gather(
-            store.admit(candidate(key="k1", expires_at=expires), policy=policy),
-            store.admit(candidate(key="k2", expires_at=expires), policy=policy),
+            store.admit(
+                candidate(key="k1", expires_at=expires), home=RecordHome.owners(), policy=policy
+            ),
+            store.admit(
+                candidate(key="k2", expires_at=expires), home=RecordHome.owners(), policy=policy
+            ),
         )
 
         kinds = [ruling.kind for ruling in rulings]
@@ -1484,8 +1642,8 @@ class NotificationStoreContract(ABC):
         store = factory(now=MutableClock())
 
         rulings = await asyncio.gather(
-            store.admit(candidate(key="k1"), policy=policy),
-            store.admit(candidate(key="k1"), policy=policy),
+            store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy),
+            store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy),
         )
 
         kinds = [ruling.kind for ruling in rulings]
@@ -1520,7 +1678,9 @@ class NotificationStoreContract(ABC):
             )
         )
         spent = await store.admit(
-            candidate(key="k1", expires_at=NOW + timedelta(minutes=1)), policy=policy
+            candidate(key="k1", expires_at=NOW + timedelta(minutes=1)),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert spent.kind is NotificationDispositionKind.INTERRUPT
         assert spent.notification_id is not None
@@ -1540,6 +1700,7 @@ class NotificationStoreContract(ABC):
 
         held = await store.admit(
             candidate(key="k2", noticed_at=clock.at, expires_at=NOW + timedelta(days=1)),
+            home=RecordHome.owners(),
             policy=policy,
         )
 
@@ -1561,7 +1722,7 @@ class NotificationStoreContract(ABC):
         """
         clock = MutableClock()
         store = factory(now=clock, retention=timedelta(days=1))
-        await store.admit(candidate(key="k1"), policy=policy)
+        await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
         clock.advance(timedelta(days=3650))
 
@@ -1612,7 +1773,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock, retention=retention)
         expiry = NOW + timedelta(hours=3)
-        ruling = await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+        ruling = await store.admit(
+            candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+        )
         assert ruling.notification_id is not None
         assert await store.dismiss(ruling.notification_id) is True
 
@@ -1642,7 +1805,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock, retention=retention)
         ruling = await store.admit(
-            candidate(key="k1", expires_at=NOW + timedelta(hours=1)), policy=policy
+            candidate(key="k1", expires_at=NOW + timedelta(hours=1)),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert ruling.notification_id is not None
         assert await store.dismiss(ruling.notification_id) is True
@@ -1676,7 +1841,9 @@ class NotificationStoreContract(ABC):
         clock = MutableClock()
         store = factory(now=clock, retention=retention)
         ruling = await store.admit(
-            candidate(key="k1", expires_at=NOW + timedelta(days=3650)), policy=policy
+            candidate(key="k1", expires_at=NOW + timedelta(days=3650)),
+            home=RecordHome.owners(),
+            policy=policy,
         )
         assert ruling.notification_id is not None
         await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
@@ -1767,16 +1934,18 @@ class NotificationStoreContract(ABC):
         """
         if how == "expired":
             expiry = clock.at + timedelta(hours=1)
-            await store.admit(candidate(key="k1", expires_at=expiry), policy=policy)
+            await store.admit(
+                candidate(key="k1", expires_at=expiry), home=RecordHome.owners(), policy=policy
+            )
             clock.at = expiry
             return expiry
         if how == "dismissed":
-            ruling = await store.admit(candidate(key="k1"), policy=policy)
+            ruling = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
             assert ruling.notification_id is not None
             clock.advance(timedelta(hours=1))
             assert await store.dismiss(ruling.notification_id) is True
             return clock.at
-        ruling = await store.admit(candidate(key="k1"), policy=policy)
+        ruling = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         assert ruling.notification_id is not None
         clock.advance(timedelta(hours=1))
         await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
@@ -1797,7 +1966,7 @@ class NotificationStoreContract(ABC):
         record from the enumeration while leaving it in the export would hand the
         user back, in a file they asked for, the thing they asked to destroy.
         """
-        ruling = await store.admit(candidate(key="k1"), policy=policy)
+        ruling = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         assert ruling.notification_id is not None
 
         assert await store.delete(ruling.notification_id) is True
@@ -1815,7 +1984,7 @@ class NotificationStoreContract(ABC):
         Which is what makes the two acts different rather than two spellings of
         one, and what §7 means by "expiry deletes nothing".
         """
-        ruling = await store.admit(candidate(key="k1"), policy=policy)
+        ruling = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         assert ruling.notification_id is not None
 
         assert await store.dismiss(ruling.notification_id) is True
@@ -1828,8 +1997,8 @@ class NotificationStoreContract(ABC):
         self, store: NotificationStore, policy: NotificationPolicy
     ) -> None:
         """§9: the sweep half of the data right, unconditional as ``delete`` is."""
-        await store.admit(candidate(key="k1"), policy=policy)
-        await store.admit(candidate(key="k2"), policy=policy)
+        await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        await store.admit(candidate(key="k2"), home=RecordHome.owners(), policy=policy)
 
         assert await store.clear() == 2
 
@@ -1845,7 +2014,7 @@ class NotificationStoreContract(ABC):
         §6 says costs the user rather than the machine.
         """
         await store.set_preferences(reaching(CLASS, NotificationReach.OFF))
-        await store.admit(candidate(key="k1"), policy=policy)
+        await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
 
         await store.clear()
 
@@ -1864,9 +2033,11 @@ class NotificationStoreContract(ABC):
         """
         clock = MutableClock()
         store = factory(now=clock)
-        first = await store.admit(candidate(key="k1"), policy=policy)
+        first = await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
         clock.advance(timedelta(minutes=5))
-        second = await store.admit(candidate(key="k2", noticed_at=clock.at), policy=policy)
+        second = await store.admit(
+            candidate(key="k2", noticed_at=clock.at), home=RecordHome.owners(), policy=policy
+        )
 
         assert [record.id for record in await store.held()] == [
             first.notification_id,
@@ -1961,6 +2132,21 @@ class NotificationWriterContract(ABC):
         stored = await self.store_of(writer).get(ruling.notification_id)
         assert stored is not None
         assert stored.candidate.candidate_key == "k1"
+
+    async def test_a_producers_record_takes_the_owners_domain(
+        self, writer: NotificationWriter
+    ) -> None:
+        """ADR-0383 §4:3, ADR-0386 §3:2: the seam supplies the home; the candidate has none.
+
+        A notification a producer makes from a source takes the home of whoever the
+        source belongs to: the owner, in this milestone.
+        """
+        ruling = await writer.offer(candidate(key="k1"))
+
+        assert ruling.notification_id is not None
+        stored = await self.store_of(writer).get(ruling.notification_id)
+        assert stored is not None
+        assert stored.home == RecordHome.owners()
 
     async def test_a_dropped_offer_writes_no_record(self, writer: NotificationWriter) -> None:
         """§8: a ``DROP`` writes nothing, so re-noticing cannot fill the store.

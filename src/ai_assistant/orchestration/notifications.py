@@ -46,6 +46,7 @@ from ai_assistant.core.errors import NotificationStoreError, PersonModelStoreErr
 from ai_assistant.core.protocols import NotificationPolicy
 from ai_assistant.core.types import OWNER_PERSON_ID, NotificationDispositionKind
 from ai_assistant.orchestration.person_block import person_zone
+from ai_assistant.orchestration.work_facts import source_home
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
@@ -201,6 +202,11 @@ class NotificationWriteStage:
     what this holds is the policy the store is handed per call, picked per call in
     the zone of the person the notification is for (:class:`RulingPolicy`). It adds
     exactly one thing of its own — ADR-0131 §3b's live handoff, on the way out.
+
+    **It supplies the home the record it may write takes** (ADR-0386 §3:2): no work makes
+    a notification, so each is one a producer makes from a source, whose home is that of
+    whoever the source belongs to, by the one rule :func:`source_home` reads (ADR-0383
+    §4:3). The candidate carries none.
     """
 
     def __init__(
@@ -267,7 +273,7 @@ class NotificationWriteStage:
                 reconciliation offers it (ADR-0131 §3b).
         """
         policy = await self._policies.pick()
-        ruling = await self._store.admit(candidate, policy=policy)
+        ruling = await self._store.admit(candidate, home=source_home(), policy=policy)
         await hand_off(self._outbox, ruling, candidate)
         return ruling
 

@@ -67,6 +67,7 @@ from ai_assistant.orchestration.work_facts import (
     persons_work,
     sender_of,
     senders_of,
+    source_home,
     started,
     work_home,
 )
@@ -658,6 +659,12 @@ def test_a_works_home_is_whom_it_is_for(facts: WorkFacts | None, home: RecordHom
     decided is read as a work for no one, as ``record_started`` and ``persons_work`` read
     it, so it writes into the shared things."""
     assert work_home(facts) == home
+
+
+def test_a_record_brought_in_from_a_source_takes_its_owners_domain() -> None:
+    """ADR-0383 §4:3: whoever the source belongs to, read by the one rule ``_its_owner``
+    reads ADR-0368 §3:3 by: the owner, in this milestone."""
+    assert source_home() == RecordHome.owners()
 
 
 async def test_an_unidentified_senders_work_writes_into_the_owners_domain() -> None:

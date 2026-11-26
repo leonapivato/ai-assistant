@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     StoryActor,
     StoryNote,
     StoryNoteAuthor,
@@ -329,7 +330,9 @@ async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes(
     """
     ids = itertools.count(1)
     stories = FakeStoryStore(now=lambda: AT, new_id=lambda: f"{next(ids)}")
-    created = await stories.create((activation("a-1"),), actor=StoryActor.OWNER)
+    created = await stories.create(
+        (activation("a-1"),), home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     await stories.append_note(
         created.story_id,

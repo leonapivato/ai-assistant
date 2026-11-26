@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ProcessingReason,
     ProcessingStatus,
+    RecordHome,
     RoundResponse,
     StoryActor,
     StoryMember,
@@ -183,7 +184,9 @@ async def _story_read_harness(completer: FakeToolCallingCompleter) -> Harness:
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
         await stories.create(
-            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")], actor=StoryActor.OWNER
+            [StoryMember(kind=StoryMemberKind.ACTIVATION, id="past")],
+            home=RecordHome.owners(),
+            actor=StoryActor.OWNER,
         )
     ).story_id
     assert trip is not None

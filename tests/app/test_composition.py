@@ -1586,7 +1586,9 @@ async def test_the_store_takes_its_cap_and_retention_from_settings(
         assert store.cap == 7
 
         ruling = await store.admit(
-            _a_candidate(), policy=DefaultNotificationPolicy(timezone=settings.timezone)
+            _a_candidate(),
+            home=RecordHome.owners(),
+            policy=DefaultNotificationPolicy(timezone=settings.timezone),
         )
         assert ruling.notification_id is not None
         record = await store.get(ruling.notification_id)

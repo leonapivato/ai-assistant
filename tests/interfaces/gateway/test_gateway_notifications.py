@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    RecordHome,
 )
 from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.records import RequestClass
@@ -114,7 +115,7 @@ def _candidate(*, at: datetime = _INSTANT, **overrides: Any) -> NotificationCand
 async def _hold(engine: FakeAssistantEngine, *, at: datetime = _INSTANT, **overrides: Any) -> str:
     """Admit one candidate and return the id of the record it wrote."""
     ruling = await engine.notification_store.admit(
-        _candidate(at=at, **overrides), policy=engine.notification_policy
+        _candidate(at=at, **overrides), home=RecordHome.owners(), policy=engine.notification_policy
     )
     assert ruling.notification_id is not None
     return ruling.notification_id

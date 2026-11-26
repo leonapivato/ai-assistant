@@ -148,7 +148,9 @@ class _World:
         self.memory = FakeMemoryStore(now=lambda: _NOW)
 
     async def story(self, *members: StoryMember) -> str:
-        outcome = await self.stories.create(list(members), actor=StoryActor.OWNER)
+        outcome = await self.stories.create(
+            list(members), home=RecordHome.owners(), actor=StoryActor.OWNER
+        )
         assert outcome.story_id is not None
         return outcome.story_id
 

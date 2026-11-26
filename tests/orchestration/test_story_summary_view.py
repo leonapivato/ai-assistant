@@ -17,6 +17,7 @@ from story_support import AT, activation
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    RecordHome,
     StoryActor,
     StoryNoteAuthor,
     StorySummaryDraft,
@@ -31,7 +32,9 @@ if TYPE_CHECKING:
 
 
 async def _story(stories: FakeStoryStore) -> str:
-    created = await stories.create([activation("a-1")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("a-1")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     return created.story_id
 
@@ -101,7 +104,9 @@ async def test_the_owner_is_shown_the_summary_and_every_note() -> None:
 async def test_a_summary_an_earlier_version_took_in_a_forgotten_episode_is_shown() -> None:
     """ADR-0304 §4:3, §5: no episode a version took in withholds it, forgotten or not."""
     stories = FakeStoryStore(now=lambda: AT)
-    created = await stories.create([activation("a-1"), activation("a-2")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("a-1"), activation("a-2")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     story_id = created.story_id
     await _written(stories, story_id, episodes=("a-1",))
@@ -123,7 +128,9 @@ async def test_a_summary_recorded_as_having_read_another_s_is_shown_whatever_tha
     """ADR-0304 §3:4: a version written before keeps ``read_pages`` as history no rule reads."""
     stories = FakeStoryStore(now=lambda: AT)
     story_id = await _story(stories)
-    other = await stories.create([activation("b-1")], actor=StoryActor.OWNER)
+    other = await stories.create(
+        [activation("b-1")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert other.story_id is not None
     shown_for_a_flag = await _written(stories, other.story_id, episodes=("b-1",))
     await _written(

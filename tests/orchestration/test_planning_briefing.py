@@ -699,7 +699,10 @@ def _state(
 ) -> StorySummaryState:
     return StorySummaryState(
         story=StoryHeader(
-            story_id=story_id, created_at=NOW - timedelta(days=3), merged_into=merged_into
+            home=RecordHome.owners(),
+            story_id=story_id,
+            created_at=NOW - timedelta(days=3),
+            merged_into=merged_into,
         ),
         summary=StorySummary(
             version=version,

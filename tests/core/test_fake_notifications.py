@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
 )
 from ai_assistant.testing import (
     FakeNotificationPolicy,
@@ -169,11 +170,11 @@ async def test_the_fake_refuses_an_id_source_that_repeats_itself() -> None:
             reaches=(ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),),
         )
     )
-    first = await store.admit(_perishable("k1"), policy=policy)
+    first = await store.admit(_perishable("k1"), home=RecordHome.owners(), policy=policy)
     assert first.kind is NotificationDispositionKind.INTERRUPT
 
     with pytest.raises(NotificationStoreError, match="already holds"):
-        await store.admit(_perishable("k2"), policy=policy)
+        await store.admit(_perishable("k2"), home=RecordHome.owners(), policy=policy)
 
     held = await store.held()
     assert [record.candidate.candidate_key for record in held] == ["k1"]
@@ -192,7 +193,9 @@ async def test_the_fake_refuses_an_id_source_that_mints_a_non_identifier(minted:
     store = FakeNotificationStore(now=_fixed_now, new_id=lambda: minted)  # type: ignore[arg-type,return-value]
 
     with pytest.raises(NotificationStoreError, match="not an identifier"):
-        await store.admit(_perishable("k1"), policy=FakeNotificationPolicy())
+        await store.admit(
+            _perishable("k1"), home=RecordHome.owners(), policy=FakeNotificationPolicy()
+        )
 
     assert await store.export() == []
 
@@ -213,7 +216,9 @@ async def test_the_fake_reports_an_unusable_clock_as_the_stores_own_error() -> N
 async def test_a_fresh_fake_holds_nothing_from_a_prior_instance() -> None:
     """Two fakes are two stores: a consumer's test must not inherit another's."""
     policy = FakeNotificationPolicy()
-    await FakeNotificationStore(now=_fixed_now).admit(candidate(), policy=policy)
+    await FakeNotificationStore(now=_fixed_now).admit(
+        candidate(), home=RecordHome.owners(), policy=policy
+    )
 
     assert await FakeNotificationStore(now=_fixed_now).export() == []
 

@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RecordedInputMessage,
+    RecordHome,
     RoundMessagePart,
     RoundResponse,
     StoryActor,
@@ -214,10 +215,13 @@ async def test_a_story_note_shown_is_outside_content_only_where_its_mark_says() 
     harness = Harness()
     own = await harness.stories.create(
         [StoryMember(kind=StoryMemberKind.ACTIVATION, id=one) for one in ("plain", "marked")],
+        home=RecordHome.owners(),
         actor=StoryActor.OWNER,
     )
     other = await harness.stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="trip")], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="trip")],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
     assert own.story_id is not None
     assert other.story_id is not None
@@ -413,7 +417,9 @@ async def test_a_memory_no_longer_held_is_shown_by_what_its_recall_kept() -> Non
 async def _story_with_two_summaries(harness: Harness) -> tuple[str, int]:
     """A story whose summary was written twice; its id, and the position between them."""
     created = await harness.stories.create(
-        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="trip")], actor=StoryActor.OWNER
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="trip")],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
     story_id = created.story_id
     assert story_id is not None

@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
+    RecordHome,
     RoundResponse,
     StageOutcome,
     StoryActor,
@@ -325,7 +326,9 @@ async def test_a_stamped_episode_a_story_view_shows_places_the_episode() -> None
     memory = FakeMemoryStore(now=lambda: AT)
     await memory.add(episode("other", placement=_STAMPED))
     created = await stories.create(
-        [activation("other"), activation(_ACTIVATION)], actor=StoryActor.OWNER
+        [activation("other"), activation(_ACTIVATION)],
+        home=RecordHome.owners(),
+        actor=StoryActor.OWNER,
     )
     assert created.story_id is not None
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Noted."))
@@ -356,7 +359,9 @@ async def test_a_stamped_episode_a_storys_full_view_shows_is_held_for_the_freeze
     stories = FakeStoryStore(now=lambda: AT)
     memory = FakeMemoryStore(now=lambda: AT)
     await memory.add(episode("past", placement=_STAMPED))
-    created = await stories.create([activation("past")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("past")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(calls=(_call("c1", "read_matter", matter="S1"),)),
@@ -394,7 +399,9 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
     memory = FakeMemoryStore(now=lambda: AT)
     await memory.add(_own_episode())
     await memory.add(episode("past", placement=_STAMPED))
-    created = await stories.create([activation("past")], actor=StoryActor.OWNER)
+    created = await stories.create(
+        [activation("past")], home=RecordHome.owners(), actor=StoryActor.OWNER
+    )
     assert created.story_id is not None
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(

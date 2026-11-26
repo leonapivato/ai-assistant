@@ -45,6 +45,7 @@ from story_store_contract import (
 
 from ai_assistant.core.errors import StoryStoreError
 from ai_assistant.core.types import (
+    RecordHome,
     StoryActor,
     StoryChange,
     StoryDecision,
@@ -137,7 +138,7 @@ async def test_a_fault_mid_write_writes_nothing(tmp_path: Path) -> None:
         story_id = await made(store, act("a"))
         before = await logged(store, story_id)
         with pytest.raises(StoryStoreError, match="already holds"):
-            await store.create([act("b")], actor=StoryActor.OWNER)
+            await store.create([act("b")], home=RecordHome.owners(), actor=StoryActor.OWNER)
         assert await logged(store, story_id) == before
         assert [h.story_id for h in (await store.stories()).stories] == [story_id]
     finally:
@@ -170,7 +171,9 @@ async def test_a_backend_failure_mid_write_rolls_the_whole_operation_back(
         )
         injector.commit()
         attempts = {
-            "create": lambda: store.create([act("d")], actor=StoryActor.OWNER),
+            "create": lambda: store.create(
+                [act("d")], home=RecordHome.owners(), actor=StoryActor.OWNER
+            ),
             "link": lambda: store.link(source, [act("d")], actor=StoryActor.OWNER),
             "merge": lambda: store.merge(source, target, actor=StoryActor.OWNER),
             "split": lambda: store.split(source, [act("a")], actor=StoryActor.OWNER),
@@ -270,7 +273,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
     finally:
         check.close()
 
@@ -613,7 +616,7 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
     finally:
         check.close()
 
@@ -763,7 +766,7 @@ async def test_a_schema_three_file_keeps_every_note_and_summary_and_drops_what_a
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
         indexes = {row[0] for row in check.execute("SELECT name FROM sqlite_master")}
         assert {"notes_resting", "log_member", "pages"}.isdisjoint(indexes)
         with pytest.raises(sqlite3.DatabaseError, match="never rewritten"):
@@ -860,7 +863,9 @@ async def test_a_decision_and_its_change_land_together_or_not_at_all(
         )
         injector.commit()
         attempts: dict[str, Callable[[], Awaitable[StoryOutcome]]] = {
-            "create": lambda: store.create([sub(story_id), sub(other)], actor=pass_, answers=flag),
+            "create": lambda: store.create(
+                [sub(story_id), sub(other)], home=RecordHome.owners(), actor=pass_, answers=flag
+            ),
             "link": lambda: store.link(
                 larger, [sub(story_id), sub(other)], actor=pass_, answers=flag
             ),
@@ -981,7 +986,7 @@ async def test_a_schema_four_file_is_migrated_and_carries_a_note_logged(
         reopened.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
         with pytest.raises(sqlite3.DatabaseError, match="append-only"):
             check.execute("UPDATE log SET note = 9")
     finally:

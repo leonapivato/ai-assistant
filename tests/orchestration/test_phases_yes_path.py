@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     ProposedCall,
+    RecordHome,
     Reversibility,
     RiskLevel,
     RoundResponse,
@@ -470,6 +471,7 @@ class _Hub:
                 StoryMember(kind=StoryMemberKind.ACTIVATION, id=one)
                 for one in (*activations, state.activation_id)
             ],
+            home=RecordHome.owners(),
             actor=StoryActor.OWNER,
         )
 

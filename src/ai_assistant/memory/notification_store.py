@@ -54,6 +54,21 @@ timer. What is kept is a bare instant: no key, no summary, no class, so it is a
 rate limiter's state rather than the user's content, it appears in no export, and
 destroying a notification still destroys everything the notification said.
 
+**Each record carries its home** (ADR-0383 §3, ADR-0386 §3), as both its kind and its
+identifier in two columns of its own row (``home_kind``, ``home_id``), so a read can be
+narrowed by it inside this store's own query. :meth:`~SqliteNotificationStore.admit`
+writes the home it is handed beside the candidate, and every other write leaves it as it
+was. A home :func:`~ai_assistant.core.types.home_may_be_written` does not allow is a
+``ValueError`` before the atomic act, so no record and no unit of budget (ADR-0386 §6:2).
+
+**The file carries a label** (``PRAGMA user_version``, :data:`NOTIFICATION_SCHEMA_VERSION`),
+its first, which the change that added the home gave it (ADR-0383 §13). The file every
+earlier build wrote carries none: its table is the one shape this store had before the
+home, so the upgrade tells it from a new file by whether it holds that table, adds the
+home's two columns and writes the owner's domain into every record it holds (ADR-0383
+§5:1), all in one transaction (ADR-0326 §4:3). A label this build does not write is
+refused at open rather than read under the wrong layout (ADR-0326 §5:3).
+
 **Each ruling emits one trace, and this store is where ADR-0141 §3 puts the
 emitter.** The facts §4 records — which of the eight conditions held — exist only
 inside the transaction above: the duplicate lookup, the cap check and the budget
@@ -77,13 +92,14 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import NotificationStoreError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     HeldNotification,
     NotificationCandidate,
     NotificationCondition,
@@ -91,7 +107,10 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
+    RecordHome,
+    RecordHomeKind,
     describe_untrusted,
+    home_may_be_written,
 )
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.notification_traces import (
@@ -151,7 +170,34 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 #: candidate itself.
 _COLUMNS = (
     "id, candidate, kind, reason, failed, ruled_at, reconsider_at, "
-    "admitted_at, retention, dismissed_at, dropped_at"
+    "admitted_at, retention, dismissed_at, dropped_at, home_kind, home_id"
+)
+
+#: The layout this module writes, held in ``PRAGMA user_version``: the store's first
+#: label, which the change adding a record's home gave it (ADR-0383 §13). A file every
+#: earlier build wrote is unlabelled (``0``) and holds the one table shape this store
+#: had before it, which :data:`_UPGRADE_UNLABELLED` carries to this one.
+NOTIFICATION_SCHEMA_VERSION: Final = 1
+
+#: The records' table, as this layout makes it. The home's columns are nullable so a file
+#: upgraded in place and a file made at this layout hold the same table; every write sets
+#: both, and a row holding no home is read as no one's and refused (ADR-0383 §5:3).
+_NOTIFICATIONS_TABLE: Final = (
+    "CREATE TABLE IF NOT EXISTS notifications("
+    "id TEXT PRIMARY KEY, candidate_key TEXT NOT NULL, candidate TEXT NOT NULL, "
+    "kind TEXT NOT NULL, reason TEXT NOT NULL, failed TEXT NOT NULL, "
+    "ruled_at INTEGER NOT NULL, reconsider_at INTEGER, admitted_at INTEGER NOT NULL, "
+    "retention INTEGER, dismissed_at INTEGER, dropped_at INTEGER, "
+    "home_kind TEXT, home_id TEXT)"
+)
+
+#: The unlabelled file's table to this layout (ADR-0383 §5:1, ADR-0386 §3:1): every
+#: record gains its home, as its kind and its identifier, and every record the file holds
+#: is the owner's. No other byte of any row moves, and the preferences and the spend
+#: ledger are left as they are.
+_UPGRADE_UNLABELLED: Final = (
+    "ALTER TABLE notifications ADD COLUMN home_kind TEXT",
+    "ALTER TABLE notifications ADD COLUMN home_id TEXT",
 )
 
 #: The rows a ``DROP`` has not yet silenced, as of the instant bound beside the
@@ -443,10 +489,29 @@ def _notification_from(row: Sequence[object]) -> HeldNotification:
             retention=_duration_from(row[8]),
             dismissed_at=_optional_instant_from(row[9], what="dismissal instant"),
             dropped_at=_optional_instant_from(row[10], what="drop instant"),
+            home=RecordHome.model_validate({"kind": row[11], "id": row[12]}),
         )
     except ValidationError as exc:
         msg = f"a stored notification is corrupt: {exc}"
         raise NotificationStoreError(msg) from exc
+
+
+def _checked_home(home: object) -> RecordHome:
+    """Validate the home an admission writes on the record it may write (ADR-0386 §6:2).
+
+    Raises:
+        ValueError: If it is not a :class:`~ai_assistant.core.types.RecordHome`, or is
+            one :func:`~ai_assistant.core.types.home_may_be_written` does not allow
+            (ADR-0383 §2:3, §4:7).
+    """
+    if not isinstance(home, RecordHome):
+        msg = f"a notification's home must be a RecordHome, got {type(home).__name__}"
+        raise ValueError(msg)
+    checked = RecordHome.model_validate(home.model_dump())
+    if not home_may_be_written(checked):
+        msg = f"a {checked.kind} home is one no write may carry (ADR-0383 §2:3)"
+        raise ValueError(msg)
+    return checked
 
 
 def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
@@ -677,10 +742,11 @@ class SqliteNotificationStore:
     # --- opening -------------------------------------------------------------
 
     def _setup(self) -> sqlite3.Connection:
-        """Open the connection and create the schema, or fail with the seam's error.
+        """Open the connection and create or upgrade the schema, or fail with the seam's error.
 
         Raises:
-            NotificationStoreError: If the database cannot be opened or prepared.
+            NotificationStoreError: If the database cannot be opened or prepared, or
+                carries a label this build neither writes nor upgrades.
         """
         try:
             # `isolation_level=None` puts the driver in autocommit mode, so every
@@ -706,47 +772,86 @@ class SqliteNotificationStore:
             # it creates for it, and an interrupted write leaves that journal on
             # disk holding Tier 1 pages (ADR-0004 §4).
             self._restrict_permissions()
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS notifications("
-                "id TEXT PRIMARY KEY, candidate_key TEXT NOT NULL, candidate TEXT NOT NULL, "
-                "kind TEXT NOT NULL, reason TEXT NOT NULL, failed TEXT NOT NULL, "
-                "ruled_at INTEGER NOT NULL, reconsider_at INTEGER, admitted_at INTEGER NOT NULL, "
-                "retention INTEGER, dismissed_at INTEGER, dropped_at INTEGER)"
-            )
-            # The key is *indexed* rather than unique: several records may share
-            # one over time, and only one still **speaking for** it suppresses a
-            # new arrival (ADR-0130 §8 as ADR-0215 §§1-2 replace it) — a predicate
-            # the record answers rather than a constraint a column can carry, and
-            # a store that crossed ADR-0215 may hold two speaking at once.
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS notifications_key ON notifications(candidate_key)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS notifications_order ON notifications(admitted_at, id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS notifications_due ON notifications(reconsider_at, id)"
-            )
-            # One row, holding the whole preferences value: §6's write replaces
-            # what is held rather than merging into it, and the contract is
-            # explicit that the last write wins.
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS notification_preferences("
-                "id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL)"
-            )
-            # The rate limiter's own state, and nothing of the user's content.
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS notification_interruptions(spent_at INTEGER NOT NULL)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS notification_interruptions_at "
-                "ON notification_interruptions(spent_at)"
-            )
-        except (sqlite3.Error, OSError) as exc:
+            # One transaction for the upgrade and the schema, so a file is upgraded
+            # whole or left as it was found (ADR-0326 §4:3).
+            with transaction(
+                conn, f"open notification store at {self._path!r}", error=NotificationStoreError
+            ):
+                self._prepare(conn)
+        except (sqlite3.Error, OSError, NotificationStoreError) as exc:
             conn.close()  # never leak the connection when opening fails
+            if isinstance(exc, NotificationStoreError):
+                raise
             msg = f"failed to open notification store at {self._path!r}: {exc}"
             raise NotificationStoreError(msg) from exc
         return conn
+
+    def _prepare(self, conn: sqlite3.Connection) -> None:
+        """Bring the file to :data:`NOTIFICATION_SCHEMA_VERSION`, in the caller's transaction.
+
+        An unlabelled file holding the records' table is every earlier build's, which
+        :data:`_UPGRADE_UNLABELLED` carries; an unlabelled file without it is new. Any
+        label but this layout's is refused before anything is written (ADR-0326 §5:3).
+
+        Raises:
+            NotificationStoreError: If the file carries a label this build does not write.
+        """
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version not in {0, NOTIFICATION_SCHEMA_VERSION}:
+            msg = (
+                f"the notification store at {self._path!r} carries schema version "
+                f"{version}, and this build writes {NOTIFICATION_SCHEMA_VERSION}"
+            )
+            raise NotificationStoreError(msg)
+        if version == 0 and self._holds_records_table(conn):
+            for statement in _UPGRADE_UNLABELLED:
+                conn.execute(statement)
+            conn.execute(
+                "UPDATE notifications SET home_kind = ?, home_id = ?",
+                (RecordHomeKind.PERSON.value, OWNER_PERSON_ID),
+            )
+        self._create_schema(conn)
+        conn.execute(f"PRAGMA user_version = {NOTIFICATION_SCHEMA_VERSION}")
+
+    @staticmethod
+    def _holds_records_table(conn: sqlite3.Connection) -> bool:
+        """Whether the file already holds the records' table, as an earlier build left it."""
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notifications'"
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _create_schema(conn: sqlite3.Connection) -> None:
+        """Create every table and index this layout holds that the file does not."""
+        conn.execute(_NOTIFICATIONS_TABLE)
+        # The key is *indexed* rather than unique: several records may share
+        # one over time, and only one still **speaking for** it suppresses a
+        # new arrival (ADR-0130 §8 as ADR-0215 §§1-2 replace it) — a predicate
+        # the record answers rather than a constraint a column can carry, and
+        # a store that crossed ADR-0215 may hold two speaking at once.
+        conn.execute("CREATE INDEX IF NOT EXISTS notifications_key ON notifications(candidate_key)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS notifications_order ON notifications(admitted_at, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS notifications_due ON notifications(reconsider_at, id)"
+        )
+        # One row, holding the whole preferences value: §6's write replaces
+        # what is held rather than merging into it, and the contract is
+        # explicit that the last write wins.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS notification_preferences("
+            "id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL)"
+        )
+        # The rate limiter's own state, and nothing of the user's content.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS notification_interruptions(spent_at INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS notification_interruptions_at "
+            "ON notification_interruptions(spent_at)"
+        )
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -1157,8 +1262,8 @@ class SqliteNotificationStore:
         """
         conn.execute(
             "INSERT OR REPLACE INTO notifications(id, candidate_key, candidate, kind, reason, "
-            "failed, ruled_at, reconsider_at, admitted_at, retention, dismissed_at, dropped_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "failed, ruled_at, reconsider_at, admitted_at, retention, dismissed_at, dropped_at, "
+            "home_kind, home_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.candidate.candidate_key,
@@ -1172,15 +1277,25 @@ class SqliteNotificationStore:
                 None if record.retention is None else _duration_micros(record.retention),
                 None if record.dismissed_at is None else _to_micros(record.dismissed_at),
                 None if record.dropped_at is None else _to_micros(record.dropped_at),
+                record.home.kind.value,
+                record.home.id,
             ),
         )
 
     # --- the contract --------------------------------------------------------
 
     async def admit(
-        self, candidate: NotificationCandidate, *, policy: NotificationPolicy
+        self,
+        candidate: NotificationCandidate,
+        *,
+        home: RecordHome,
+        policy: NotificationPolicy,
     ) -> NotificationDisposition:
         """Rule on an offered candidate and record the ruling — atomically (§3).
+
+        **A home no write may carry is refused before the atomic act** (ADR-0386 §6:2),
+        with ``ValueError``: no lock is taken, no transaction opened, the policy is not
+        asked and no trace is emitted, since no ruling was made.
 
         **One crossing, at most one trace, emitted after the act commits**
         (ADR-0141 §3). The trace is built and appended outside the transaction and
@@ -1192,11 +1307,15 @@ class SqliteNotificationStore:
         back is not a ruling.
 
         Raises:
+            ValueError: If ``home`` is no ``RecordHome``, or one
+                :func:`~ai_assistant.core.types.home_may_be_written` does not allow.
+                Nothing is read, ruled or written.
             NotificationStoreError: If the clock's reading is unusable, the id
                 source returns an unusable id, or the store cannot be read or
                 written. Nothing is committed by a failed admission — no record,
                 and **no unit of budget**.
         """
+        checked_home = _checked_home(home)
         # The fault path's instant, absent until the clock reads. A crossing that
         # never obtained a reading emits nothing at all (ADR-0141 §3): there is no
         # instant to stamp, `occurred_at` is not optional, and inventing one would
@@ -1225,7 +1344,7 @@ class SqliteNotificationStore:
                     budget_frees_at=facts.budget_frees_at,
                 )
                 recorded = await _run_to_completion(
-                    self._admit_write, candidate, ruling, record_id, now
+                    self._admit_write, candidate, checked_home, ruling, record_id, now
                 )
         # `Exception` and not `BaseException`: a cancellation is never classified
         # and no trace records one (ADR-0141 §3, ADR-0119 §3, ADR-0060 §1).
@@ -1270,6 +1389,7 @@ class SqliteNotificationStore:
     def _admit_write(
         self,
         candidate: NotificationCandidate,
+        home: RecordHome,
         ruling: NotificationDisposition,
         record_id: str,
         now: datetime,
@@ -1290,6 +1410,7 @@ class SqliteNotificationStore:
         # Built before anything is committed, for the reason above.
         record = HeldNotification(
             id=record_id,
+            home=home,
             candidate=candidate,
             kind=ruling.kind,
             reason=ruling.reason,
@@ -1405,6 +1526,7 @@ class SqliteNotificationStore:
         """
         ruled = HeldNotification(
             id=record.id,
+            home=record.home,
             candidate=record.candidate,
             kind=ruling.kind,
             reason=ruling.reason,

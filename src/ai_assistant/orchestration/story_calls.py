@@ -90,6 +90,12 @@ on its own and does not await it (ADR-0306 §3:3, ADR-0307 §7:2).
 and this activation as its trigger (ADR-0300 §3:15), and every note by the author
 ``planning``, recording the activation it was written during (ADR-0303 §4:7, §9:3).
 
+**Where a story it starts lands** (ADR-0383 §4:1, ADR-0386 §2:2). A start and a group
+mint a story, which takes the home whom this activation's work is for gives, read off the
+work's state as it stands (``ActivationState.home``), as its episode's is; a call run
+outside any work has no home to carry and starts nothing. A split's new story takes the
+home of the story it is split from, in the store, and no other call sets one.
+
 **Planning still writes on an owner-only pass.** On a pass that may not show a record
 placed for the owner alone, planning can still write notes and change stories (ADR-0307
 §6:5); only a move or a split is held to members alone there, as above.
@@ -129,6 +135,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
+from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.remembering import EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT
 from ai_assistant.orchestration.stories import episode_address, unknown_activation
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
@@ -137,7 +144,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, StoryStore
-    from ai_assistant.core.types import FrozenJson, ProposedCall, StoryOutcome, ToolCall
+    from ai_assistant.core.types import (
+        FrozenJson,
+        ProposedCall,
+        RecordHome,
+        StoryOutcome,
+        ToolCall,
+    )
     from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 
 __all__ = [
@@ -845,8 +858,11 @@ class StoryCalls:
         inside = _optional_text(parameters, INSIDE_ARGUMENT)
         larger = None if inside is None else await self._current(inside)
         own = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation)
+        home = self._home()
         await self._episode_held(own)
-        created = await self._stories.create([own], actor=StoryActor.PLANNING, trigger=activation)
+        created = await self._stories.create(
+            [own], home=home, actor=StoryActor.PLANNING, trigger=activation
+        )
         if created.story_id is None:
             raise _refused("the story store refused the start")
         started = str(created.story_id)
@@ -1011,7 +1027,9 @@ class StoryCalls:
         grouped = await self._story_members(parameters)
         if not grouped:
             raise _malformed("a group names the stories it groups")
-        created = await self._stories.create(grouped, actor=StoryActor.PLANNING, trigger=activation)
+        created = await self._stories.create(
+            grouped, home=self._home(), actor=StoryActor.PLANNING, trigger=activation
+        )
         if created.story_id is None:
             raise _store_refused(created)
         try:
@@ -1108,6 +1126,22 @@ class StoryCalls:
         return [one for one in dict.fromkeys(named) if one in wanted]
 
     # --- the parts ---
+
+    @staticmethod
+    def _home() -> RecordHome:
+        """The home a story this work starts takes: whom the work is for gives it (§4:1).
+
+        Read off the running work's state, as its episode's is; a call run outside any
+        work has none to carry, and starts nothing.
+        """
+        state = active_state()
+        if state is None:
+            raise _NotDone(
+                ToolFailureKind.INTERNAL,
+                "no work is running, so a story has no home to start in",
+                reason="no_work",
+            )
+        return state.home
 
     @staticmethod
     def _activation(parameters: Mapping[str, FrozenJson]) -> str:
