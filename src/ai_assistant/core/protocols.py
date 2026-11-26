@@ -7715,8 +7715,8 @@ class StoryStore(Protocol):
     story, and writes nothing: a :meth:`create`, :meth:`link` or :meth:`split` naming a
     story member of another home, a :meth:`merge` or :meth:`move` between two stories of
     two homes, which would carry one story's members and notes into the other (§3:2).
-    A merge also names no story of another home in a membership it writes: each story
-    member the story merged into gains, and each story that gains it in place of the
+    A merge also changes no story of another home and names none in a membership it
+    writes: each story member the story merged into gains, and every story holding the
     story absorbed, is of its home. So no write changes a story's home, nor a note's,
     which is its story's (§4:6).
 
