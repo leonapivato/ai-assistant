@@ -1,6 +1,6 @@
 # 386. A record's home joins the fields, the reads and the minting members earlier decisions closed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: decision D4 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
