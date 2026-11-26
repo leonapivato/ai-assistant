@@ -1878,24 +1878,25 @@ class SqliteMemoryStore:
         or that :meth:`_decode` refuses, is the home of no one (ADR-0383 §5:3): its
         columns are set to ``NULL``. Every other row's columns name the home its
         decoded record carries. Read a page of rows at a time in ``rowid`` order, so a
-        large store is never held in memory whole.
+        large store is never held in memory whole; the first page has no lower bound,
+        as :meth:`_backfill_valid_from`'s has not, so a row at a ``rowid`` of zero or
+        below is filled too.
         """
         factory = conn.text_factory
         conn.text_factory = bytes
         try:
-            after = 0
-            while True:
-                rows = conn.execute(
-                    "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                    (after, _BACKFILL_CHUNK),
-                ).fetchall()
-                if not rows:
-                    return
+            rows = conn.execute(
+                "SELECT rowid, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+            ).fetchall()
+            while rows:
                 conn.executemany(
                     "UPDATE records SET home_kind = ?, home_id = ? WHERE rowid = ?",
                     [(*cls._stored_home_columns(data), rowid) for rowid, data in rows],
                 )
-                after = int(rows[-1][0])
+                rows = conn.execute(
+                    "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                    (int(rows[-1][0]), _BACKFILL_CHUNK),
+                ).fetchall()
         finally:
             conn.text_factory = factory
 
