@@ -169,15 +169,22 @@ class _World:
         assert written.version is not None
         return StoryFlagName(story=story_id, version=written.version.version, flag=flags[0])
 
-    def tidy_up(self, model: _Model, *, decisions: int = 5) -> StoryTidyUp:
+    def tidy_up(
+        self,
+        model: _Model,
+        *,
+        decisions: int = 5,
+        other_stories: int = 5,
+        threshold: float = _NO_MATCH,
+    ) -> StoryTidyUp:
         return StoryTidyUp(
             model=structured(model.provider),
             stores=self.stores,
             excerpt_chars=2000,
-            other_stories=5,
+            other_stories=other_stories,
             decisions=decisions,
             budget=_BUDGET,
-            threshold=_NO_MATCH,
+            threshold=threshold,
             prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         )
 
@@ -702,3 +709,38 @@ async def test_a_story_pending_only_an_episode_no_longer_held_is_not_due() -> No
 
     assert (report.due, report.passed_over) == (0, 0)
     assert model.messages == []
+
+
+# --- the tidy-up's look-alike search: its allowance from what the store gives back -------
+
+
+def _matching(record: EpisodicMemory) -> EpisodicMemory:
+    """``record``, its content one the look-alike search's query matches."""
+    return record.model_copy(update={"content": "camping"})
+
+
+@_MODES
+async def test_a_withheld_member_does_not_widen_the_look_alike_search(mode: SightMode) -> None:
+    """Round 4's regression (ADR-0384 §5:2): the search asks for one story's worth more
+    than the members it may pass over. An own member, an orphan and another story's
+    member match, in that order, with room for one other story: where the stores
+    withhold, a shared episode linked in error into the story asks for nothing more, so
+    the other story is not reached; the counting build reaches it, as before."""
+    world = _World(mode)
+    await world.hold(
+        _matching(episode("a-1", text="camping")),
+        _matching(episode("o-1")),
+        _matching(episode("b-1")),
+        _of(_SHARED, _matching(episode("s-1"))),
+    )
+    trip = await world.story(_OWNERS, "a-1", "s-1", note="camping")
+    await world.story(_OWNERS, "b-1", note="other")
+    model = _Model(_TIDIED, key="note")
+    run = upkeep_run(_OWNERS)
+
+    await world.tidy_up(model, other_stories=1, threshold=0.0).run(
+        trip, sight=run.sight, tends=run.tends
+    )
+
+    shown = [one["label"] for one in model.shown["camping"]["other_stories"]]
+    assert shown == ([] if mode is SightMode.WITHHOLD else ["S1"])

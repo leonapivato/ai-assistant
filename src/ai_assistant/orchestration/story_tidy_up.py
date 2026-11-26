@@ -1061,12 +1061,19 @@ class StoryTidyUp:
         threshold, and only where its stored id is its activation's episode, as
         recall reads a kept episode's stories (ADR-0300 §7:1). The story's own members
         are passed over, so they take no slot, and each search asks for as many more
-        as it may pass over (ADR-0282 §4). An open episode is passed over too: no
+        as it may pass over (ADR-0282 §4): its own members whose episode the run's bound
+        memory store gives back, the only ones a search through it can find, so a
+        member withheld or no longer held widens nothing (ADR-0384 §5:2, ADR-0383
+        §8:2). Learning which those are is one ``get_many`` over the story's activation
+        members, made only where a search is made. An open episode is passed over too: no
         model is shown one (ADR-0286 §6:4). Once the bound is filled no further band is
         searched, so a search the run has no use for can neither fail it nor spend
         its budget.
         """
-        own = frozenset(episode_address(activation_id) for activation_id in linked)
+        own = frozenset(
+            episode_address(activation_id)
+            for activation_id in await _given_back(reads.memory, list(linked))
+        )
         limit = self._other_stories + len(own)
         for band in _BANDS:
             if len(chosen) >= self._other_stories:
