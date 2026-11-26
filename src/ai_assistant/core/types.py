@@ -3477,9 +3477,9 @@ def owners_act_may_name(domain: RecordHome) -> bool:
     The owner's domain, the person home of :data:`OWNER_PERSON_ID`, and the hub's shared
     things (ADR-0369 §12:1, §12:2, §2:8), and no other. Any other value, a group's domain
     or another person's included, is refused from the value alone, before any store is
-    read, and alike whatever any store holds (ADR-0385 §2:2). It is decided by equality
-    with those two values alone, so a value built round its validation that is neither
-    is refused too.
+    read, and alike whatever any store holds (ADR-0385 §2:2). A value built round the
+    type's validation is refused unless each field is exactly of its declared type, so
+    a kind given as bare text is refused rather than compared equal to the enumeration.
 
     Args:
         domain: The domain an owner's act names.
@@ -3487,7 +3487,11 @@ def owners_act_may_name(domain: RecordHome) -> bool:
     Returns:
         Whether the act may name it.
     """
-    return domain == RecordHome.owners() or domain == RecordHome.shared()
+    if type(domain) is not RecordHome or type(domain.kind) is not RecordHomeKind:
+        return False
+    if domain.id is not None and type(domain.id) is not str:
+        return False
+    return domain in (RecordHome.owners(), RecordHome.shared())
 
 
 class AuthorityKind(StrEnum):
@@ -4127,10 +4131,9 @@ class Sight(BaseModel):
         if not owners_act_may_name(domain):
             msg = "an owner's act names the owner's domain or the hub's shared things"
             raise ValueError(msg)
-        return cls(
-            reader=SightReader.OWNERS_ACT,
-            bounds=(owner, SightBound.one_domain(domain)),
-        )
+        # The value the bound carries is ``core``'s own, never the caller's instance.
+        named = RecordHome.shared() if domain.kind is RecordHomeKind.SHARED else RecordHome.owners()
+        return cls(reader=SightReader.OWNERS_ACT, bounds=(owner, SightBound.one_domain(named)))
 
 
 #: The bound a medium's own identifier is read below, where a recorded input carries

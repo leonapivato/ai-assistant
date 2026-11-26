@@ -44,6 +44,9 @@ _MALFORMED: Final = (
     RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=None),
     RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=f" {OWNER_PERSON_ID}"),
     RecordHome.model_construct(kind=RecordHomeKind.GROUP, id=OWNER_PERSON_ID),
+    RecordHome.model_construct(kind="person", id=OWNER_PERSON_ID),
+    RecordHome.model_construct(kind="shared", id=None),
+    RecordHome.model_construct(kind=RecordHomeKind.PERSON, id=b"person:owner"),
     cast("RecordHome", "shared"),
     cast("RecordHome", {"kind": "shared"}),
 )

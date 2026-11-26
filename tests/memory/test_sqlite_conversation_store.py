@@ -2014,6 +2014,7 @@ async def test_a_reply_is_compared_with_the_home_its_targets_row_keeps(
         store.close()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("mode", list(SightMode))
 async def test_the_owners_sight_holds_no_record_with_no_home_in_either_mode(
     tmp_path: Path, mode: SightMode
