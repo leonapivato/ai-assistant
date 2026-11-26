@@ -224,7 +224,14 @@ def test_invalid_identity_degrades_metadata_without_refusing_admission(identifie
             "stage": "admission",
             "reason": "identifier",
             "log_level": "warning",
-        }
+        },
+        # ADR-0383 §6:4: a work with no activation has no work's sight, and says so.
+        {
+            "event": "work_sight_degraded",
+            "at": "start",
+            "reason": "identifier",
+            "log_level": "warning",
+        },
     ]
     with pytest.raises(ValueError, match="incomplete"):
         state.processing(_AT, None)

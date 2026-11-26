@@ -29,7 +29,7 @@ from structured_support import structured
 from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from test_planning import _recorded_trigger
-from understanding_support import TextAsStructured, recall_stage
+from understanding_support import TextAsStructured, recall_stage, windows_stage
 
 from ai_assistant.core.errors import ClassifiedToolError
 from ai_assistant.core.types import (
@@ -92,10 +92,8 @@ from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
     LineMessage,
-    RecentEpisodes,
     TranscriptWindow,
     UnderstandingStage,
-    WindowsStage,
 )
 from ai_assistant.testing import (
     FakeMemoryStore,
@@ -358,13 +356,7 @@ class _Hub:
             recall=recall_stage(self.memory) if recall else None,
             # A question asked long enough ago has left the episode window, and is
             # found through recall alone.
-            windows=(
-                WindowsStage(
-                    episodes=RecentEpisodes(memory=FakeMemoryStore(now=lambda: AT), limit=10)
-                )
-                if aged_out
-                else None
-            ),
+            windows=(windows_stage(FakeMemoryStore(now=lambda: AT)) if aged_out else None),
             phases=self.phases,
             # Understanding is shown the candidate stories' short views (ADR-0300 §6).
             story_candidates=StoryCandidates(

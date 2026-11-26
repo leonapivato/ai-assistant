@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from identity_support import owners_trigger
 from structlog.testing import capture_logs
-from understanding_support import Rendered, TextAsStructured
+from understanding_support import OWNERS_SIGHT, Rendered, TextAsStructured, bound_stores
 
 from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.episode_encoding import episode_content
@@ -76,6 +76,7 @@ _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import MemoryRecord, Message
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -161,7 +162,10 @@ class _Pipeline:
 
 def _stage(model: FakeModelProvider, memory: FakeMemoryStore, **kwargs: int) -> _Pipeline:
     return _Pipeline(
-        windows=WindowsStage(episodes=RecentEpisodes(memory=memory, limit=kwargs.get("limit", 10))),
+        windows=WindowsStage(
+            episodes=RecentEpisodes(memory=memory, limit=kwargs.get("limit", 10)).walk,
+            stores=bound_stores(memory),
+        ),
         memory=memory,
         stage=UnderstandingStage(
             model=TextAsStructured(model),
@@ -183,7 +187,9 @@ async def _understand(  # noqa: PLR0913 — the stage's own inputs, each default
     relayed: bool = False,
 ) -> ActivationUnderstanding:
     channel_window = TranscriptWindow(CONVERSATION, ()) if window is None else window
-    windows = await pipeline.windows.assemble(channel_window, audience=audience, episodes=episodes)
+    windows = await pipeline.windows.assemble(
+        channel_window, sight=OWNERS_SIGHT, audience=audience, episodes=episodes
+    )
     fetched = await fetch_held(
         pipeline.memory, episode_ids=windows.episode_ids, recalled_ids=(), audience=audience
     )
@@ -736,13 +742,13 @@ async def test_a_spoken_turn_takes_no_episode_window() -> None:
     """§4: on `converse_spoken` the selector is never asked, and a `P` label resolves to nothing."""
     calls: list[frozenset[str]] = []
 
-    async def selector(shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
+    async def selector(memory: MemoryStore, shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
         calls.append(shared)
         return ()
 
     model = FakeModelProvider.scripted(_proposal())
     pipeline = _Pipeline(
-        windows=WindowsStage(episodes=selector),
+        windows=WindowsStage(episodes=selector, stores=bound_stores(FakeMemoryStore())),
         memory=await _store(),
         stage=UnderstandingStage(
             model=TextAsStructured(model), excerpt_chars=2000, prompt=_UNDERSTANDING
@@ -913,7 +919,9 @@ async def test_a_line_input_taking_in_a_forward_is_attributed_message_by_message
     )
     model = FakeModelProvider.scripted(_proposal())
     pipeline = _stage(model, await _store())
-    windows = await pipeline.windows.assemble(window, audience=BOUNDED, episodes=False)
+    windows = await pipeline.windows.assemble(
+        window, sight=OWNERS_SIGHT, audience=BOUNDED, episodes=False
+    )
     await pipeline.stage.understand(
         "Pay me\n\nReal?",
         channel=_LINE,

@@ -122,6 +122,9 @@ from ai_assistant.core.diagnostics import write_diagnostic, write_failure
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.errors import ModelContentFilterError, UnderstandingError
 from ai_assistant.core.prompts import PromptDeclaration
+
+# At runtime, as `Callable` is: `EpisodeWalk`'s value names it (#1706).
+from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.reply_shapes import reply_shape_version
 from ai_assistant.core.types import (
     DEFAULT_ASSISTANT_NAME,
@@ -170,7 +173,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
-    from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, StructuredCompleter
+    from ai_assistant.core.protocols import DiagnosticSink, StructuredCompleter
     from ai_assistant.core.types import (
         ActivationRecall,
         ChannelContext,
@@ -182,12 +185,14 @@ if TYPE_CHECKING:
         JoinedInput,
         RecordedChannelTrigger,
         RecordedInputMessage,
+        Sight,
         StoryNote,
         StorySummaryLine,
         StructuredReply,
         TranscriptMessage,
         UnclearPoint,
     )
+    from ai_assistant.orchestration.bound_stores import Bound, BoundStores
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.matters import InProgressEntry
     from ai_assistant.orchestration.person_block import PersonBlock
@@ -197,6 +202,7 @@ __all__ = [
     "UNDERSTANDING_PROMPT",
     "ChannelWindow",
     "EpisodeSelector",
+    "EpisodeWalk",
     "LineMessage",
     "RecentEpisodes",
     "SuppliedWindow",
@@ -411,6 +417,11 @@ type ChannelWindow = SuppliedWindow | TranscriptWindow
 #: invoking no model, and ranking nothing by relevance.
 type EpisodeSelector = Callable[[frozenset[str]], Awaitable[tuple[EpisodicMemory, ...]]]
 
+#: The same selector's method over a store it is handed rather than one it holds: what the
+#: windows stage runs, over the memory store bound to its pass's sight (ADR-0383 §7:7,
+#: §9:1). :meth:`RecentEpisodes.walk` is the initial one.
+type EpisodeWalk = Callable[[MemoryStore, frozenset[str]], Awaitable[tuple[EpisodicMemory, ...]]]
+
 
 class RecentEpisodes:
     """The initial selector: the most recent episodes by occurrence (ADR-0276 §4).
@@ -428,6 +439,11 @@ class RecentEpisodes:
     they are returned where the walk reaches them, so the stage can render each once
     under its ``H`` label, and the walk continues until ``limit`` *other* episodes
     are held or the store has no more.
+
+    **One method, two stores** (ADR-0383 §9:1). Called, it walks the store it holds, as
+    the observer reads it (milestone 22's B9 binds that read); :meth:`walk` is the same
+    walk over a store it is handed, which the windows stage hands it bound to its pass's
+    sight.
     """
 
     def __init__(self, *, memory: MemoryStore, limit: int) -> None:
@@ -448,9 +464,24 @@ class RecentEpisodes:
         self._limit = limit
 
     async def __call__(self, shared: frozenset[str]) -> tuple[EpisodicMemory, ...]:
-        """The window's episodes, most recent first.
+        """The window's episodes from the store it holds: :meth:`walk` over it.
 
         Args:
+            shared: The channel window's item identifiers.
+
+        Returns:
+            What :meth:`walk` returns.
+        """
+        return await self.walk(self._memory, shared)
+
+    async def walk(
+        self, memory: Bound[MemoryStore], shared: frozenset[str]
+    ) -> tuple[EpisodicMemory, ...]:
+        """The window's episodes, most recent first, from ``memory``.
+
+        Args:
+            memory: The store to walk: the one bound to the pass's sight, for the
+                windows stage.
             shared: The channel window's item identifiers, whose episodes are
                 returned where reached and not counted toward the bound.
 
@@ -464,11 +495,11 @@ class RecentEpisodes:
         cursor: str | None = None
         while counted < self._limit:
             size = min(_MAX_PAGE, self._limit - counted + len(shared))
-            page = await self._memory.episodes(cursor=cursor, limit=size)
+            page = await memory.episodes(cursor=cursor, limit=size)
             addresses = [row.position.episode_id for row in page.items]
             # ADR-0286 §6:4: an open episode — the running activation's own among
             # them — is an id with no record here, so it takes no place in the window.
-            found = without_open_episodes(await self._memory.get_many(addresses))
+            found = without_open_episodes(await memory.get_many(addresses))
             for address in addresses:
                 record = found.get(address)
                 if not isinstance(record, EpisodicMemory):
@@ -517,24 +548,33 @@ class WindowsStage:
     It holds ADR-0276 §4's episode selector, which runs here unchanged, and makes only
     the selector's reads: it is a stage whose result is a choice of records (ADR-0282
     §2). What it writes are ids, after the audience predicate; the understanding phase
-    fetches the records it renders.
+    fetches the records it renders, by :meth:`fetch`.
+
+    **Through the work's sight** (ADR-0383 §7:7, §9:1). It holds the composition root's
+    :class:`~ai_assistant.orchestration.bound_stores.BoundStores`, never a store: the
+    selector walks, and the fetch reads, the memory store bound to the sight the pass
+    carries, which the stage is handed and never makes (§9:2).
     """
 
-    def __init__(self, *, episodes: EpisodeSelector) -> None:
-        """Wire the stage to the composition root's episode selector.
+    def __init__(self, *, episodes: EpisodeWalk, stores: BoundStores) -> None:
+        """Wire the stage to the composition root's episode selector and stores' holder.
 
         Args:
-            episodes: ADR-0276 §4's episode selector.
+            episodes: ADR-0276 §4's episode selector, as the walk over a store it is
+                handed.
+            stores: The holder that gives the memory store bound to a pass's sight.
         """
         self._episodes = episodes
+        self._stores = stores
 
     async def assemble(
-        self, channel: ChannelWindow, *, audience: TurnSupply, episodes: bool
+        self, channel: ChannelWindow, *, sight: Sight, audience: TurnSupply, episodes: bool
     ) -> Windows:
         """The window decision for one pass.
 
         Args:
             channel: The pass's channel window.
+            sight: The sight the pass carries, which binds the selector's reads.
             audience: The pass's audience posture, which filters both windows (§4:9).
             episodes: Whether the pass takes an episode window at all; with ``False``
                 it takes none (ADR-0276 §4:13), and then no store is read.
@@ -547,9 +587,37 @@ class WindowsStage:
         )
         if not episodes:
             return Windows(channel=channel, episode_ids=None, shared=shared)
-        selected = admitted_to_understanding(audience, await self._episodes(shared))
+        walked = await self._episodes(self._stores.memory(sight), shared)
+        selected = admitted_to_understanding(audience, walked)
         return Windows(
             channel=channel, episode_ids=tuple(record.id for record in selected), shared=shared
+        )
+
+    async def fetch(
+        self,
+        *,
+        sight: Sight,
+        episode_ids: tuple[str, ...] | None,
+        recalled_ids: tuple[str, ...],
+        audience: TurnSupply,
+    ) -> Fetched:
+        """:func:`fetch_held` over the memory store bound to the pass's sight (ADR-0282 §5).
+
+        Args:
+            sight: The sight the pass carries.
+            episode_ids: The episode window's ids, in its order; ``None`` where the pass
+                takes no episode window.
+            recalled_ids: Recall's kept ids, in its order.
+            audience: The pass's audience posture.
+
+        Returns:
+            What :func:`fetch_held` returns.
+        """
+        return await fetch_held(
+            self._stores.memory(sight),
+            episode_ids=episode_ids,
+            recalled_ids=recalled_ids,
+            audience=audience,
         )
 
 
@@ -573,7 +641,7 @@ class Fetched:
 
 
 async def fetch_held(
-    memory: MemoryStore,
+    memory: Bound[MemoryStore],
     *,
     episode_ids: tuple[str, ...] | None,
     recalled_ids: tuple[str, ...],
@@ -588,7 +656,7 @@ async def fetch_held(
     (§2, §5:2).
 
     Args:
-        memory: The store the ids were chosen from.
+        memory: The store the ids were chosen from, bound to the pass's sight.
         episode_ids: The episode window's ids, in its order; ``None`` where the pass
             takes no episode window.
         recalled_ids: Recall's kept ids, in its order.

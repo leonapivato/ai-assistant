@@ -815,6 +815,8 @@ async def test_a_defect_in_the_lookup_or_the_recording_fails_closed(
     assert _reads(state) == _FOR_THE_OWNER
     assert [(one["event"], one["at"]) for one in logs] == [
         ("work_facts_unrecorded", "start"),
+        # ADR-0383 §6:4: a work with no facts has no work's sight, and says so.
+        ("work_sight_degraded", "start"),
         ("work_facts_unrecorded", "join"),
     ]
 

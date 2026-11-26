@@ -73,6 +73,7 @@ from ai_assistant.orchestration import (
     HeldSource,
 )
 from ai_assistant.orchestration import engine as engine_module
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.matters import (
     DEFAULT_HELD_INPUT_LIMIT,
@@ -92,6 +93,7 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeSpeechSynthesizer,
     FakeSpeechTranscriber,
+    FakeStoryStore,
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
@@ -452,7 +454,10 @@ class Harness:
             understanding=understanding,
             understanding_version_limit=understanding_version_limit,
             windows=(
-                WindowsStage(episodes=RecentEpisodes(memory=self.memory, limit=10))
+                WindowsStage(
+                    episodes=RecentEpisodes(memory=self.memory, limit=10).walk,
+                    stores=BoundStores(memory=self.memory, stories=FakeStoryStore()),
+                )
                 if windows is None and understanding is not None
                 else windows
             ),

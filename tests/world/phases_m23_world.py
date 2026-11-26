@@ -77,6 +77,7 @@ from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.orchestration.channel_kinds import EMAIL_ACCOUNT_KIND, AccountConnection
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.connections import ConnectionOperations
@@ -418,10 +419,12 @@ def build_phases_world(
             prompt=default_prompt(UNDERSTANDING_PROMPT),
         ),
         understanding_version_limit=8,
-        windows=WindowsStage(episodes=RecentEpisodes(memory=store, limit=10)),
+        windows=WindowsStage(
+            episodes=RecentEpisodes(memory=store, limit=10).walk,
+            stores=BoundStores(memory=store, stories=stories),
+        ),
         recall=RecallStage(
-            memory=store,
-            stories=stories,
+            stores=BoundStores(memory=store, stories=stories),
             threshold=_RECALL_THRESHOLD,
             limit=3,
             budget=timedelta(seconds=2),

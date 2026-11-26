@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from structured_support import structured
-from understanding_support import TextAsStructured
+from understanding_support import OWNERS_SIGHT, TextAsStructured, bound_stores
 
 from ai_assistant.core.diagnostics import diagnosed_activation, write_diagnostic
 from ai_assistant.core.errors import MemoryStoreError, ModelError
@@ -68,7 +68,6 @@ from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeMemoryStore,
     FakeModelProvider,
-    FakeStoryStore,
     FakeToolCallingCompleter,
     default_prompt,
 )
@@ -114,8 +113,7 @@ def _fact(memory_id: str, fact: str) -> Memory:
 
 async def _recall_stage(memory: FakeMemoryStore, sink: FakeDiagnosticSink | None) -> RecallStage:
     return RecallStage(
-        memory=memory,
-        stories=FakeStoryStore(),
+        stores=bound_stores(memory),
         threshold=0.5,
         limit=3,
         budget=timedelta(seconds=2),
@@ -131,7 +129,9 @@ async def test_recall_writes_its_run_and_cues_then_each_find_and_what_it_kept() 
     stage = await _recall_stage(memory, sink)
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
-        recalled = await stage.recall("dentist appointment", audience=_AUDIENCE, deadline=math.inf)
+        recalled = await stage.recall(
+            "dentist appointment", sight=OWNERS_SIGHT, audience=_AUDIENCE, deadline=math.inf
+        )
 
     given, returned = sink.of(DiagnosticSource.RECALL)
     assert given.kind is DiagnosticKind.GIVEN
@@ -161,6 +161,7 @@ async def test_recall_s_second_run_writes_each_cue_with_its_kinds() -> None:
         await stage.recall_again(
             "the dentist",
             ("which Friday",),
+            sight=OWNERS_SIGHT,
             audience=_AUDIENCE,
             deadline=math.inf,
             passed_over=frozenset(),
@@ -185,7 +186,7 @@ async def test_a_failed_recall_writes_its_failure() -> None:
     stage = await _recall_stage(FakeMemoryStore(now=_now, failure="down"), sink)
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
-        await stage.recall("dentist", audience=_AUDIENCE, deadline=math.inf)
+        await stage.recall("dentist", sight=OWNERS_SIGHT, audience=_AUDIENCE, deadline=math.inf)
 
     body = _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])
     assert body["outcome"] == "failed"
@@ -197,7 +198,7 @@ async def test_a_recall_that_raises_writes_its_returned_entry_before_raising() -
     stage = await _recall_stage(FakeMemoryStore(now=_now), sink)
 
     with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(TimeoutError):
-        await stage.recall("dentist", audience=_AUDIENCE, deadline=0.0)
+        await stage.recall("dentist", sight=OWNERS_SIGHT, audience=_AUDIENCE, deadline=0.0)
 
     body = _body(sink.of(DiagnosticSource.RECALL, DiagnosticKind.RETURNED)[0])
     assert body["failure"]["class"] == "TimeoutError"
@@ -638,10 +639,10 @@ async def test_with_no_sink_every_phase_writes_nothing_and_decides_the_same() ->
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
         on = await (await _recall_stage(memory, sink)).recall(
-            "dentist appointment", audience=_AUDIENCE, deadline=math.inf
+            "dentist appointment", sight=OWNERS_SIGHT, audience=_AUDIENCE, deadline=math.inf
         )
         off = await (await _recall_stage(memory, None)).recall(
-            "dentist appointment", audience=_AUDIENCE, deadline=math.inf
+            "dentist appointment", sight=OWNERS_SIGHT, audience=_AUDIENCE, deadline=math.inf
         )
         await _understand(
             UnderstandingStage(

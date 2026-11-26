@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
+    Sight,
     SpeechChannelPayload,
     UnderstandingOmission,
     canonical_senders,
@@ -291,6 +292,10 @@ class ActivationState:
     person_block: PersonBlock | None = field(default=None, init=False)
     #: Whether the block's assembly was made, whatever it gave: it is made once.
     person_block_assembled: bool = field(default=False, init=False)
+    #: ADR-0383 §6:4 to §6:6: the work's sight, made by code when its facts are first
+    #: recorded and made again each time they are recorded again, never wider. Read through
+    #: :attr:`sight`; made by :meth:`_see` alone, and by no stage (§9:2).
+    _sight: Sight | None = field(default=None, init=False, repr=False)
     #: Every memory of the person block the activation was given, to understanding or to
     #: a planning round, kept whatever is dropped from the block later (§7:10): what
     #: capture's placement inherits from (ADR-0309 §5:10, ADR-0217 §3), even where no
@@ -383,6 +388,9 @@ class ActivationState:
         self.joined = (*self.joined, *inputs)
         self.merge_covered += len(inputs)
         self.merged = (*self.merged, *(one for one in merged if one not in self.merged))
+        # ADR-0383 §6:6: the facts are recorded again, so the sight is made again, as the
+        # meet of the one it had, and its senders now include the inputs that joined.
+        self._see(at="join")
 
     def commit(self) -> Commitment:
         """Acting's commitment step, before a round's act (ADR-0349 §7:14).
@@ -594,6 +602,52 @@ class ActivationState:
         return self.started_facts
 
     @property
+    def sight(self) -> Sight | None:
+        """The work's sight, what every read its stages make is bound by (ADR-0383 §6, §7:7).
+
+        Made from its recorded facts and every sender of every input it holds, by code
+        alone (§6:4, §6:10), and read here by every stage that reads a store for the work;
+        none makes or changes it (§9:2). ``None`` only for a state :func:`admit_channel`
+        did not build, which records no facts.
+        """
+        return self._sight
+
+    def _see(self, *, at: str) -> None:
+        """Make the work's sight from its facts as they now stand (ADR-0383 §6:4 to §6:6).
+
+        :meth:`~ai_assistant.core.types.Sight.of_work` from :attr:`work_facts`,
+        :attr:`held_senders` and the activation, as the meet of the sight it had, so it
+        never widens within the work (§6:6).
+
+        **A work whose facts were not recorded, or whose activation id was not minted**,
+        has no work's sight: ``of_work`` takes recorded facts and an activation, and both
+        paths are defects already logged (``work_facts_unrecorded``,
+        ``activation_capture_degraded``). Such a work reads by
+        :meth:`~ai_assistant.core.types.Sight.of_producer`'s sight of what it records:
+        with no facts an anyone bound alone, which sees nothing (§6:7, §6:3); with facts
+        and no activation, the bounds its facts and senders give, with nothing its own,
+        as it has no activation to name. ``work_sight_degraded`` says which. Its
+        count events carry the reader code ``producer``.
+        """
+        facts = self.work_facts
+        had = self._sight
+        if facts is not None and self.activation_id is not None:
+            self._sight = Sight.of_work(
+                facts, self.held_senders, activation=self.activation_id, had=had
+            )
+            return
+        _log.warning(
+            "work_sight_degraded", at=at, reason="facts" if facts is None else "identifier"
+        )
+        made = Sight.of_producer(facts, () if facts is None else self.held_senders)
+        if had is None:
+            self._sight = made
+        elif had.reader is made.reader:
+            self._sight = had.meet(made)
+        # Otherwise the work's sight it had stands: reading facts it no longer holds never
+        # widens it (§6:6).
+
+    @property
     def home(self) -> RecordHome:
         """The home every record this work writes takes (ADR-0383 §4:1, §4:4).
 
@@ -685,6 +739,23 @@ def active_state() -> ActivationState | None:
     return None if scope is None else scope.state
 
 
+def work_sight() -> Sight:
+    """The sight this worker's work carries, for a stage that reads a store (ADR-0383 §7:7).
+
+    Read, never made (§9:2): :attr:`ActivationState.sight` of :func:`active_state`.
+
+    Raises:
+        RuntimeError: Where no admitted work is running here, which has no sight: no read
+            of a store is made for it (§6:3).
+    """
+    state = active_state()
+    sight = None if state is None else state.sight
+    if sight is None:
+        msg = "a stage reads a store only by its work's sight (ADR-0383 §7:7)"
+        raise RuntimeError(msg)
+    return sight
+
+
 def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata seams, the stage bound, the messages it took in, who sent them, through which devices, and a task's occurrence's task
     input: ChannelInput,  # noqa: A002 — channel contract parameter
     reply: ReplyCapability | None,
@@ -774,6 +845,8 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
         clock=clock,
     )
     state.started_facts = record_started(state.trigger, activation_id=activation_id, task=task)
+    # ADR-0383 §6:6: the work's sight is made when its facts are first recorded.
+    state._see(at="start")
     return state
 
 

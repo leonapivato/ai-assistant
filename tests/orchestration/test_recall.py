@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import pytest
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.channel_validation import declared_input
 from ai_assistant.core.errors import MemoryStoreError
@@ -52,7 +53,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
+from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory_in_band
 from ai_assistant.testing.parties import (
@@ -280,9 +281,7 @@ def _stage(
     limit: int = 3,
     budget: timedelta = BUDGET,
 ) -> RecallStage:
-    return RecallStage(
-        memory=memory, stories=FakeStoryStore(), threshold=threshold, limit=limit, budget=budget
-    )
+    return RecallStage(stores=bound_stores(memory), threshold=threshold, limit=limit, budget=budget)
 
 
 async def _recall(
@@ -292,7 +291,7 @@ async def _recall(
     audience: TurnSupply = BOUNDED,
     deadline: float = math.inf,
 ) -> Recalled:
-    return await stage.recall(text, audience=audience, deadline=deadline)
+    return await stage.recall(text, sight=OWNERS_SIGHT, audience=audience, deadline=deadline)
 
 
 def _ids(recalled: Recalled) -> list[str]:
@@ -346,7 +345,7 @@ async def test_a_record_the_windows_hold_takes_no_slot_and_the_next_match_is_kep
     memory = await _store(first, below)
     assert _ids(await _recall(_stage(memory, limit=1))) == ["first"]
     recalled = await _stage(memory, limit=1).recall(
-        CUE, audience=BOUNDED, deadline=math.inf, shown=frozenset({"first"})
+        CUE, sight=OWNERS_SIGHT, audience=BOUNDED, deadline=math.inf, shown=frozenset({"first"})
     )
     assert _ids(recalled) == ["below"]
 
@@ -354,7 +353,7 @@ async def test_a_record_the_windows_hold_takes_no_slot_and_the_next_match_is_kep
 async def test_each_search_asks_for_the_limit_plus_the_ids_the_windows_hold() -> None:
     memory = await _store(_fact("m", "nothing alike"))
     await _stage(memory, limit=3).recall(
-        CUE, audience=BOUNDED, deadline=math.inf, shown=frozenset({"a", "b"})
+        CUE, sight=OWNERS_SIGHT, audience=BOUNDED, deadline=math.inf, shown=frozenset({"a", "b"})
     )
     assert [search.limit for search in memory.searches] == [5, 5, 5]
 
@@ -628,8 +627,7 @@ def test_the_stage_refuses_a_value_outside_its_bounds(
 ) -> None:
     with pytest.raises(ValueError, match="ADR-0281"):
         RecallStage(
-            memory=FakeMemoryStore(),
-            stories=FakeStoryStore(),
+            stores=bound_stores(FakeMemoryStore()),
             threshold=threshold,
             limit=limit,
             budget=budget,
