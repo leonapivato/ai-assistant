@@ -26,12 +26,24 @@ home :func:`~ai_assistant.core.types.home_may_be_written` does not allow is refu
 ``PlanningError`` before any I/O, by every member that writes either record (ADR-0386
 §6). Scheduled tasks and approval requests read their ``person`` as their home and gain
 none, and a stop record carries none (ADR-0383 §3).
+
+**A store bound to a sight** (ADR-0383 §7) is a copy of this one sharing its connection,
+lock and clock by reference, with the sight set. Withholding, every statement that reads
+records for an answer or for a decision a write rests on carries the sight's condition
+over the row's own columns (:mod:`ai_assistant.planning._home_columns`): an effect's and
+an observation's two home columns, an effect's ``activation_id`` (§7:4), a task's and a
+request's ``person``, and a request's asking activation from its record. A write's own
+checks, the stop record, an id or a key already taken and a revision, read every row
+(§7:11), and no statement gives back, counts or names a stop record (§3:3). Counting,
+every statement is the unbound one, and each read logs the homes of the records it gave
+back.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import sqlite3
 import threading
@@ -46,6 +58,7 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ApprovalOutcomePush,
     ApprovalRequest,
     ApprovalRequestWrite,
     ApprovalWriteAnswer,
@@ -55,9 +68,16 @@ from ai_assistant.core.types import (
     ScheduledTask,
     ScheduledTaskAuthor,
     ScheduledTaskWrite,
+    SightMode,
     Sureness,
     TaskWriteAnswer,
     TicketClaim,
+)
+from ai_assistant.planning._home_columns import (
+    count_given,
+    person_home,
+    seen_person_sql,
+    seen_sql,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.activation_effects import (
@@ -111,6 +131,7 @@ from ai_assistant.planning.observations import (
 )
 from ai_assistant.planning.scheduled_tasks import (
     Schedule,
+    below,
     by_person,
     checked_id,
     checked_instant,
@@ -139,14 +160,13 @@ from ai_assistant.planning.scheduled_tasks import (
 from ai_assistant.planning.stops import revalidated_activation_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         ApprovalCard,
         ApprovalDue,
-        ApprovalOutcomePush,
         ApprovalRequestState,
         ApprovalRequestStep,
         ApprovalTap,
@@ -156,11 +176,39 @@ if TYPE_CHECKING:
         RulePush,
         ScheduledDue,
         ScheduledTaskCancel,
+        Sight,
         TaskSpawn,
         ToolOutcome,
     )
 
 _OWNER_ONLY = 0o600
+
+#: The activation a stored approval request records as having asked it (ADR-0383 §7:4),
+#: read from the row's record; ``NULL`` where the record is not JSON, so the condition a
+#: sight makes of it is never an error.
+_REQUEST_ASKER: Final = "CASE WHEN json_valid(data) THEN json_extract(data, '$.activation_id') END"
+
+#: A task row one of whose occurrences was pushed to the activation bound last, read from
+#: its record alone; a record that is not JSON was pushed to none.
+_PUSHED_TO_TASK: Final = (
+    "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.occurrences') "
+    "AS occurrence, json_each(occurrence.value, '$.activations') AS pushed "
+    "WHERE pushed.value = ?) ELSE 0 END"
+)
+
+#: A request row one of whose cards carries the token bound last, read from its record.
+_CARRIED_BY_A_CARD: Final = (
+    "CASE WHEN json_valid(data) THEN EXISTS (SELECT 1 FROM json_each(data, '$.cards') AS card "
+    "WHERE json_extract(card.value, '$.token') = ?) ELSE 0 END"
+)
+
+#: A request row whose outcome was pushed to the activation bound last, read from its record.
+_PUSHED_OUTCOME: Final = (
+    "coalesce(CASE WHEN json_valid(data) THEN json_extract(data, '$.pushed_to') END = ?, 0)"
+)
+
+#: A condition true of every row: an unbound store's, and a counting one's (§7:10).
+_EVERY_ROW: Final[tuple[str, list[object]]] = ("1", [])
 
 
 class _ClockFailedError(Exception):
@@ -440,9 +488,9 @@ _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number, home_kind, 
 #: and empty where one statement is the whole read.
 _PART_ROWS = (
     "SELECT {seq}" + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
-    "WHERE (part_round, part_number) IN (VALUES {keys}) "
+    "WHERE ((part_round, part_number) IN (VALUES {keys}) "
     "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
-    "IN (VALUES {keys}) ORDER BY claimed_seq ASC"
+    "IN (VALUES {keys})) AND {seen} ORDER BY claimed_seq ASC"
 )
 
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
@@ -625,7 +673,9 @@ class SqlitePlanStore:
     data-rights operations over both.
     """
 
-    def __init__(self, *, path: Path | str, now: Clock = _utcnow) -> None:
+    def __init__(
+        self, *, path: Path | str, now: Clock = _utcnow, sight_mode: SightMode = SightMode.COUNT
+    ) -> None:
         """Open (or create) the store at ``path``.
 
         Args:
@@ -638,6 +688,9 @@ class SqlitePlanStore:
             now: Clock for export timestamps; injectable for deterministic tests.
                 Guarded by :func:`~ai_assistant.core.clock.checked_clock`, so a
                 non-conforming reading is a ``PlanningError`` (ADR-0026).
+            sight_mode: Whether a store bound to a sight withholds or only counts
+                (ADR-0383 §7:10): fixed here, by the composition root, and read from no
+                setting and no running act.
 
         Raises:
             PlanningError: If the database cannot be opened or initialised, or is
@@ -645,6 +698,8 @@ class SqlitePlanStore:
         """
         self._path = path if path == ":memory:" else str(Path(path))
         self._clock = checked_clock(now, owner="SqlitePlanStore")
+        self._sight_mode = sight_mode
+        self._sight: Sight | None = None
         self._lock = asyncio.Lock()
         self._conn = self._setup()
 
@@ -1371,6 +1426,58 @@ class SqlitePlanStore:
         """
         return transaction(self._conn, what, error=PlanningError)
 
+    # --- a sight (ADR-0383 §7, §8, §11) ----------------------------------------
+
+    def bound(self, sight: Sight) -> SqlitePlanStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1); the Protocol states the rest.
+
+        A shallow copy sharing this store's connection, lock and clock by reference, with
+        the sight set: the meet of the one it was already bound to, where it was (§6:6).
+        It opens nothing, and closing either closes both.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._sight = sight if self._sight is None else self._sight.meet(sight)
+        return view
+
+    def _withholding_sight(self) -> Sight | None:
+        """The sight this store withholds by, or ``None`` where it holds every row."""
+        if self._sight is None or self._sight_mode is SightMode.COUNT:
+            return None
+        return self._sight
+
+    def _effects_seen(self) -> tuple[str, list[object]]:
+        """The sight's condition over an effect row: its home, or its activation (§7:4)."""
+        sight = self._withholding_sight()
+        return _EVERY_ROW if sight is None else seen_sql(sight, made_by="activation_id")
+
+    def _observations_seen(self) -> tuple[str, list[object]]:
+        """The sight's condition over an observation row: its home alone."""
+        sight = self._withholding_sight()
+        return _EVERY_ROW if sight is None else seen_sql(sight)
+
+    def _tasks_seen(self, *, held: bool = True) -> tuple[str, list[object]]:
+        """The sight's condition over a task row, its person's domain; negated, not held."""
+        sight = self._withholding_sight()
+        where, params = _EVERY_ROW if sight is None else seen_person_sql(sight)
+        return (where, params) if held else (f"NOT ({where})", params)
+
+    def _requests_seen(self, *, held: bool = True) -> tuple[str, list[object]]:
+        """The sight's condition over a request row, its person's domain or who asked it."""
+        sight = self._withholding_sight()
+        where, params = (
+            _EVERY_ROW if sight is None else seen_person_sql(sight, made_by=_REQUEST_ASKER)
+        )
+        return (where, params) if held else (f"NOT ({where})", params)
+
+    def _counted(self, member: str, given: Iterable[tuple[RecordHome | None, str | None]]) -> None:
+        """Write §11:1's count of one read, where this store is bound and only counts."""
+        if self._sight is not None and self._sight_mode is SightMode.COUNT:
+            count_given(self._sight, member=member, given=given)
+
     # --- stop records and activation effect records ----------------------
 
     async def record_stop(self, activation_id: str, /) -> None:
@@ -1453,26 +1560,27 @@ class SqlitePlanStore:
             ClaimStopped: If the store holds a stop record for the activation.
             PlanningError: If the store already holds a record under the id.
         """
+        # The id and the part a call spends are a write's own checks, read over every
+        # row whatever the sight (ADR-0383 §7:11); the backstop matches the rows this
+        # store, as bound, holds (§7:2).
         held = conn.execute(
             "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
         ).fetchone()
         # Every row carrying the part, by its promoted columns or by its record, and
         # each reconciled: a column an outside writer changed or cleared would
         # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
-        spent = record.part is not None and bool(
-            [
-                _checked_activation_effect(str(self._path), row)
-                for row in conn.execute(
-                    _PART_ROWS.format(keys="(?, ?)", seq=""),
-                    (record.part.round, record.part.part) * 2,
-                ).fetchall()
-            ]
+        where, params = self._effects_seen()
+        spent = record.part is not None and self._any_carries(
+            conn.execute(
+                _PART_ROWS.format(keys="(?, ?)", seq=f"{where}, ", seen="1"),
+                (*params, *(record.part.round, record.part.part) * 2),
+            ).fetchall()
         )
         # Read in slices on this transaction's own connection, so a match past
         # SQLite's bound is still read whole under the write lock (issue #3296).
         matched = [
             _checked_activation_effect(str(self._path), row)
-            for row in _effect_rows(conn, named or ())
+            for row in _effect_rows(conn, named or (), self._effects_seen())
         ]
         return decide_activation_claim(
             record,
@@ -1483,6 +1591,22 @@ class SqlitePlanStore:
             matched=matched,
             spent=spent,
         )
+
+    def _any_carries(self, rows: Sequence[Sequence[Any]]) -> bool:
+        """Whether any row carries a key a claim takes once (ADR-0383 §7:11).
+
+        Each row is ``(held, *effect columns)``. A row this store, as bound, holds is
+        decoded and reconciled with its columns, as the unbound check always did; a row
+        it does not hold carries the key all the same, and is not decoded, so nothing
+        of a record it does not hold is read but that it matched.
+
+        Raises:
+            PlanningError: If a held row does not decode or disagrees with its columns.
+        """
+        for row in rows:
+            if row[0]:
+                _checked_activation_effect(str(self._path), row[1:])
+        return bool(rows)
 
     async def finish_activation_effect(
         self,
@@ -1514,9 +1638,10 @@ class SqlitePlanStore:
         self, effect_id: str, outcome: object, reason: object, position: object
     ) -> None:
         with self._transaction(f"finish activation effect {effect_id!r}") as conn:
+            where, params = self._effects_seen()
             row = conn.execute(
-                "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects WHERE id = ?",  # noqa: S608 — only a constant is interpolated
-                (effect_id,),
+                "SELECT " + _EFFECT_COLUMNS + f" FROM activation_effects WHERE id = ? AND {where}",  # noqa: S608 — module text and placeholders; values bound
+                (effect_id, *params),
             ).fetchone()
             held = None if row is None else _checked_activation_effect(str(self._path), row)
             record = finished(held, effect_id, outcome, reason=reason, position=position)
@@ -1537,10 +1662,13 @@ class SqlitePlanStore:
         """
         named = requested_activations(activation_ids)
         if not named:
+            self._counted("activation_effects", ())
             return ()
         async with self._lock:
             rows = await _run_to_completion(self._activation_effects_sync, named)
-        return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+        found = tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+        self._counted("activation_effects", _effects_given(found))
+        return found
 
     def _activation_effects_sync(self, named: tuple[str, ...]) -> list[tuple[Any, ...]]:
         # Several statements under one read transaction, so the slices see one snapshot
@@ -1548,7 +1676,7 @@ class SqlitePlanStore:
         with transaction(
             self._conn, "read activation effects", error=PlanningError, immediate=False
         ) as conn:
-            return _effect_rows(conn, named)
+            return _effect_rows(conn, named, self._effects_seen())
 
     async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
         """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
@@ -1559,10 +1687,13 @@ class SqlitePlanStore:
         """
         named = requested_parts(parts)
         if not named:
+            self._counted("part_effects", ())
             return ()
         async with self._lock:
             rows = await _run_to_completion(self._part_effects_sync, named)
-        return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+        found = tuple(_checked_activation_effect(str(self._path), row) for row in rows)
+        self._counted("part_effects", _effects_given(found))
+        return found
 
     def _part_effects_sync(self, named: tuple[QuestionPart, ...]) -> list[tuple[Any, ...]]:
         # Several statements under one read transaction, so the slices see one snapshot
@@ -1573,7 +1704,7 @@ class SqlitePlanStore:
             error=PlanningError,
             immediate=False,
         ) as conn:
-            return _part_rows(conn, named)
+            return _part_rows(conn, named, self._effects_seen())
 
     # --- observation records (ADR-0329 §16) ------------------------------
 
@@ -1600,11 +1731,22 @@ class SqlitePlanStore:
         self, record: ObservationRecord, expected: int
     ) -> ObservationRecord:
         with self._transaction(f"write the observation record of {record.episode!r}") as conn:
+            # The held row is read whatever the sight, with whether this store, as bound,
+            # holds it: its revision is a write's own check (ADR-0383 §7:11), and a write
+            # that would change a row it does not hold is refused (§7:5).
+            where, params = self._observations_seen()
             row = conn.execute(
-                "SELECT " + _OBSERVATION_COLUMNS + " FROM observations WHERE episode_id = ?",  # noqa: S608 — only a constant is interpolated
-                (record.episode,),
+                "SELECT " + _OBSERVATION_COLUMNS + f", {where} FROM observations "  # noqa: S608 — module text and placeholders; values bound
+                "WHERE episode_id = ?",
+                (*params, record.episode),
             ).fetchone()
-            held = None if row is None else _checked_observation(str(self._path), row)
+            if row is not None and not row[-1]:
+                msg = (
+                    f"the plan store holds a record for episode {record.episode!r} this "
+                    f"write may not change; nothing is written"
+                )
+                raise PlanningError(msg)
+            held = None if row is None else _checked_observation(str(self._path), row[:-1])
             decide_observation_write(
                 record.episode, held=None if held is None else held.revision, expected=expected
             )
@@ -1665,6 +1807,7 @@ class SqlitePlanStore:
         """
         named = requested_episodes(episode_ids)
         if not named:
+            self._counted("observations", ())
             return ()
         async with self._lock:
             rows = await _run_to_completion(self._observations_sync, named)
@@ -1672,13 +1815,16 @@ class SqlitePlanStore:
             record.episode: record
             for record in (_checked_observation(str(self._path), row) for row in rows)
         }
-        return tuple(found[one] for one in named if one in found)
+        given = tuple(found[one] for one in named if one in found)
+        self._counted("observations", ((one.home, None) for one in given))
+        return given
 
     def _observations_sync(self, named: tuple[str, ...]) -> list[tuple[Any, ...]]:
         # In slices, because the observer may ask after every due episode at once and
         # SQLite bounds the parameters one statement binds. Several statements under one
         # read transaction, so the slices see one snapshot.
         rows: list[tuple[Any, ...]] = []
+        where, params = self._observations_seen()
         with transaction(
             self._conn, "read observation records", error=PlanningError, immediate=False
         ) as conn:
@@ -1688,9 +1834,9 @@ class SqlitePlanStore:
                 rows.extend(
                     tuple(row)
                     for row in conn.execute(
-                        "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — only placeholders are interpolated
-                        f"WHERE episode_id IN ({marks})",
-                        part,
+                        "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — module text and placeholders; values bound
+                        f"WHERE episode_id IN ({marks}) AND {where}",
+                        (*part, *params),
                     ).fetchall()
                 )
         return rows
@@ -1708,7 +1854,10 @@ class SqlitePlanStore:
         start = checked_since(since)
         async with self._lock:
             rows = await _run_to_completion(self._calls_since_sync, _micros(start))
-        return sum(_checked_observation(str(self._path), row).call_count(start) for row in rows)
+        calls = sum(_checked_observation(str(self._path), row).call_count(start) for row in rows)
+        # A store-wide figure that counts writes, answered alike bound or not (§8:5).
+        self._counted("observer_calls_since", ())
+        return calls
 
     def _calls_since_sync(self, since_us: int) -> list[tuple[Any, ...]]:
         try:
@@ -1732,14 +1881,19 @@ class SqlitePlanStore:
     # snapshot of both tables.
 
     def _schedule(self, conn: sqlite3.Connection, now: datetime) -> Schedule:
-        """Read the whole schedule on ``conn``, inside the caller's transaction."""
+        """Read the schedule on ``conn``, inside the caller's transaction.
+
+        The tasks this store, as bound, holds, chosen by their rows before any is decoded.
+        """
+        where, params = self._tasks_seen()
         tasks = {
             task.id: task
             for task in (
                 _checked_task(str(self._path), row)
                 for row in conn.execute(
-                    "SELECT " + _TASK_COLUMNS + " FROM scheduled_tasks "  # noqa: S608 — only a constant is interpolated
-                    "ORDER BY written_seq ASC"
+                    "SELECT " + _TASK_COLUMNS + f" FROM scheduled_tasks WHERE {where} "  # noqa: S608 — module text and placeholders; values bound
+                    "ORDER BY written_seq ASC",
+                    params,
                 ).fetchall()
             )
         }
@@ -1829,6 +1983,10 @@ class SqlitePlanStore:
                 book, refused = self._ticket_refusal(conn, record, named, deliberate_repeat)
                 if refused is not None:
                     return ticket_refused_write(refused)
+            if conn.execute("SELECT 1 FROM scheduled_tasks WHERE id = ?", (spawn.id,)).fetchone():
+                # ADR-0383 §7:11: whether a task already has the id is read over every row.
+                msg = f"the plan store already holds scheduled task {spawn.id} (ADR-0350 §3:3)"
+                raise PlanningError(msg)
             schedule = self._schedule(conn, now)
             written = decide_task_write(
                 schedule,
@@ -1880,7 +2038,9 @@ class SqlitePlanStore:
         named = requested_ids(task_ids, "scheduled tasks")
         async with self._lock:
             held = await _run_to_completion(self._scheduled_tasks_sync)
-        return tuple(held[one] for one in named if one in held)
+        found = tuple(held[one] for one in named if one in held)
+        self._counted("scheduled_tasks", _tasks_given(found))
+        return found
 
     def _read_schedule(self, what: str) -> Schedule:
         """The whole schedule, read under one deferred transaction."""
@@ -1903,7 +2063,9 @@ class SqlitePlanStore:
         wanted = requested_states(states)
         async with self._lock:
             held = await _run_to_completion(self._person_scheduled_tasks_sync)
-        return by_person(held, whose, wanted)
+        found = by_person(held, whose, wanted)
+        self._counted("person_scheduled_tasks", _tasks_given(found))
+        return found
 
     def _person_scheduled_tasks_sync(self) -> dict[str, ScheduledTask]:
         return self._read_schedule("read a person's scheduled tasks").tasks
@@ -1918,7 +2080,9 @@ class SqlitePlanStore:
         named = requested_ids(activation_ids, "spawned tasks")
         async with self._lock:
             held = await _run_to_completion(self._spawned_tasks_sync)
-        return spawned_by(held, named)
+        found = spawned_by(held, named)
+        self._counted("spawned_tasks", _tasks_given(found))
+        return found
 
     def _spawned_tasks_sync(self) -> dict[str, ScheduledTask]:
         return self._read_schedule("read spawned tasks").tasks
@@ -1933,7 +2097,9 @@ class SqlitePlanStore:
         named = checked_id(activation_id, "activation")
         async with self._lock:
             held = await _run_to_completion(self._scheduled_lineage_sync)
-        return lineage(held, named)
+        found = lineage(held, named)
+        self._counted("scheduled_lineage", _tasks_given(found))
+        return found
 
     def _scheduled_lineage_sync(self) -> dict[str, ScheduledTask]:
         return self._read_schedule("read a scheduled task's lineage").tasks
@@ -1947,7 +2113,12 @@ class SqlitePlanStore:
         named = checked_id(task_id, "scheduled task")
         async with self._lock:
             held = await _run_to_completion(self._live_below_sync)
-        return live_below(held, named)
+        answer = live_below(held, named)
+        task = held.get(named)
+        self._counted(
+            "live_below", _tasks_given(() if task is None else (task, *below(held, task)))
+        )
+        return answer
 
     def _live_below_sync(self) -> dict[str, ScheduledTask]:
         return self._read_schedule("read what is live below a scheduled task").tasks
@@ -1962,7 +2133,9 @@ class SqlitePlanStore:
         instant = checked_instant(at)
         async with self._lock:
             held = await _run_to_completion(self._due_occurrences_sync)
-        return due(held, instant)
+        found = due(held, instant)
+        self._counted("due_occurrences", _tasks_given(one.task for one in found.due))
+        return found
 
     def _due_occurrences_sync(self) -> dict[str, ScheduledTask]:
         return self._read_schedule("read the scheduled occurrences due").tasks
@@ -1999,6 +2172,19 @@ class SqlitePlanStore:
         now: datetime,
     ) -> OccurrencePush:
         with self._transaction(f"push occurrence {number} of {task_id!r}") as conn:
+            where, params = self._tasks_seen(held=False)
+            if conn.execute(
+                f"SELECT 1 FROM scheduled_tasks WHERE {where} AND {_PUSHED_TO_TASK}",  # noqa: S608 — module text and placeholders; values bound
+                (*params, activation_id),
+            ).fetchone():
+                # ADR-0383 §7:11: an activation an occurrence was pushed to is a key, read
+                # over every row, as the unbound decision reads it first; a row this store
+                # does not hold is read for the key alone, from its record, undecoded.
+                msg = (
+                    f"an occurrence was already pushed to activation {activation_id} "
+                    f"(ADR-0350 §7:5)"
+                )
+                raise PlanningError(msg)
             schedule = self._schedule(conn, now)
             answer = decide_push(schedule, task_id, number, activation_id, rule=rule)
             self._persist(conn, schedule)
@@ -2068,11 +2254,18 @@ class SqlitePlanStore:
                 strings, or the backend fails.
         """
         named = requested_ids(activation_ids, "stop records")
+        if self._withholding_sight() is not None:
+            # ADR-0383 §3:3: a stop record carries no home, and no bound store gives one
+            # back; a write's own checks still read it.
+            return ()
         if not named:
+            self._counted("stopped_activations", ())
             return ()
         async with self._lock:
             held = await _run_to_completion(self._stopped_activations_sync, named)
-        return tuple(one for one in named if one in held)
+        found = tuple(one for one in named if one in held)
+        self._counted("stopped_activations", ((None, None) for _ in found))
+        return found
 
     def _stopped_activations_sync(self, named: tuple[str, ...]) -> set[str]:
         held: set[str] = set()
@@ -2111,9 +2304,10 @@ class SqlitePlanStore:
         self, effect_id: str, delivered: object, position: object
     ) -> None:
         with self._transaction(f"confirm activation effect {effect_id!r}") as conn:
+            where, params = self._effects_seen()
             row = conn.execute(
-                "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects WHERE id = ?",  # noqa: S608 — only a constant is interpolated
-                (effect_id,),
+                "SELECT " + _EFFECT_COLUMNS + f" FROM activation_effects WHERE id = ? AND {where}",  # noqa: S608 — module text and placeholders; values bound
+                (effect_id, *params),
             ).fetchone()
             held = None if row is None else _checked_activation_effect(str(self._path), row)
             record = confirmed(held, effect_id, delivered=delivered, position=position)
@@ -2147,19 +2341,39 @@ class SqlitePlanStore:
     # §5:5). The writes take `BEGIN IMMEDIATE`, and the reads a deferred transaction.
 
     def _book(self, conn: sqlite3.Connection) -> Book:
-        """Read every approval request on ``conn``, inside the caller's transaction."""
-        return Book(
-            requests={
-                one.id: one
-                for one in (
-                    _checked_request(str(self._path), row)
-                    for row in conn.execute(
-                        "SELECT " + _REQUEST_COLUMNS + " FROM approval_requests "  # noqa: S608 — only a constant is interpolated
-                        "ORDER BY written_seq ASC"
-                    ).fetchall()
-                )
-            }
-        )
+        """Read the approval requests on ``conn``, inside the caller's transaction.
+
+        The requests this store, as bound, holds, chosen by their rows before any is
+        decoded. A request the statement holds is held only where its record, decoded,
+        says so too: one whose row and record disagree was altered outside the store, and
+        is refused as corrupt rather than given back (the ruling on #3742).
+
+        Raises:
+            PlanningError: If a request does not decode, or one held disagrees with the
+                sight about whose it is.
+        """
+        where, params = self._requests_seen()
+        requests = {
+            one.id: one
+            for one in (
+                _checked_request(str(self._path), row)
+                for row in conn.execute(
+                    "SELECT " + _REQUEST_COLUMNS + f" FROM approval_requests WHERE {where} "  # noqa: S608 — module text and placeholders; values bound
+                    "ORDER BY written_seq ASC",
+                    params,
+                ).fetchall()
+            )
+        }
+        sight = self._withholding_sight()
+        if sight is not None:
+            for one in requests.values():
+                if not sight.sees(person_home(one.person), made_by=one.activation_id):
+                    msg = (
+                        f"the plan store at {self._path!r} holds an approval request whose "
+                        f"row and record disagree about whose it is; the store is corrupt"
+                    )
+                    raise PlanningError(msg)
+        return Book(requests=requests)
 
     def _persist_book(self, conn: sqlite3.Connection, book: Book) -> None:
         """Write back the requests a decision changed, new or rewritten."""
@@ -2182,13 +2396,41 @@ class SqlitePlanStore:
         with transaction(self._conn, what, error=PlanningError, immediate=False) as conn:
             return self._book(conn).requests
 
-    def _approvals_step[T](self, what: str, decide: Callable[[Book], T]) -> T:
-        """Run one decision over the book in a write transaction, and persist it."""
+    def _approvals_step[T](
+        self,
+        what: str,
+        decide: Callable[[Book], T],
+        unheld: Callable[[sqlite3.Connection, T], None] | None = None,
+    ) -> T:
+        """Run one decision over the book in a write transaction, and persist it.
+
+        ``unheld``, where given, is a write's own check over the requests this store, as
+        bound, does not hold (ADR-0383 §7:11), run on the step's own connection after the
+        decision and before its write, raising to write nothing.
+        """
         with self._transaction(what) as conn:
             book = self._book(conn)
             answer = decide(book)
+            if unheld is not None and self._withholding_sight() is not None:
+                unheld(conn, answer)
             self._persist_book(conn, book)
         return answer
+
+    def _unheld_request_carries(self, conn: sqlite3.Connection, key: str, value: str) -> bool:
+        """Whether a request this store, as bound, does not hold carries ``value`` as a key.
+
+        ``key`` is :data:`_CARRIED_BY_A_CARD` or :data:`_PUSHED_OUTCOME`. Read from the record
+        alone, undecoded, so nothing of a request it does not hold is read but that the key
+        is taken (ADR-0383 §7:11); a record that is not JSON carries none.
+        """
+        where, params = self._requests_seen(held=False)
+        return (
+            conn.execute(
+                f"SELECT 1 FROM approval_requests WHERE {where} AND {key}",  # noqa: S608 — module text and placeholders; values bound
+                (*params, value),
+            ).fetchone()
+            is not None
+        )
 
     async def write_approval_request(
         self,
@@ -2226,6 +2468,13 @@ class SqlitePlanStore:
     ) -> ApprovalRequestWrite:
         with self._transaction(f"write approval request {request.id!r}") as conn:
             self._decided_claim(conn, record, None, deliberate_repeat)
+            if conn.execute(
+                "SELECT 1 FROM approval_requests WHERE id = ?", (request.id,)
+            ).fetchone():
+                # ADR-0383 §7:11: whether a request already has the id is read over every
+                # row.
+                msg = f"the plan store already holds approval request {request.id}"
+                raise PlanningError(msg)
             book = self._book(conn)
             waiting = decide_request_write(book, request)
             if waiting is not None:
@@ -2248,7 +2497,9 @@ class SqlitePlanStore:
         named = requested_request_ids(request_ids)
         async with self._lock:
             held = await _run_to_completion(self._read_book, "read approval requests")
-        return tuple(held[one] for one in named if one in held)
+        found = tuple(held[one] for one in named if one in held)
+        self._counted("approval_requests", _requests_given(found))
+        return found
 
     async def person_approval_requests(
         self, person: str, states: Sequence[ApprovalRequestState], /
@@ -2263,7 +2514,9 @@ class SqlitePlanStore:
         wanted = requested_request_states(states)
         async with self._lock:
             held = await _run_to_completion(self._read_book, "read a person's approval requests")
-        return requests_by_person(held, whose, wanted)
+        found = requests_by_person(held, whose, wanted)
+        self._counted("person_approval_requests", _requests_given(found))
+        return found
 
     async def approval_request_by_token(self, token: str, /) -> ApprovalRequest | None:
         """Return the request one of whose cards carries ``token``, or ``None`` (§4:10).
@@ -2275,7 +2528,11 @@ class SqlitePlanStore:
         named = checked_token(token)
         async with self._lock:
             held = await _run_to_completion(self._read_book, "read an approval request by token")
-        return by_token(held, named)
+        found = by_token(held, named)
+        self._counted(
+            "approval_request_by_token", _requests_given(() if found is None else (found,))
+        )
+        return found
 
     async def record_approval_card(self, request_id: str, card: ApprovalCard, /) -> ApprovalRequest:
         """Record one of a request's cards and its token, in one step (§4:3, §4:10).
@@ -2291,6 +2548,7 @@ class SqlitePlanStore:
                 self._approvals_step,
                 f"record a card of approval request {named!r}",
                 lambda book: decide_card(book, named, posted),
+                lambda conn, _written: self._token_untaken(conn, posted, named),
             )
 
     async def answer_approval_request(
@@ -2344,6 +2602,34 @@ class SqlitePlanStore:
                 lambda book: decide_void(book, named),
             )
 
+    def _token_untaken(self, conn: sqlite3.Connection, card: ApprovalCard, request_id: str) -> None:
+        """Refuse a card whose token a request the binding does not hold carries (§7:11).
+
+        Raises:
+            PlanningError: If one does.
+        """
+        if card.token is not None and self._unheld_request_carries(
+            conn, _CARRIED_BY_A_CARD, card.token
+        ):
+            msg = f"a card token is minted once, and approval request {request_id}'s is not new"
+            raise PlanningError(msg)
+
+    def _push_untaken(
+        self, conn: sqlite3.Connection, answer: ApprovalOutcomePush, activation_id: str
+    ) -> None:
+        """Refuse a push to an activation a request the binding does not hold was pushed to.
+
+        The activation an outcome was pushed to is a key, read over every request (§7:11).
+
+        Raises:
+            PlanningError: If one was.
+        """
+        if answer is ApprovalOutcomePush.PUSHED and self._unheld_request_carries(
+            conn, _PUSHED_OUTCOME, activation_id
+        ):
+            msg = f"an approval's outcome was already pushed to activation {activation_id}"
+            raise PlanningError(msg)
+
     async def due_approval_outcomes(self, at: datetime, /) -> ApprovalDue:
         """Return the outcomes to push, the requests expiring, and the next expiry (§3:4).
 
@@ -2354,7 +2640,9 @@ class SqlitePlanStore:
         instant = checked_at(at)
         async with self._lock:
             held = await _run_to_completion(self._read_book, "read the approvals due")
-        return approvals_due(held, instant)
+        found = approvals_due(held, instant)
+        self._counted("due_approval_outcomes", _requests_given((*found.outcomes, *found.expiring)))
+        return found
 
     async def pushed_approval_outcomes(self) -> tuple[ApprovalRequest, ...]:
         """Return every request whose outcome is marked pushed, in the order written (§3:7).
@@ -2364,7 +2652,9 @@ class SqlitePlanStore:
         """
         async with self._lock:
             held = await _run_to_completion(self._read_book, "read the approvals pushed")
-        return pushed_outcomes(held)
+        found = pushed_outcomes(held)
+        self._counted("pushed_approval_outcomes", _requests_given(found))
+        return found
 
     async def mark_approval_outcome_pushed(
         self, request_id: str, activation_id: str, /
@@ -2382,6 +2672,7 @@ class SqlitePlanStore:
                 self._approvals_step,
                 f"push the outcome of approval request {named!r}",
                 lambda book: decide_outcome_push(book, named, pushed_to),
+                lambda conn, answer: self._push_untaken(conn, answer, pushed_to),
             )
 
     async def claim_ticket_call(
@@ -2441,15 +2732,13 @@ class SqlitePlanStore:
         book = self._book(conn)
         # Every record carrying the key, read from the record itself and reconciled, so a
         # second claim of one ticket is refused whatever the request says (§5:5).
-        carried = bool(
-            [
-                _checked_activation_effect(str(self._path), row)
-                for row in conn.execute(
-                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
-                    "WHERE json_extract(data, '$.ticket') = ?",
-                    (record.ticket,),
-                ).fetchall()
-            ]
+        where, params = self._effects_seen()
+        carried = self._any_carries(
+            conn.execute(
+                f"SELECT {where}, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — module text and placeholders; values bound
+                "WHERE json_extract(data, '$.ticket') = ?",
+                (*params, record.ticket),
+            ).fetchall()
         )
         refused = decide_ticket(book, record, carried=carried)
         if refused is not None:
@@ -2474,7 +2763,7 @@ class SqlitePlanStore:
         exported_at = self._now()
         async with self._lock:
             stopped, acted, observed, schedule, book = await _run_to_completion(self._export_sync)
-        return PlanExport(
+        document = PlanExport(
             exported_at=exported_at,
             # ADR-0297 §1: every stop record, in a deterministic order.
             stopped_activations=tuple(stopped),
@@ -2487,6 +2776,17 @@ class SqlitePlanStore:
             # ADR-0361 §8:2: every approval request, in the order written.
             approval_requests=tuple(book.requests.values()),
         )
+        self._counted(
+            "export",
+            (
+                *((None, None) for _ in document.stopped_activations),
+                *_effects_given(document.activation_effects),
+                *((one.home, None) for one in document.observations),
+                *_tasks_given(document.scheduled_tasks),
+                *_requests_given(document.approval_requests),
+            ),
+        )
+        return document
 
     def _export_sync(
         self,
@@ -2499,24 +2799,33 @@ class SqlitePlanStore:
             # Each stop record is revalidated as the identifier it was written as, so
             # a row an outside writer blanked or nulled is refused as `planning`'s own
             # error rather than escaping as a raw validation failure of the document.
-            stopped: list[str] = [
-                revalidated_activation_id(r[0])
-                for r in conn.execute(
-                    "SELECT activation_id FROM stopped_activations ORDER BY activation_id ASC"
-                ).fetchall()
-            ]
+            # Bound and withholding, none: no bound store gives one back (§3:3).
+            stopped: list[str] = (
+                []
+                if self._withholding_sight() is not None
+                else [
+                    revalidated_activation_id(r[0])
+                    for r in conn.execute(
+                        "SELECT activation_id FROM stopped_activations ORDER BY activation_id ASC"
+                    ).fetchall()
+                ]
+            )
+            effects_where, effects_params = self._effects_seen()
             acted = [
                 _checked_activation_effect(str(self._path), row)
                 for row in conn.execute(
-                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only a constant is interpolated
-                    "ORDER BY claimed_seq ASC"
+                    "SELECT " + _EFFECT_COLUMNS + f" FROM activation_effects WHERE {effects_where} "  # noqa: S608 — module text and placeholders; values bound
+                    "ORDER BY claimed_seq ASC",
+                    effects_params,
                 ).fetchall()
             ]
+            observed_where, observed_params = self._observations_seen()
             observed = [
                 _checked_observation(str(self._path), row)
                 for row in conn.execute(
-                    "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — only a constant is interpolated
-                    "ORDER BY episode_id ASC"
+                    "SELECT " + _OBSERVATION_COLUMNS + f" FROM observations WHERE {observed_where} "  # noqa: S608 — module text and placeholders; values bound
+                    "ORDER BY episode_id ASC",
+                    observed_params,
                 ).fetchall()
             ]
             schedule = self._schedule(conn, _EPOCH)
@@ -2534,18 +2843,40 @@ class SqlitePlanStore:
             return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
+        # Bound and withholding, each statement removes the rows this store holds alone,
+        # and no stop record, which no bound store removes or counts (ADR-0383 §3:3).
+        effects = self._effects_seen()
+        observations = self._observations_seen()
+        tasks = self._tasks_seen()
+        requests = self._requests_seen()
         with self._transaction("clear the plan store") as conn:
             # ADR-0297 §1: `clear` erases every stop record with the store's other rows.
-            removed: int = conn.execute("DELETE FROM stopped_activations").rowcount
+            removed: int = (
+                0
+                if self._withholding_sight() is not None
+                else conn.execute("DELETE FROM stopped_activations").rowcount
+            )
             # ADR-0306 §6: and every effect record.
-            removed += conn.execute("DELETE FROM activation_effects").rowcount
+            removed += conn.execute(
+                f"DELETE FROM activation_effects WHERE {effects[0]}",  # noqa: S608 — module text and placeholders; values bound
+                effects[1],
+            ).rowcount
             # ADR-0329 §16:9: and every observation record. `meta`, which holds the
             # observation issuer, is untouched.
-            removed += conn.execute("DELETE FROM observations").rowcount
+            removed += conn.execute(
+                f"DELETE FROM observations WHERE {observations[0]}",  # noqa: S608 — module text and placeholders; values bound
+                observations[1],
+            ).rowcount
             # ADR-0350 §12:3: and every scheduled task.
-            removed += conn.execute("DELETE FROM scheduled_tasks").rowcount
+            removed += conn.execute(
+                f"DELETE FROM scheduled_tasks WHERE {tasks[0]}",  # noqa: S608 — module text and placeholders; values bound
+                tasks[1],
+            ).rowcount
             # ADR-0361 §8:2: and every approval request.
-            removed += conn.execute("DELETE FROM approval_requests").rowcount
+            removed += conn.execute(
+                f"DELETE FROM approval_requests WHERE {requests[0]}",  # noqa: S608 — module text and placeholders; values bound
+                requests[1],
+            ).rowcount
         return removed
 
     def close(self) -> None:
@@ -2861,7 +3192,11 @@ def _checked_observation(path: str, row: Sequence[Any]) -> ObservationRecord:
     return record
 
 
-def _effect_rows(conn: sqlite3.Connection, activations: Sequence[str]) -> list[tuple[Any, ...]]:
+def _effect_rows(
+    conn: sqlite3.Connection,
+    activations: Sequence[str],
+    seen: tuple[str, list[object]] = _EVERY_ROW,
+) -> list[tuple[Any, ...]]:
     """The effect rows of ``activations``, in claim order, read in slices of the ids.
 
     In slices, because SQLite bounds the parameters one statement binds, and a read or a
@@ -2873,11 +3208,13 @@ def _effect_rows(conn: sqlite3.Connection, activations: Sequence[str]) -> list[t
     Args:
         conn: The connection, inside the caller's transaction.
         activations: The activations whose rows to read.
+        seen: The sight's condition over a row and its parameters, ``1`` for every row.
 
     Returns:
         ``(id, activation_id, data, part_round, part_number)`` per row, in claim order.
     """
     named = tuple(dict.fromkeys(activations))
+    where, params = seen
     keyed: list[tuple[Any, ...]] = []
     for start in range(0, len(named), _IN_SLICE):
         part = named[start : start + _IN_SLICE]
@@ -2885,16 +3222,20 @@ def _effect_rows(conn: sqlite3.Connection, activations: Sequence[str]) -> list[t
         keyed.extend(
             tuple(row)
             for row in conn.execute(
-                "SELECT claimed_seq, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
-                f"WHERE activation_id IN ({marks})",
-                part,
+                "SELECT claimed_seq, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — module text and placeholders; values bound
+                f"WHERE activation_id IN ({marks}) AND {where}",
+                (*part, *params),
             ).fetchall()
         )
     keyed.sort(key=lambda row: _claim_order(row[0]))
     return [row[1:] for row in keyed]
 
 
-def _part_rows(conn: sqlite3.Connection, parts: Sequence[QuestionPart]) -> list[tuple[Any, ...]]:
+def _part_rows(
+    conn: sqlite3.Connection,
+    parts: Sequence[QuestionPart],
+    seen: tuple[str, list[object]] = _EVERY_ROW,
+) -> list[tuple[Any, ...]]:
     """The rows carrying any of ``parts``, in claim order, read in slices of the parts.
 
     In slices, because SQLite bounds the parameters one statement binds, and a read
@@ -2913,11 +3254,13 @@ def _part_rows(conn: sqlite3.Connection, parts: Sequence[QuestionPart]) -> list[
     Args:
         conn: The connection, inside the caller's transaction.
         parts: The question parts whose rows to read, each once.
+        seen: The sight's condition over a row and its parameters, ``1`` for every row.
 
     Returns:
         ``(id, activation_id, data, part_round, part_number)`` per row, in claim order.
     """
-    seen: set[tuple[Any, ...]] = set()
+    where, params = seen
+    found_rows: set[tuple[Any, ...]] = set()
     keyed: list[tuple[Any, ...]] = []
     for start in range(0, len(parts), _PART_SLICE):
         part = parts[start : start + _PART_SLICE]
@@ -2928,15 +3271,35 @@ def _part_rows(conn: sqlite3.Connection, parts: Sequence[QuestionPart]) -> list[
             for row in (
                 tuple(found)
                 for found in conn.execute(
-                    _PART_ROWS.format(keys=keys, seq="claimed_seq, "), values * 2
+                    _PART_ROWS.format(keys=keys, seq="claimed_seq, ", seen=where),
+                    (*values, *values, *params),
                 ).fetchall()
             )
-            if row not in seen
+            if row not in found_rows
         ]
-        seen.update(fresh)
+        found_rows.update(fresh)
         keyed.extend(fresh)
     keyed.sort(key=lambda row: _claim_order(row[0]))
     return [row[1:] for row in keyed]
+
+
+def _effects_given(
+    effects: Iterable[ActivationEffect],
+) -> Iterable[tuple[RecordHome | None, str | None]]:
+    """Each effect record as §11:1's count reads it: its home, and its activation (§7:4)."""
+    return ((one.home, one.activation_id) for one in effects)
+
+
+def _tasks_given(tasks: Iterable[ScheduledTask]) -> Iterable[tuple[RecordHome | None, str | None]]:
+    """Each task as §11:1's count reads it: its person's domain, made by no activation."""
+    return ((person_home(one.person), None) for one in tasks)
+
+
+def _requests_given(
+    requests: Iterable[ApprovalRequest],
+) -> Iterable[tuple[RecordHome | None, str | None]]:
+    """Each request as §11:1's count reads it: its person's domain, and who asked (§7:4)."""
+    return ((person_home(one.person), one.activation_id) for one in requests)
 
 
 def _claim_order(seq: object) -> tuple[int, Any]:

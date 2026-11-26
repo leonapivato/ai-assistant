@@ -357,6 +357,23 @@ async def test_build_engine_builds_a_conversation_store_whose_bindings_only_coun
         await engine.aclose()
 
 
+async def test_build_engine_builds_a_plan_store_whose_bindings_only_count(
+    tmp_path: Path,
+) -> None:
+    """ADR-0383 §7:10, §11:1: the plan store's mode is fixed at its construction, to counting.
+
+    Nothing in the root binds it yet, so the engine holds it unbound.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        plans = engine._plans
+        assert isinstance(plans, SqlitePlanStore)  # narrows the Protocol-typed seam
+        assert plans._sight_mode is SightMode.COUNT
+        assert plans._sight is None
+    finally:
+        await engine.aclose()
+
+
 @pytest.mark.parametrize("kind", list(EmbedderKind))
 async def test_no_unbounded_embedder_reaches_the_memory_store(
     kind: EmbedderKind, tmp_path: Path

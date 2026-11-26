@@ -3592,6 +3592,8 @@ class PlanStore(Protocol):
     ``PlanningError``, before any other step and writing nothing (ADR-0386 §6), and no
     member changes a held record's home (ADR-0383 §4:6). A scheduled task's and an
     approval request's ``person`` is its home, and a stop record carries none (§3).
+    **One more binds the store to a sight** (ADR-0383 §7:1): :meth:`bound` returns it
+    answering as though it held only what the sight sees.
 
     **The stop record lives here and in no other store** (ADR-0297 §1, §2, §6):
     :meth:`record_stop` writes a record naming one activation, and an effect claim
@@ -4498,6 +4500,109 @@ class PlanStore(Protocol):
 
         Raises:
             PlanningError: If the backend fails.
+        """
+        ...
+
+    def bound(self, sight: Sight) -> PlanStore:
+        """This store, bound to ``sight`` (ADR-0383 §7:1).
+
+        **The one binding member.** It returns the same Protocol over this store's own
+        records, reads and writes nothing, and adds no argument to any read member.
+        Binding a bound store binds it to the meet of the two sights (§6:6), so binding
+        never widens what a store gives back.
+
+        **Whether a bound store withholds or only counts is fixed at construction**
+        (§7:10): a :class:`~ai_assistant.core.types.SightMode` the composition root gives
+        the store when it builds it, read from no ``Settings`` field and no running act.
+
+        **What it holds** (§3, §7:3, §7:4), decided by
+        :meth:`~ai_assistant.core.types.Sight.withheld` and by nothing else. An effect
+        record and an observation record by the home each carries; a scheduled task and
+        an approval request by the domain of the ``person`` each is for. It also holds the
+        records it records as made by its sight's activation (§7:4): every effect record
+        whose ``activation_id`` is that activation, and every approval request whose
+        ``activation_id``, the asking activation, is; whatever their homes. No task and no
+        observation record is recorded as made by an activation: a task a work spawned
+        is held by its person's domain alone. A record with no home, or one the store
+        cannot read, is held by no sight, its own activation's included (§5:3). **A stop
+        record carries no home and is held by no sight** (§3:3): no member of a bound store
+        gives one back, counts one or names one, and a write's own checks still read it.
+
+        **Withholding** (§7:2, §7:5, §8). Save a write's own checks, a bound store answers
+        every member as this store would if it held only the records it holds, the sight
+        applied before it orders, matches or counts, and a record it does not hold answers
+        as one never written:
+
+        - :meth:`activation_effects`, :meth:`part_effects`, :meth:`observations`,
+          :meth:`scheduled_tasks`, :meth:`person_scheduled_tasks`, :meth:`spawned_tasks`,
+          :meth:`approval_requests`, :meth:`person_approval_requests` and
+          :meth:`pushed_approval_outcomes` give back only records it holds, in their
+          order; :meth:`approval_request_by_token` ``None`` for a request it does not hold.
+        - :meth:`scheduled_lineage` walks up through the tasks it holds alone: it is empty
+          where no task it holds was pushed to the activation, and it ends at the highest
+          task it holds, where the task above is one it does not hold. :meth:`live_below`
+          reads the tasks it holds below a task it holds, and ``False`` for one it does
+          not. :meth:`due_occurrences` gives back the due occurrences of the tasks it
+          holds and the next instant one of them falls due; :meth:`due_approval_outcomes`
+          the outcomes, the expiring requests and the next expiry among the requests it
+          holds.
+        - :meth:`stopped_activations` gives back none, and :meth:`export` no stop record
+          (§3:3); :meth:`export` gives back every other record it holds, and
+          :meth:`clear` removes, and counts, those alone, leaving every stop record.
+        - :meth:`finish_activation_effect` and :meth:`confirm_message_effect` naming an
+          effect it does not hold raise the ``PlanningError`` of one never written;
+          :meth:`record_approval_card`, :meth:`answer_approval_request`,
+          :meth:`expire_approval_request`, :meth:`void_approval_ticket` and
+          :meth:`mark_approval_outcome_pushed` naming a request it does not hold raise that
+          of a request never written; :meth:`cancel_scheduled_task` naming a task it does
+          not hold is refused ``unknown_task``, :meth:`mark_occurrence_pushed` answers
+          ``NOT_PENDING``, :meth:`remove_scheduled_task` ``False``, and
+          :meth:`settle_occurrence` and :meth:`stop_pushed_activation` read an occurrence
+          pushed in a task it does not hold as none pushed. Each writes nothing (§7:5).
+        - :meth:`write_observation` for an episode whose record it does not hold, where
+          the store holds one, raises ``PlanningError`` and writes nothing: the write
+          would change a record it does not hold (§7:5).
+        - :meth:`write_scheduled_task`'s replace, wait, chain and pending count, and
+          :meth:`write_approval_request`'s duplicate, read the tasks and requests it
+          holds: a replace or a wait naming a task it does not hold is refused as one
+          naming a task never written (§4:8). The claim's backstop, in every member that
+          claims, matches the effect records it holds alone, and a ticket names a request
+          it holds or answers ``not_granted``.
+        - A write mints its record in the home it carries, whether or not the sight sees
+          it (§4, §7:5): a record the sight does not see is then one it does not hold.
+
+        **A write's own checks are decided over every record the store holds** (§7:11),
+        as the unbound store decides them: whether a stop record stands for the claiming
+        activation, and for the activation :meth:`settle_occurrence` would push again;
+        whether an effect record, a task or a request already has its id; whether a
+        record already carries the question part or the ticket a claim spends, each a
+        key a claim takes once; whether a card's token is already carried; whether an
+        occurrence or an outcome was already pushed to the activation named; and whether
+        an observation record is held at the revision expected. **What counts writes
+        answers alike bound or not** (§8:5): :meth:`observer_calls_since`, and the
+        revisions, claim order and write order the store issues, gaps where records it
+        does not hold sit included.
+
+        **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
+        does, no write included refused for the sight, and every read member writes one
+        event to the hub's log alone, carrying
+        :class:`~ai_assistant.core.types.SightCount`'s numbers and codes for the records
+        the read gave back, by their homes and the activation each is recorded as made
+        by: each record a list gave back, the task each due occurrence is of, the
+        requests among the outcomes and the expiring, the task :meth:`live_below` names
+        and each below it, and each stop record as one with no home;
+        :meth:`observer_calls_since`'s event counts no record. It carries no record's
+        text and no identifier.
+
+        Args:
+            sight: The sight to bind this store to.
+
+        Returns:
+            This store, bound to ``sight``.
+
+        Raises:
+            ValueError: If this store is already bound to a sight of another reader or
+                activation, which do not meet.
         """
         ...
 

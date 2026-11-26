@@ -18,10 +18,13 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from plan_store_contract import (
+    PlanRemoval,
     PlanStoreContract,
     _approved,
     _asked,
     _asking,
+    _card,
+    _effect,
     _request,
     _request_held,
     _spending_ticket,
@@ -30,6 +33,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationEffect,
     ActivationEffectClaim,
     ApprovalWriteAnswer,
@@ -48,6 +52,7 @@ from ai_assistant.core.types import (
     QuestionPart,
     RecordHome,
     ScheduledTaskAuthor,
+    SightMode,
     Sureness,
     TaskSpawn,
     TaskWriteAnswer,
@@ -63,6 +68,7 @@ from ai_assistant.testing.cancellation import (
     ThreadSuspension,
     worker_finished_before_the_first_check,
 )
+from sight_equivalence import OWN_ACTIVATION, SIGHTS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -158,6 +164,43 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             yield realised
         finally:
             realised.close()
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Iterator[Callable[[SightMode], PlanStore]]:
+        built: list[SqlitePlanStore] = []
+
+        def build(mode: SightMode) -> PlanStore:
+            realised = SqlitePlanStore(path=":memory:", now=_fixed_now, sight_mode=mode)
+            built.append(realised)
+            return realised
+
+        try:
+            yield build
+        finally:
+            for one in built:
+                one.close()
+
+    @pytest.fixture
+    def remove_records(self) -> Callable[[PlanStore, PlanRemoval], None]:
+        """Delete the rows by their keys, leaving the issuer in ``meta`` and every order."""
+
+        def remove(store: PlanStore, removal: PlanRemoval) -> None:
+            assert isinstance(store, SqlitePlanStore)
+            conn = store._conn
+            with conn:
+                for table, key, ids in (
+                    ("activation_effects", "id", removal.effects),
+                    ("observations", "episode_id", removal.observations),
+                    ("scheduled_tasks", "id", removal.tasks),
+                    ("approval_requests", "id", removal.requests),
+                ):
+                    conn.executemany(
+                        f"DELETE FROM {table} WHERE {key} = ?",  # noqa: S608 — the suite's own constants
+                        [(one,) for one in ids],
+                    )
+                conn.execute("DELETE FROM stopped_activations")
+
+        return remove
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
@@ -2177,3 +2220,146 @@ async def test_a_stored_request_that_no_longer_validates_names_none_of_its_argum
     while chain is not None:
         assert "PRIVATE" not in str(chain)
         chain = chain.__cause__ or chain.__context__
+
+
+# --- a store bound to a sight, over rows altered outside it (ADR-0383 §5:3, #3742) -----
+
+
+async def test_an_effect_row_whose_home_columns_name_no_home_is_held_by_no_sight(
+    tmp_path: Path,
+) -> None:
+    """§5:3: the columns are the store's record of a row's home (the ruling on #3742).
+
+    An effect of the sight's own activation whose columns an outside writer cleared is
+    held by no binding, its own activation's included: none gives it back and a finish
+    through any is refused as for a record never written. Unbound, the row is refused as
+    corrupt, as before.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        for effect_id, values in (("e-cleared", "a" * 64), ("e-kept", "b" * 64)):
+            claimed = await store.claim_activation_effect(
+                _effect(effect_id, activation=OWN_ACTIVATION, values=values), match=None
+            )
+            assert claimed is ActivationEffectClaim.CLAIMED
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "UPDATE activation_effects SET home_kind = NULL, home_id = NULL "
+                "WHERE id = 'e-cleared'"
+            )
+        with pytest.raises(PlanningError):
+            await store.activation_effects([OWN_ACTIVATION])
+        for name, sight in SIGHTS.items():
+            bound = store.bound(sight)
+            held = [one.id for one in await bound.activation_effects([OWN_ACTIVATION])]
+            assert "e-cleared" not in held, name
+            with pytest.raises(PlanningError):
+                await bound.finish_activation_effect("e-cleared", ToolOutcome.SUCCEEDED)
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        assert [one.id for one in await own.activation_effects([OWN_ACTIVATION])] == ["e-kept"]
+    finally:
+        store.close()
+
+
+async def test_a_request_whose_record_is_not_json_is_held_only_by_its_persons_domain(
+    tmp_path: Path,
+) -> None:
+    """§7:4 is read from the record; a record that cannot be read names no asker.
+
+    A binding that holds the request only as asked by its own activation holds it no
+    more once its record is unreadable, and the condition is never an error; a binding
+    that sees the person's domain holds the row, and its read refuses it as corrupt, as
+    the unbound read does.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        await _asked(store, _request("q1", activation=OWN_ACTIVATION))
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        assert [one.id for one in await own.approval_requests(["q1"])] == ["q1"]
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE approval_requests SET data = '{broken' WHERE id = 'q1'")
+        assert await own.approval_requests(["q1"]) == ()
+        assert await store.bound(SIGHTS["run-over-the-shared-things"]).export() is not None
+        with pytest.raises(PlanningError):
+            await store.bound(SIGHTS["run-over-the-owners-domain"]).approval_requests(["q1"])
+        with pytest.raises(PlanningError):
+            await store.approval_requests(["q1"])
+    finally:
+        store.close()
+
+
+async def test_a_bound_writes_own_checks_read_no_record_it_does_not_hold(
+    tmp_path: Path,
+) -> None:
+    """§7:11 over rows a binding does not hold: the key alone, never the record decoded.
+
+    A request and a task of another person's domain whose records an outside writer broke
+    stop no write through a binding over the owner's domain, which decodes neither: a
+    card is recorded and an occurrence pushed. Unbound, the same reads refuse the broken
+    rows as corrupt, as before.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, sight_mode=SightMode.WITHHOLD)
+    try:
+        await _asked(store, _request("q-bob", person="person:bob", hotel="the Savoy"))
+        await _asked(store, _request("q-owner", person=OWNER_PERSON_ID, hotel="the Ritz"))
+        spawned = await store.write_scheduled_task(
+            TaskSpawn(
+                id="t-bob",
+                person="person:bob",
+                author=ScheduledTaskAuthor.ASSISTANT,
+                author_person=None,
+                setting_level=Sureness.NONE,
+                setting_connection=None,
+                when=DueNow(),
+                instruction="do it",
+                set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+                set_at=_fixed_now(),
+            ),
+            _effect("spawn-bob", activation="act-1", values="c" * 64).model_copy(
+                update={"capability": "spawn"}
+            ),
+            match=None,
+            chain_limit=10,
+            pending_limit=50,
+        )
+        assert spawned.answer is TaskWriteAnswer.WRITTEN
+        owner_task = await store.write_scheduled_task(
+            TaskSpawn(
+                id="t-owner",
+                person=OWNER_PERSON_ID,
+                author=ScheduledTaskAuthor.ASSISTANT,
+                author_person=None,
+                setting_level=Sureness.NONE,
+                setting_connection=None,
+                when=DueNow(),
+                instruction="do it",
+                set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+                set_at=_fixed_now(),
+            ),
+            _effect("spawn-owner", activation="act-1", values="d" * 64).model_copy(
+                update={"capability": "spawn"}
+            ),
+            match=None,
+            chain_limit=10,
+            pending_limit=50,
+        )
+        assert owner_task.answer is TaskWriteAnswer.WRITTEN
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE approval_requests SET data = '{broken' WHERE id = 'q-bob'")
+            conn.execute("UPDATE scheduled_tasks SET data = '{broken' WHERE id = 't-bob'")
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        carded = await owners.record_approval_card(
+            "q-owner",
+            _card("tok"),
+        )
+        assert [card.token for card in carded.cards] == ["tok"]
+        assert await owners.mark_occurrence_pushed("t-owner", 1, "act-new") is OccurrencePush.PUSHED
+        with pytest.raises(PlanningError):
+            await store.approval_requests(["q-owner"])
+        with pytest.raises(PlanningError):
+            await store.scheduled_tasks(["t-owner"])
+    finally:
+        store.close()

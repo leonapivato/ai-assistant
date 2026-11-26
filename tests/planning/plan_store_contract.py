@@ -22,14 +22,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
+import structlog
 
 from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     OWN_CHAT_CONNECTION,
+    OWNER_PERSON_ID,
     ActivationEffect,
     ActivationEffectClaim,
     ApprovalCard,
@@ -67,6 +70,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    PlanExport,
     QuestionPart,
     RecordHome,
     RequestedCall,
@@ -77,6 +81,8 @@ from ai_assistant.core.types import (
     ScheduledTask,
     ScheduledTaskAuthor,
     ScheduledTaskWrite,
+    Sight,
+    SightMode,
     Sureness,
     TaskRefusal,
     TaskRuleKind,
@@ -90,9 +96,10 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.testing import with_phase_declaration
 from ai_assistant.testing.cancellation import settle
+from sight_equivalence import OWN_ACTIVATION, SIGHTS, ReadCall, assert_answers_alike
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import PlanStore
@@ -4737,3 +4744,647 @@ class PlanStoreContract:
             )
 
             await op.verify(store)
+
+    # --- a store bound to a sight (ADR-0383 §7, §8, §9:3, §11) ---------------------
+
+    @pytest.fixture
+    def sight_store_factory(self) -> Callable[[SightMode], PlanStore]:
+        """Override in a subclass: a fresh, empty store in a mode, on a fixed clock.
+
+        Each call is a new store of its own; two stores given one history hold the same
+        records, revisions and orders. Its bindings withhold or count as the mode says
+        (ADR-0383 §7:10).
+        """
+        raise NotImplementedError
+
+    @pytest.fixture
+    def remove_records(self) -> Callable[[PlanStore, PlanRemoval], None]:
+        """Override in a subclass: remove records whole from a store the factory built.
+
+        **A test-only door**, which the Protocol has none of: the effect records,
+        observation records, tasks and requests named go, and every stop record with
+        them, since no sight holds one (ADR-0383 §3:3); nothing else moves, the revision
+        issuer and every order the rest carry included, so the store left is *the same
+        store holding only* the rest (§9:3).
+        """
+        raise NotImplementedError
+
+    @pytest.mark.parametrize("sight_name", list(SIGHTS))
+    async def test_a_bound_store_answers_as_the_same_store_holding_only_what_its_sight_sees(
+        self,
+        sight_store_factory: Callable[[SightMode], PlanStore],
+        remove_records: Callable[[PlanStore, PlanRemoval], None],
+        sight_name: str,
+    ) -> None:
+        """§9:3's shared obligation, for every read member but the store-wide count.
+
+        Two stores take one history, which holds an effect and an approval request of
+        the sight's own activation in a home the sight does not see (§7:4); from the
+        second every record the sight does not see is removed, and every stop record
+        (§3:3). The first, bound to the sight and withholding, answers every call in the
+        battery as the second does: the same records in the same order, lineages, what
+        is below, what is due and when next, the export, and "not found".
+        ``observer_calls_since`` counts writes, not records, and answers alike bound or
+        not (§8:5): its own case is below.
+        """
+        sight = SIGHTS[sight_name]
+        bound_store = sight_store_factory(SightMode.WITHHOLD)
+        holding_only = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(bound_store)
+        await _sight_history(holding_only)
+        remove_records(holding_only, _not_seen(await holding_only.export(), sight))
+        await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+
+    async def test_the_sights_hold_what_six_and_seven_four_say(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """The obligation above has something to bite on: each sight's held records.
+
+        A work's sight also holds its own activation's effect records and the approval
+        requests it asked, whatever their homes (§7:4), and no task it spawned; a task's
+        and a request's home is its person's domain (§3); no sight holds a stop record
+        (§3:3).
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        whole = await store.export()
+        assert whole.stopped_activations
+        effects = _by_home(
+            whole.activation_effects, lambda one: one.home, lambda one: one.activation_id
+        )
+        observed = _by_home(whole.observations, lambda one: one.home, lambda _one: None)
+        tasks = _by_home(
+            whole.scheduled_tasks, lambda one: RecordHome.person(one.person), lambda _one: None
+        )
+        requests = _by_home(
+            whole.approval_requests,
+            lambda one: RecordHome.person(one.person),
+            lambda one: one.activation_id,
+        )
+        # §7:4 is reached: an own effect in the owner's domain, and an own request in
+        # a domain no sight here sees.
+        assert {"e-own-owner", "ask-r-bob-own"} <= effects.own
+        assert "r-bob-own" in requests.own
+        assert "r-bob-own" not in requests.owners
+        assert tasks.other
+        assert requests.other
+
+        expected = {
+            "owners-work": (
+                effects.owners | effects.shared,
+                observed.owners | observed.shared,
+                tasks.owners,
+                requests.owners | requests.own,
+            ),
+            "unidentified-senders-work": (effects.own, set(), set(), requests.own),
+            "work-for-no-one": (
+                effects.shared | effects.own,
+                observed.shared,
+                set(),
+                requests.own,
+            ),
+            "producer-with-no-facts": (set(), set(), set(), set()),
+            "run-over-the-shared-things": (effects.shared, observed.shared, set(), set()),
+            "run-over-the-owners-domain": (
+                effects.owners,
+                observed.owners,
+                tasks.owners,
+                requests.owners,
+            ),
+        }
+        for name, sight in SIGHTS.items():
+            held = await store.bound(sight).export()
+            assert held.stopped_activations == (), name
+            assert (
+                {one.id for one in held.activation_effects},
+                {one.episode for one in held.observations},
+                {one.id for one in held.scheduled_tasks},
+                {one.id for one in held.approval_requests},
+            ) == expected[name], name
+            assert await store.bound(sight).stopped_activations(["act-stopped", "act-b"]) == ()
+
+    async def test_a_write_naming_a_record_a_bound_store_does_not_hold_is_as_for_one_never_written(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§7:5, §8:2, §4:8: each answers as for a record never written, writing nothing.
+
+        Bound to the shared things, which hold no task and no request, a write naming the
+        owner's effect, observation, task or request, or a ticket of the owner's, is
+        refused as one naming a record never written, and the store is as it was.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        bound = store.bound(SIGHTS["run-over-the-shared-things"])
+        before = await store.export()
+
+        with pytest.raises(PlanningError):
+            await bound.finish_activation_effect("e-part-owner", ToolOutcome.SUCCEEDED)
+        with pytest.raises(PlanningError):
+            await bound.confirm_message_effect("m-own", delivered=False)
+        with pytest.raises(PlanningError):
+            await bound.write_observation(_observation("activation:act-o"), expected_revision=0)
+        with pytest.raises(PlanningError):
+            await bound.write_observation(
+                _observation("activation:act-o"),
+                expected_revision=_observation_revision(before, "activation:act-o"),
+            )
+        cancelled = await bound.cancel_scheduled_task("t-owner-2")
+        assert cancelled.reason is TaskRefusal.UNKNOWN_TASK
+        assert await bound.mark_occurrence_pushed("t-owner-2", 1, "act-new") is (
+            OccurrencePush.NOT_PENDING
+        )
+        assert await bound.remove_scheduled_task("t-owner-1") is False
+        with pytest.raises(PlanningError):
+            await bound.settle_occurrence("act-t3", OccurrenceState.DONE)
+        assert await bound.stop_pushed_activation("act-t3") is False
+        replaced = await _write(bound, "t-replacing", spawner="act-o", replaces="t-owner-2")
+        assert replaced.reason is TaskRefusal.UNKNOWN_TASK
+        waiting = await _write(
+            bound, "t-waiting", spawner="act-o", when=DueAfterTasks(tasks=("t-owner-2",))
+        )
+        assert waiting.reason is TaskRefusal.INVALID_WAIT
+        for step in (
+            bound.record_approval_card("r-owner", _card("tok-new")),
+            bound.answer_approval_request("r-owner-own", ApprovalRequestState.DENIED, _tap()),
+            bound.expire_approval_request("r-owner-own", _EXPIRY),
+            bound.void_approval_ticket("r-owner"),
+            bound.mark_approval_outcome_pushed("r-owner", "act-new"),
+        ):
+            with pytest.raises(PlanningError):
+                await step
+        assert await bound.claim_ticket_call(
+            _spending_ticket("e-ticket", "r-owner"), match=None
+        ) is (TicketClaim.NOT_GRANTED)
+
+        assert await store.export() == before
+        assert await store.stopped_activations(["act-t3"]) == ()
+
+    async def test_a_writes_own_checks_read_every_record_the_store_holds(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§7:11: the stop, an id or a key already taken, and a revision, over every record.
+
+        Through a binding that holds none of the records each check finds, the check
+        answers as the unbound store's does: a stop record refuses a claim, an id taken
+        refuses a write, a spent part and a carried token, an occupied push and a held
+        observation refuse theirs. None of these is a record the binding gives back.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        nothing = store.bound(SIGHTS["producer-with-no-facts"])
+        owners = store.bound(SIGHTS["run-over-the-owners-domain"])
+        own = store.bound(SIGHTS["unidentified-senders-work"])
+        before = await store.export()
+
+        with pytest.raises(ClaimStopped):
+            await nothing.claim_activation_effect(
+                _effect("e-after-stop", activation="act-stopped"), match=None
+            )
+        with pytest.raises(PlanningError):
+            await nothing.claim_activation_effect(_effect("e-owner", activation="x"), match=None)
+        assert await nothing.claim_activation_effect(
+            _spending("e-spends-again", activation="x", part=QuestionPart(round="q", part=1)),
+            match=None,
+        ) is (ActivationEffectClaim.ALREADY_USED)
+        with pytest.raises(PlanningError):
+            await _write(nothing, "t-bob-1", spawner="x")
+        with pytest.raises(PlanningError):
+            await nothing.write_approval_request(
+                _request("r-bob", activation="x", hotel="anywhere"),
+                _asking(_request("r-bob", activation="x"), effect_id="ask-again"),
+                match=None,
+            )
+        with pytest.raises(PlanningError):
+            await nothing.write_observation(_observation("activation:act-s"), expected_revision=0)
+        with pytest.raises(PlanningError):
+            await own.record_approval_card("r-owner-own", _card("tok-bob"))
+        with pytest.raises(PlanningError):
+            await owners.mark_occurrence_pushed("t-owner-2", 1, "act-tb")
+        with pytest.raises(PlanningError):
+            await owners.mark_approval_outcome_pushed("r-owner", "act-push")
+
+        assert await store.export() == before
+
+    async def test_a_write_through_a_binding_mints_in_its_own_home_and_reads_through_both(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§4, §7:1, §7:5: a binding is over the store's own records, not a copy.
+
+        A write through a binding carries its own home whether or not the sight sees it;
+        the binding then holds it only where the sight does. A write through the unbound
+        store after binding is read through the binding, and the revision a binding's
+        write is stamped with is the store's next (§8:5).
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        shared = store.bound(SIGHTS["run-over-the-shared-things"])
+        assert (
+            await shared.claim_activation_effect(_effect("e-minted", activation="a"), match=None)
+            is ActivationEffectClaim.CLAIMED
+        )
+        assert await shared.activation_effects(["a"]) == ()
+        assert [one.id for one in await store.activation_effects(["a"])] == ["e-minted"]
+        first = await store.write_observation(
+            _observation("activation:o").model_copy(update={"home": RecordHome.shared()}),
+            expected_revision=0,
+        )
+        assert await shared.observations(["activation:o"]) == (first,)
+        second = await shared.write_observation(
+            _observation("activation:p").model_copy(update={"home": RecordHome.shared()}),
+            expected_revision=0,
+        )
+        assert second.revision > first.revision
+        assert await store.observations(["activation:p"]) == (second,)
+
+    async def test_a_bound_stores_clear_and_export_reach_only_what_it_holds(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§7:2, §3:3: ``clear`` removes and counts the records it holds, and no stop record.
+
+        The rest stand, the stop records among them, and the revision issuer is kept.
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        held = await bound.export()
+        before = await store.export()
+        removed = await bound.clear()
+        assert removed == (
+            len(held.activation_effects)
+            + len(held.observations)
+            + len(held.scheduled_tasks)
+            + len(held.approval_requests)
+        )
+        after = await store.export()
+        assert after.stopped_activations == before.stopped_activations
+        assert {one.id for one in after.activation_effects} == {
+            one.id for one in before.activation_effects
+        } - {one.id for one in held.activation_effects}
+        assert {one.id for one in after.scheduled_tasks} == {"t-bob-1", "t-bob-2"}
+        assert {one.id for one in after.approval_requests} == {"r-bob", "r-bob-own"}
+        assert await bound.export() == held.model_copy(
+            update={
+                "activation_effects": (),
+                "observations": (),
+                "scheduled_tasks": (),
+                "approval_requests": (),
+            }
+        )
+
+    async def test_the_observers_count_of_calls_answers_alike_bound_or_not(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§8:5: ``observer_calls_since`` counts writes store-wide, whatever the sight."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        since = _WHEN - timedelta(days=1)
+        everything = await store.observer_calls_since(since)
+        assert everything > 0
+        for name, sight in SIGHTS.items():
+            assert await store.bound(sight).observer_calls_since(since) == everything, name
+
+    async def test_a_store_bound_in_the_counting_mode_answers_as_unbound_and_counts(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§7:10, §11:1 to §11:3: counting changes no answer and writes one event a read.
+
+        Every call in the battery answers through a counting binding as the unbound store
+        does, the stop records included, and no write is refused for the sight. A read's
+        event carries the store, the member, how many records it gave back, how many the
+        sight would have withheld by reason, a stop record as one with no home, and the
+        reader and bounds as codes, and nothing else: no id, no text.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        await _sight_history(store)
+        sight = SIGHTS["unidentified-senders-work"]
+        await assert_answers_alike(store.bound(sight), store, _sight_battery())
+        with structlog.testing.capture_logs() as events:
+            stopped = await store.bound(sight).stopped_activations(["act-stopped", "act-b", "x"])
+            tasks = await store.bound(sight).scheduled_tasks(_TASK_IDS)
+        assert stopped == ("act-stopped", "act-b")
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert counted == [
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "plans",
+                "member": "stopped_activations",
+                "given": 2,
+                "other_home": 0,
+                "no_home": 2,
+                "sees_nothing": 0,
+                "reader": "work",
+                "bounds": ["anyone", "person_owner"],
+            },
+            {
+                "event": "sight_counted",
+                "log_level": "info",
+                "store": "plans",
+                "member": "scheduled_tasks",
+                "given": len(tasks),
+                "other_home": sum(one.person == _BOB for one in tasks),
+                "no_home": 0,
+                "sees_nothing": sum(one.person == OWNER_PERSON_ID for one in tasks),
+                "reader": "work",
+                "bounds": ["anyone", "person_owner"],
+            },
+        ]
+        bound = store.bound(SIGHTS["producer-with-no-facts"])
+        await bound.finish_activation_effect("e-part-owner", ToolOutcome.SUCCEEDED)
+        assert (await bound.cancel_scheduled_task("t-owner-2")).task is not None
+
+    async def test_every_read_member_writes_one_count_event_when_counting(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§11:1: one event for each read, named by its member; the writes write none.
+
+        The owner's domain's run withholds bob's tasks and requests, as another home, and
+        the stop records, as records with no home; the count of the observer's calls
+        counts no record.
+        """
+        store = sight_store_factory(SightMode.COUNT)
+        await _sight_history(store)
+        bound = store.bound(SIGHTS["run-over-the-owners-domain"])
+        everything = await store.export()
+        bobs = sum(one.person == _BOB for one in everything.scheduled_tasks) + sum(
+            one.person == _BOB for one in everything.approval_requests
+        )
+        reads: list[tuple[str, Callable[[PlanStore], Awaitable[object]]]] = [
+            ("activation_effects", _on("activation_effects", ["act-o", "x"])),
+            ("activation_effects", _on("activation_effects", [])),
+            ("part_effects", _on("part_effects", [QuestionPart(round="q", part=1)])),
+            ("observations", _on("observations", ["activation:act-o"])),
+            ("observer_calls_since", _on("observer_calls_since", _WHEN)),
+            ("scheduled_tasks", _on("scheduled_tasks", _TASK_IDS)),
+            ("person_scheduled_tasks", _on("person_scheduled_tasks", _BOB, list(OccurrenceState))),
+            ("spawned_tasks", _on("spawned_tasks", ["act-tb"])),
+            ("scheduled_lineage", _on("scheduled_lineage", "act-tb")),
+            ("live_below", _on("live_below", "t-bob-1")),
+            ("due_occurrences", _on("due_occurrences", _WHEN + timedelta(days=10))),
+            ("stopped_activations", _on("stopped_activations", ["act-stopped"])),
+            ("approval_requests", _on("approval_requests", _REQUEST_IDS)),
+            (
+                "person_approval_requests",
+                _on("person_approval_requests", _BOB, list(ApprovalRequestState)),
+            ),
+            ("approval_request_by_token", _on("approval_request_by_token", "tok-bob")),
+            ("due_approval_outcomes", _on("due_approval_outcomes", _EXPIRY + _DAY)),
+            ("pushed_approval_outcomes", _on("pushed_approval_outcomes")),
+            ("export", _on("export")),
+        ]
+        withheld = 0
+        for member, call in reads:
+            with structlog.testing.capture_logs() as events:
+                await call(bound)
+            counted = [event for event in events if event["event"] == "sight_counted"]
+            assert [event["member"] for event in counted] == [member], member
+            assert counted[0]["bounds"] == ["domain", "person_owner"]
+            withheld += counted[0]["other_home"] + counted[0]["no_home"]
+        assert withheld > bobs
+        with structlog.testing.capture_logs() as events:
+            await bound.record_stop("act-later")
+            await bound.finish_activation_effect("e-part-owner", ToolOutcome.SUCCEEDED)
+            await bound.cancel_scheduled_task("t-owner-2")
+            await bound.void_approval_ticket("r-owner")
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_a_store_bound_twice_is_bound_to_the_meet_of_the_two_sights(
+        self, sight_store_factory: Callable[[SightMode], PlanStore]
+    ) -> None:
+        """§6:6, §7:1: binding again never widens; two sights that do not meet are refused."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        owners = SIGHTS["owners-work"]
+        narrowed = store.bound(owners).bound(SIGHTS["unidentified-senders-work"])
+        alone = store.bound(SIGHTS["unidentified-senders-work"])
+        assert await narrowed.export() == await alone.export()
+        with pytest.raises(ValueError, match="meet"):
+            store.bound(owners).bound(SIGHTS["run-over-the-shared-things"])
+
+
+#: A person whose domain no sight :data:`SIGHTS` holds sees: whom a task or a request
+#: of another home is for. No write refuses one, since a task's and a request's home is
+#: the person it names (ADR-0383 §3, §5:2).
+_BOB = "person:bob"
+
+_TASK_IDS = ["t-owner-1", "t-owner-2", "t-bob-1", "t-owner-3", "t-bob-2", "t-owner-wait", "t-x"]
+_REQUEST_IDS = ["r-owner", "r-bob", "r-bob-own", "r-owner-own", "r-x"]
+
+
+@dataclass(frozen=True)
+class PlanRemoval:
+    """The records a test-only removal takes out of a store, by id; every stop record too.
+
+    Attributes:
+        effects: Effect records, by id.
+        observations: Observation records, by episode.
+        tasks: Scheduled tasks, by id.
+        requests: Approval requests, by id.
+    """
+
+    effects: tuple[str, ...] = ()
+    observations: tuple[str, ...] = ()
+    tasks: tuple[str, ...] = ()
+    requests: tuple[str, ...] = ()
+
+
+@dataclass
+class _Homed:
+    """A kind of record's ids, by the home each is in, and those made by the own activation."""
+
+    owners: set[str] = field(default_factory=set)
+    shared: set[str] = field(default_factory=set)
+    other: set[str] = field(default_factory=set)
+    own: set[str] = field(default_factory=set)
+
+
+def _by_home[R](
+    records: tuple[R, ...],
+    home_of: Callable[[R], RecordHome],
+    made_by: Callable[[R], str | None],
+) -> _Homed:
+    """Sort records' ids by home, named here by hand rather than by the sight's predicate."""
+    homed = _Homed()
+    for record in records:
+        key = getattr(record, "id", None) or cast("ObservationRecord", record).episode
+        home = home_of(record)
+        if home == RecordHome.owners():
+            homed.owners.add(key)
+        elif home == RecordHome.shared():
+            homed.shared.add(key)
+        else:
+            homed.other.add(key)
+        if made_by(record) == OWN_ACTIVATION:
+            homed.own.add(key)
+    return homed
+
+
+def _not_seen(document: PlanExport, sight: Sight) -> PlanRemoval:
+    """What ``sight`` does not see of ``document``, by the one predicate (§7:3, §7:4)."""
+    return PlanRemoval(
+        effects=tuple(
+            one.id
+            for one in document.activation_effects
+            if not sight.sees(one.home, made_by=one.activation_id)
+        ),
+        observations=tuple(
+            one.episode for one in document.observations if not sight.sees(one.home)
+        ),
+        tasks=tuple(
+            one.id
+            for one in document.scheduled_tasks
+            if not sight.sees(RecordHome.person(one.person))
+        ),
+        requests=tuple(
+            one.id
+            for one in document.approval_requests
+            if not sight.sees(RecordHome.person(one.person), made_by=one.activation_id)
+        ),
+    )
+
+
+def _observation_revision(document: PlanExport, episode: str) -> int:
+    (held,) = (one for one in document.observations if one.episode == episode)
+    return held.revision
+
+
+def _shared[E: (ActivationEffect, ObservationRecord)](record: E) -> E:
+    """``record`` landed in the hub's shared things."""
+    return record.model_copy(update={"home": RecordHome.shared()})
+
+
+async def _sight_history(store: PlanStore) -> None:
+    """Write one history of every kind of record, of every home, by the unbound doors.
+
+    Effects of the owner's domain and of the shared things, two of each claimed by the
+    sight's own activation (:data:`OWN_ACTIVATION`), two spending question parts, and
+    messages; observation records of both, one written twice; tasks of the owner's and
+    of :data:`_BOB`'s, pushed, spawned below one another across the two, one waiting on
+    another and one spawned by the own activation; requests of both, one approved and
+    carded, one denied and its outcome pushed, two asked by the own activation; and two
+    stop records.
+    """
+    for effect in (
+        _effect("e-owner", activation="act-o"),
+        _shared(_effect("e-shared", activation="act-s", values="b" * 64)),
+        _effect("e-own-owner", activation=OWN_ACTIVATION, values="c" * 64),
+        _shared(_effect("e-own-shared", activation=OWN_ACTIVATION, values="d" * 64)),
+        _spending("e-part-owner", activation="act-o", part=QuestionPart(round="q", part=1)),
+        _shared(
+            _spending(
+                "e-part-shared",
+                activation="act-s",
+                part=QuestionPart(round="q", part=2),
+                values="f" * 64,
+            )
+        ),
+        _shared(_message("m-shared", activation="act-s")),
+        _message("m-own", activation=OWN_ACTIVATION),
+    ):
+        claimed = await store.claim_activation_effect(effect, match=None)
+        assert claimed is ActivationEffectClaim.CLAIMED, effect.id
+    await store.finish_activation_effect("e-owner", ToolOutcome.SUCCEEDED)
+    await store.finish_activation_effect("e-shared", ToolOutcome.FAILED, reason="it was full")
+    await store.finish_activation_effect("e-own-owner", ToolOutcome.INDETERMINATE)
+
+    owners = await store.write_observation(_observation("activation:act-o"), expected_revision=0)
+    await store.write_observation(_shared(_observation("activation:act-s")), expected_revision=0)
+    await store.write_observation(
+        _observation("activation:act-o", calls=(_WHEN, _WHEN + timedelta(minutes=1))),
+        expected_revision=owners.revision,
+    )
+
+    await _written(store, "t-owner-1", spawner="act-o", when=DueAt(at=_WHEN))
+    await _step(store, "t-owner-1", "act-t1")
+    await _written(store, "t-owner-2", spawner="act-t1", when=DueAt(at=_WHEN + 3 * _DAY))
+    await _written(store, "t-bob-1", spawner="act-b", person=_BOB, when=DueAt(at=_WHEN))
+    await _step(store, "t-bob-1", "act-tb")
+    await _written(store, "t-owner-3", spawner="act-tb", when=DueAt(at=_WHEN))
+    await _step(store, "t-owner-3", "act-t3")
+    await _written(store, "t-bob-2", spawner=OWN_ACTIVATION, person=_BOB)
+    await _written(store, "t-owner-wait", spawner="act-o", when=DueAfterTasks(tasks=("t-owner-1",)))
+    await store.settle_occurrence("act-t1", OccurrenceState.DONE)
+
+    await _asked(store, _request("r-owner", activation="act-o", hotel="the Ritz"))
+    await store.answer_approval_request("r-owner", ApprovalRequestState.APPROVED, _tap())
+    await store.record_approval_card("r-owner", _card("tok-owner"))
+    await _asked(store, _request("r-bob", person=_BOB, activation="act-b", hotel="the Savoy"))
+    await store.record_approval_card("r-bob", _card("tok-bob"))
+    await _asked(
+        store, _request("r-bob-own", person=_BOB, activation=OWN_ACTIVATION, hotel="the Plaza")
+    )
+    await store.answer_approval_request("r-bob-own", ApprovalRequestState.DENIED, _tap())
+    pushed = await store.mark_approval_outcome_pushed("r-bob-own", "act-push")
+    assert pushed is ApprovalOutcomePush.PUSHED
+    await _asked(store, _request("r-owner-own", activation=OWN_ACTIVATION, hotel="the Ivy"))
+
+    await store.record_stop("act-stopped")
+    await store.record_stop("act-b")
+
+
+def _on(member: str, *args: Any) -> Callable[[PlanStore], Awaitable[object]]:
+    """A call of ``member`` with these arguments, made on whichever store it is given."""
+
+    def call(store: PlanStore) -> Awaitable[object]:
+        return cast("Awaitable[object]", getattr(store, member)(*args))
+
+    return call
+
+
+def _sight_battery() -> list[ReadCall[PlanStore]]:
+    """Every read member but the store-wide count, with arguments reaching each answer."""
+    activations = ["act-o", "act-s", OWN_ACTIVATION, "act-t1", "act-tb", "act-t3", "act-b", "x"]
+    parts = [QuestionPart(round="q", part=1), QuestionPart(round="q", part=2)]
+    episodes = ["activation:act-o", "activation:act-s", "activation:x"]
+    persons = [OWNER_PERSON_ID, _BOB, "person:nobody"]
+    calls: list[ReadCall[PlanStore]] = [
+        ReadCall("activation_effects(all)", _on("activation_effects", activations)),
+        ReadCall("part_effects(all)", _on("part_effects", parts)),
+        ReadCall("observations(all)", _on("observations", episodes)),
+        ReadCall("scheduled_tasks(all)", _on("scheduled_tasks", _TASK_IDS)),
+        ReadCall("approval_requests(all)", _on("approval_requests", _REQUEST_IDS)),
+        ReadCall("stopped_activations", _on("stopped_activations", ["act-stopped", "act-b"])),
+        ReadCall("pushed_approval_outcomes()", _on("pushed_approval_outcomes")),
+        ReadCall("export()", _on("export")),
+    ]
+    for one in activations:
+        calls += [
+            ReadCall(f"activation_effects([{one}])", _on("activation_effects", [one])),
+            ReadCall(f"spawned_tasks([{one}])", _on("spawned_tasks", [one])),
+            ReadCall(f"scheduled_lineage({one})", _on("scheduled_lineage", one)),
+        ]
+    calls += [ReadCall(f"part_effects([{one}])", _on("part_effects", [one])) for one in parts]
+    calls += [ReadCall(f"observations([{one}])", _on("observations", [one])) for one in episodes]
+    for one in _TASK_IDS:
+        calls += [
+            ReadCall(f"scheduled_tasks([{one}])", _on("scheduled_tasks", [one])),
+            ReadCall(f"live_below({one})", _on("live_below", one)),
+        ]
+    for whom in persons:
+        calls += [
+            ReadCall(
+                f"person_scheduled_tasks({whom})",
+                _on("person_scheduled_tasks", whom, list(OccurrenceState)),
+            ),
+            ReadCall(
+                f"person_scheduled_tasks({whom}, pending)",
+                _on("person_scheduled_tasks", whom, [OccurrenceState.PENDING]),
+            ),
+            ReadCall(
+                f"person_approval_requests({whom})",
+                _on("person_approval_requests", whom, list(ApprovalRequestState)),
+            ),
+        ]
+    for at in (_WHEN - _DAY, _WHEN, _WHEN + _DAY, _WHEN + 10 * _DAY):
+        calls += [
+            ReadCall(f"due_occurrences({at})", _on("due_occurrences", at)),
+            ReadCall(f"due_approval_outcomes({at})", _on("due_approval_outcomes", at)),
+        ]
+    calls += [
+        ReadCall(f"approval_requests([{one}])", _on("approval_requests", [one]))
+        for one in _REQUEST_IDS
+    ]
+    calls += [
+        ReadCall(f"approval_request_by_token({token})", _on("approval_request_by_token", token))
+        for token in ("tok-owner", "tok-bob", "tok-x")
+    ]
+    return calls
