@@ -1,6 +1,6 @@
 # 383. Each record carries its home, and every read a work, a producer or a run makes is of a store bound to one sight, which answers as though it held only what that sight sees
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0385 (§6:10 and §9:2, each in the addition alone: a sight is also made by a `core` constructor for an owner's own act, in the engine's members; §7:10, in its reach: a store bound to an owner's act's sight withholds from the build that first binds it)
 - Date: 2026-11-26
 - Scope: decision D1 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
@@ -27,6 +27,7 @@
   or code. It decides `core` types and members of seven Protocols (§13), so it takes the
   adversarial and the architecture review. Building it is a breaking change under golden rule 5.
   It supersedes nothing (§12).
+- Partially superseded: 2026-11-26 by [ADR-0385](0385-the-owners-acts-read-through-a-sight-of-their-own-seeing-and-deleting-keep-their-members-and-one-new-member-exports-one-named-domain-whole.md) — §6:10, in the addition alone: a sight is also made by the `core` constructor for an owner's own act, from the domain the act names or none rather than from recorded facts (ADR-0385 §3:2); §9:2, in the addition alone: the engine's members make that sight through that constructor, and the named test admits them; §7:10, in its reach: its "the build that first binds the stores counts" does not reach a store bound to an owner's act's sight, which withholds from the build that first binds it (ADR-0385 §3:4), and its first half binds such a store as written. Every other clause stands. These replacements take effect on ratification of ADR-0385. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
