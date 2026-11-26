@@ -105,6 +105,14 @@ NAMED_BY_THE_DECISION: Final[dict[str, str]] = {
     # §7:8: the restart's close of the episodes a dead process left open, the engine's
     # start's (ADR-0286 §7), which ADR-0387 §7 leaves as it is.
     "activation_writer.py:OpenEpisodes": "§7:8",
+    # §7:12: the observer's finding of what is due, the window it tests, the episodes it
+    # pages and their records, and the facts and senders it reads only to make an
+    # episode's sight; and §8:5's budget, a store-wide figure. Its runs read and write
+    # through the holder, by each episode's sight (B9a), and its pin pass by the run's
+    # sight for each person domain and, before a retiring write, the episode's (ADR-0388
+    # §4, B11e). The stores a holder is built over where the caller hands none are
+    # handed to that holder and read by nothing else.
+    "observer/stage.py:Observer": "§7:12",
     # §7:8: the person-model store handed to the zone picker the Task Scheduler sensor's
     # push reads. A work's block, pins and reads go through the holder (B8e), and the
     # owner's panel through `bound` blocks, the owner's sight's (ADR-0385 §3:1, B10f);
@@ -139,14 +147,13 @@ OWN_TURN_HOLDERS: Final[dict[str, str]] = {
 }
 
 #: Holders not yet converted, each with the lane of milestone 22 that removes it (#3711):
-#: B9 the observer's pin pass and the upcoming-event producer's writes, B10g the reads
-#: of the owner's acts on conversations that join device rows to records of a home
-#: (ADR-0389); B8b's windows, B8c's stories, B8d's authorizing, acting, approvals and
-#: tasks, B8e's look-ups, person block and matters, B8f's writes of a work's own turn,
-#: B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, B10b's owner's
-#: acts on memory and stories, B10e's on conversations, and B10f's on notifications, the
-#: profile, the approvals panel and tasks are converted, save the parts named here for a
-#: later lane.
+#: B10g the reads of the owner's acts on conversations that join device rows to records
+#: of a home (ADR-0389); B8b's windows, B8c's stories, B8d's authorizing, acting,
+#: approvals and tasks, B8e's look-ups, person block and matters, B8f's writes of a work's
+#: own turn, B9a's observer reads, B9b's upkeep runs and a tidy-up a work asks for, B10b's
+#: owner's acts on memory and stories, B10e's on conversations, B10f's on notifications,
+#: the profile, the approvals panel and tasks, and B11e's pin pass and upcoming-event
+#: producer (ADR-0388 §4, §7) are converted, save the parts named here for a later lane.
 #: A holder more than one lane converts names the last of them. **Only shrinks.** A holder
 #: whose last unbound read is one §7:8, §7:12 or §7:13 names moves to
 #: :data:`NAMED_BY_THE_DECISION` in the lane that converts the rest: the observer's finding
@@ -166,26 +173,9 @@ NOT_YET_CONVERTED: Final[dict[str, str]] = {
     # §3:2); and, not yet converted, a device's listing, its changes and the hub's
     # changes, as `ChangeStream`'s pages (ADR-0383 §3:3): ADR-0389's, then B10g's.
     "conversations.py:ConversationLifecycle": "B10g",
-    # The upcoming-event producer's writes (ADR-0132): it reads a source, not a store, so
-    # ADR-0384 §2's table makes it no upkeep run, and no clause yet gives it a sight. It
-    # reads the owner's zone from the person-model store and rules into the notification
-    # store unbound, as the pin pass beside it awaits a decision (B9).
-    "notifications.py:NotificationWriteStage": "B9",
-    # The producer's zone pick, built by the write stage over its unbound person-model
-    # store; the reconsideration picks through the store bound to its run's sight (B9b).
-    "notifications.py:RulingPolicy": "B9",
-    # The pin pass (ADR-0338 §9:6) reads every person's pins, tied to no one ended work,
-    # so ADR-0383 §6:7 gives it no sight; it writes through a stage over the unbound
-    # writer, which `writes.py:MemoryWriteStage` marks `Bound`.
-    "observer/person.py:PinConfirmations": "B9",
-    # Its runs read and write through the holder, bound to each episode's sight (B9a).
-    # What it holds unbound: the finding of what is due (§7:12), the budget's figure
-    # (§8:5), the pin pass's stores and write stage (B9), and the stores a holder is
-    # built over where none is handed.
-    "observer/stage.py:Observer": "B9",
 }
 
-_LANES: Final = frozenset({"B9", "B10g"})
+_LANES: Final = frozenset({"B10g"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
@@ -514,7 +504,7 @@ def test_the_story_stages_hold_no_store() -> None:
 def test_the_observer_s_reads_for_an_ended_work_hold_no_store() -> None:
     """The observer's reading, placement, writing and person reads, and the write stage
     (milestone 22's B9a), take the stores the holder binds to an episode's sight alone;
-    the observer itself keeps the due-finding's, the budget's and the pin pass's."""
+    the observer itself keeps the due-finding's and the budget's (§7:12, §8:5)."""
     held = unbound_holders()
     for converted in (
         "authorizer.py:read_outside_content",
@@ -537,7 +527,7 @@ def test_the_upkeep_runs_and_a_works_tidy_up_hold_no_store() -> None:
     """The matters pass, the scheduled tidy-up, the tidy-up itself, the readers of
     ``story_flags`` and the story calls (milestone 22's B9b) take the holder or a store it
     bound to a run's or a work's sight alone; the reconsideration reads through the engine's
-    holder, and ``RulingPolicy`` keeps the upcoming-event producer's unbound store (B9)."""
+    holder, as ``RulingPolicy`` picks through the store bound to its run's sight."""
     held = unbound_holders()
     for converted in (
         "matters_pass.py:MattersPass",
@@ -561,6 +551,24 @@ def test_the_upkeep_runs_and_a_works_tidy_up_hold_no_store() -> None:
         assert converted not in held
         assert converted not in NOT_YET_CONVERTED
     assert not any(lane == "B9b" for lane in NOT_YET_CONVERTED.values())
+
+
+def test_the_pin_pass_and_the_upcoming_event_producer_hold_no_store() -> None:
+    """The pin pass and the upcoming-event producer's reads and writes are a run's
+    (ADR-0388 §4, §7, milestone 22's B11e): each takes the holder or a store it bound to
+    a run's or an episode's sight alone, so neither is listed, and the observer keeps only
+    what §7:12 and §8:5 name. No holder is left to B9."""
+    held = unbound_holders()
+    for converted in (
+        "notifications.py:NotificationWriteStage",
+        "notifications.py:RulingPolicy",
+        "observer/person.py:PinConfirmations",
+    ):
+        assert converted not in held
+        assert converted not in NOT_YET_CONVERTED
+    assert NAMED_BY_THE_DECISION["observer/stage.py:Observer"] == "§7:12"
+    assert "observer/stage.py:Observer" not in NOT_YET_CONVERTED
+    assert "B9" not in NOT_YET_CONVERTED.values()
 
 
 def test_the_helpers_of_the_owners_acts_on_memory_and_stories_hold_no_store() -> None:

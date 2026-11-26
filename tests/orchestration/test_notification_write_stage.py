@@ -30,13 +30,16 @@ from ai_assistant.core.types import (
     RecordHome,
 )
 from ai_assistant.orchestration import NotificationWriteStage
+from ai_assistant.orchestration.bound_stores import BoundStores
 from ai_assistant.testing import (
+    FakeMemoryStore,
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
 
 if TYPE_CHECKING:
+    from ai_assistant.core.protocols import NotificationOutbox, NotificationPolicy
     from ai_assistant.core.types import NotificationEnqueue
 
 #: The store's and the outbox's clock. The candidate below expires after it, so
@@ -73,6 +76,20 @@ def _candidate(*, key: str = "k-1", expires_at: datetime | None = None) -> Notif
     )
 
 
+def _stage(
+    store: FakeNotificationStore,
+    *,
+    policy: NotificationPolicy,
+    outbox: NotificationOutbox | None,
+) -> NotificationWriteStage:
+    """The seam over a holder of ``store``, as the composition root builds it (ADR-0388 §7:1)."""
+    return NotificationWriteStage(
+        stores=BoundStores(memory=FakeMemoryStore(now=lambda: _NOW), notifications=store),
+        policy=policy,
+        outbox=outbox,
+    )
+
+
 async def _interrupting_store() -> FakeNotificationStore:
     """A store whose preferences let the escalation test through (ADR-0130 §6)."""
     store = FakeNotificationStore(now=lambda: _NOW)
@@ -95,9 +112,7 @@ async def test_the_seam_rules_through_the_store_and_reports_what_it_ruled() -> N
     coming back is the *store's*, carrying the record id it minted.
     """
     store = await _interrupting_store()
-    stage = NotificationWriteStage(
-        store=store, policy=FakeNotificationPolicy(), outbox=FakeNotificationOutbox()
-    )
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=FakeNotificationOutbox())
 
     ruling = await stage.offer(_candidate())
 
@@ -113,9 +128,7 @@ async def test_the_record_takes_the_home_of_whoever_the_source_belongs_to() -> N
     one rule ``source_home`` reads, and the candidate carries none.
     """
     store = await _interrupting_store()
-    stage = NotificationWriteStage(
-        store=store, policy=FakeNotificationPolicy(), outbox=FakeNotificationOutbox()
-    )
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=FakeNotificationOutbox())
 
     ruling = await stage.offer(_candidate())
 
@@ -141,7 +154,7 @@ async def test_an_actionable_interrupt_reaches_the_outbox_before_the_call_return
     """
     store = await _interrupting_store()
     outbox = FakeNotificationOutbox(records=store, now=lambda: _NOW)
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=outbox)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=outbox)
     candidate = _candidate()
 
     await stage.offer(candidate)
@@ -162,7 +175,7 @@ async def test_a_ruling_that_is_not_an_interrupt_hands_off_nothing() -> None:
     """
     store = FakeNotificationStore(now=lambda: _NOW)
     outbox = FakeNotificationOutbox(records=store, now=lambda: _NOW)
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=outbox)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=outbox)
 
     ruling = await stage.offer(_candidate())
 
@@ -184,7 +197,7 @@ async def test_a_dropped_candidate_hands_off_nothing() -> None:
         )
     )
     outbox = FakeNotificationOutbox(records=store, now=lambda: _NOW)
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=outbox)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=outbox)
 
     ruling = await stage.offer(_candidate())
 
@@ -202,7 +215,7 @@ async def test_a_deployment_with_no_outbox_still_rules_and_records() -> None:
     ADR-0130 §9 gives the user.
     """
     store = await _interrupting_store()
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=None)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=None)
 
     ruling = await stage.offer(_candidate())
 
@@ -222,7 +235,7 @@ async def test_a_failed_enqueue_reaches_the_producer_and_leaves_the_record_actio
     """
     store = await _interrupting_store()
     outbox = _BrokenOutbox()
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=outbox)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=outbox)
 
     with pytest.raises(NotificationOutboxError):
         await stage.offer(_candidate())
@@ -248,7 +261,7 @@ async def test_a_re_offer_of_the_same_key_is_dropped_and_hands_off_nothing() -> 
     """
     store = await _interrupting_store()
     outbox = FakeNotificationOutbox(records=store, now=lambda: _NOW)
-    stage = NotificationWriteStage(store=store, policy=FakeNotificationPolicy(), outbox=outbox)
+    stage = _stage(store, policy=FakeNotificationPolicy(), outbox=outbox)
 
     first = await stage.offer(_candidate(key="same"))
     second = await stage.offer(_candidate(key="same"))
@@ -272,12 +285,8 @@ async def test_the_reach_the_user_set_is_what_decides_the_handoff() -> None:
     loud_store = await _interrupting_store()
     policy = FakeNotificationPolicy()
 
-    quiet = await NotificationWriteStage(store=quiet_store, policy=policy, outbox=None).offer(
-        _candidate()
-    )
-    loud = await NotificationWriteStage(store=loud_store, policy=policy, outbox=None).offer(
-        _candidate()
-    )
+    quiet = await _stage(quiet_store, policy=policy, outbox=None).offer(_candidate())
+    loud = await _stage(loud_store, policy=policy, outbox=None).offer(_candidate())
 
     assert quiet.kind is NotificationDispositionKind.HOLD
     assert loud.kind is NotificationDispositionKind.INTERRUPT

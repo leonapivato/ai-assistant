@@ -11,8 +11,10 @@ hub's shared things. :data:`UPKEEP_DOMAINS` is both, in the order one firing of 
 tends them: the owner's first, since it holds nearly every record, so a run of the
 shared things that finds nothing due takes nothing from it. The reconsideration tends
 the owner's domain alone (:data:`RECONSIDERED`, §3:4): a held notification of another
-domain is left to the decision that rules whom it goes to. Both are constants: no read
-decides which domains a firing tends.
+domain is left to the decision that rules whom it goes to. The observer's pin pass, a
+run since ADR-0388 §4:1, tends each person domain, never the shared things (§4:3): a pin
+is a person's on their own profile (:data:`PERSON_DOMAINS`, the owner's alone). Each is a
+constant: no read decides which domains a firing tends.
 
 **A run's sight** (ADR-0383 §6:8, §7:7). Every read a run makes, its finding of what is
 due included, is of a store bound to one sight (ADR-0384 §7:1), and :func:`upkeep_run` is
@@ -21,7 +23,10 @@ handed, :meth:`~ai_assistant.core.types.Sight.of_run` (a one-domain bound for th
 and a person bound for its person, the owner for the shared things). Each job asks for its
 run here, binds its stores to the run's sight through
 :class:`~ai_assistant.orchestration.bound_stores.BoundStores`, and neither makes nor
-changes a sight (§9:2).
+changes a sight (§9:2). So do the two runs ADR-0388 adds, the observer's pin pass (§4) and
+the upcoming-event producer's (§7), which are no upkeep jobs of ADR-0384 §2's table: each
+asks here for the run of the domain it tends, as ADR-0388 §9 puts their sights where every
+run's is.
 
 **One budget to a firing** (§10 leaves the share to the build). A row's firing runs the
 job once for each domain, and the runs share one ``scheduler_run_budget``
@@ -57,7 +62,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import timedelta
 
-__all__ = ["RECONSIDERED", "UPKEEP_DOMAINS", "FiringBudget", "UpkeepRun", "upkeep_run"]
+__all__ = [
+    "PERSON_DOMAINS",
+    "RECONSIDERED",
+    "UPKEEP_DOMAINS",
+    "FiringBudget",
+    "UpkeepRun",
+    "upkeep_run",
+]
 
 #: The two domains of a hub with one person (ADR-0384 §1:3), in the order one firing of
 #: the scheduled tidy-up's row and of the matters pass's row tends them (§5:1, §10).
@@ -65,6 +77,10 @@ UPKEEP_DOMAINS: Final[tuple[RecordHome, ...]] = (RecordHome.owners(), RecordHome
 
 #: The one domain the notification reconsideration tends (ADR-0384 §3:4): the owner's.
 RECONSIDERED: Final = RecordHome.owners()
+
+#: The person domains ADR-0384 §1:3 rules, each of which the observer's pin pass is run
+#: once for (ADR-0388 §4:1): the owner's alone. Never the shared things (§4:3).
+PERSON_DOMAINS: Final[tuple[RecordHome, ...]] = (RecordHome.owners(),)
 
 
 @dataclass(frozen=True, slots=True)

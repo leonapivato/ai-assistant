@@ -1656,29 +1656,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # policy's zone stays its construction-time input (§6). Where the person
         # model is off, both hand every ruling this one policy, as before.
         notification_policy = DefaultNotificationPolicy(timezone=settings.timezone)
-        # **ADR-0130 §3's producer seam, concrete at last** (#964). Until leg 10's
-        # first producer existed there was nothing to hold it and this root said so;
-        # ADR-0132's producer is that holder, so the seam is composed here, over the
-        # *same* store the engine's surface reads and the *same* outbox the engine
-        # serves polls from. A second store would let a ruled notification be
-        # unreadable and undismissable through the surfaces the user has (ADR-0028
-        # §4), and a second outbox would break ADR-0131 §3b's invariant outright.
-        #
-        # **The outbox is what makes the live handoff exist** (ADR-0131 §3b): "When
-        # a ``NotificationWriter`` call returns an actionable ``INTERRUPT``
-        # disposition, the same call path calls ``NotificationOutbox.offer`` with
-        # that candidate before it returns to the producer", and §3b's startup
-        # reconciliation is a repair for a handoff that did not happen rather than
-        # the trigger a notification relies on. It is passed explicitly rather than
-        # defaulted, so a root that meant "there is nowhere to deliver" would have
-        # to say so.
-        notification_writer = NotificationWriteStage(
-            store=notifications,
-            policy=notification_policy,
-            outbox=outbox,
-            policy_for=_policy_for_zone,
-            people=person_model,
-        )
 
         # **The one registered egress integration, where a deployment configured
         # one** (ADR-0148 §6, ADR-0152 §10, ADR-0154 §6). Built before the registry
@@ -2066,6 +2043,33 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             writer=writer,
             notifications=notifications,
         )
+        # **ADR-0130 §3's producer seam, concrete at last** (#964). Until leg 10's
+        # first producer existed there was nothing to hold it and this root said so;
+        # ADR-0132's producer is that holder, so the seam is composed here, over the
+        # *same* store the engine's surface reads and the *same* outbox the engine
+        # serves polls from. A second store would let a ruled notification be
+        # unreadable and undismissable through the surfaces the user has (ADR-0028
+        # §4), and a second outbox would break ADR-0131 §3b's invariant outright.
+        #
+        # **The outbox is what makes the live handoff exist** (ADR-0131 §3b): "When
+        # a ``NotificationWriter`` call returns an actionable ``INTERRUPT``
+        # disposition, the same call path calls ``NotificationOutbox.offer`` with
+        # that candidate before it returns to the producer", and §3b's startup
+        # reconciliation is a repair for a handoff that did not happen rather than
+        # the trigger a notification relies on. It is passed explicitly rather than
+        # defaulted, so a root that meant "there is nowhere to deliver" would have
+        # to say so.
+        #
+        # **Over the holder** (ADR-0388 §7:1): the upcoming-event producer reads the
+        # owner's zone and rules into the notification store through the stores the
+        # holder binds to its run's sight, the zone read where the person model is on.
+        notification_writer = NotificationWriteStage(
+            stores=pass_stores,
+            policy=notification_policy,
+            outbox=outbox,
+            policy_for=_policy_for_zone,
+            read_zone=person_model is not None,
+        )
         # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
         # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall
         # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs on
@@ -2102,8 +2106,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # starts a run on every frozen episode and the scheduler's row runs it on a timer
         # (§7:6). It reads and writes for each episode through the holder above, bound to
         # the sight it makes from that episode's facts and senders (ADR-0383 §6:7, §7:7);
-        # what it holds unbound is the finding of what is due's (§7:12), the budget's
-        # (§8:5), and the pin pass's, through the write stage over the unbound writer.
+        # what it holds unbound is the finding of what is due's (§7:12) and the budget's
+        # (§8:5). Its pin pass reads and writes through the same holder, by the run's
+        # sight for each person domain, and before a retiring write by the episode's
+        # (ADR-0388 §4).
         observer = Observer(
             # ADR-0354 §6:2: each route handed as its `StructuredCompleter`, its retry
             # policy and its absence of a fallback unchanged.

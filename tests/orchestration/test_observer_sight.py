@@ -297,14 +297,19 @@ async def test_counting_every_run_is_as_today_and_each_read_is_the_producers(
 ) -> None:
     """§7:13's last sentence, §11:1: in the counting build an episode is processed as
     today whatever its sight sees, and each read the run makes writes one event, reader
-    ``producer``, counting what the sight would have withheld."""
+    ``producer``, counting what the sight would have withheld. The run's pin pass, before
+    the episodes, is a run's (ADR-0388 §4:1): its one read, of the pins, carries ``run``."""
     harness, outcome, scout, _, logs = await _run(SightMode.COUNT, stranger=stranger)
 
     assert outcome.processed == 1
     assert len(scout.calls) == 1
     (record,) = await harness.plans.observations([_SUBJECT])
     assert record.state is ObservationState.PROCESSED
-    counted = _counted(logs)
+    every = _counted(logs)
+    passed = [one for one in every if one["reader"] == "run"]
+    assert [(one["store"], one["member"]) for one in passed] == [("person_model", "export")]
+    assert {tuple(one["bounds"]) for one in passed} == {Sight.of_run(RecordHome.owners()).codes}
+    counted = [one for one in every if one["reader"] != "run"]
     assert counted
     assert {one["reader"] for one in counted} == {"producer"}
     stores = {one["store"] for one in counted}
@@ -322,8 +327,8 @@ async def test_counting_every_run_is_as_today_and_each_read_is_the_producers(
 
 async def test_the_due_finding_and_the_budget_read_unbound() -> None:
     """§7:12, §8:5: the window, the episodes paged, their records and the calls in the last
-    day are read by no sight, so they write no event; the pin pass, tied to no ended
-    work, reads unbound too (milestone 22's B9)."""
+    day are read by no sight, so they write no event; the pin pass reads by the run's
+    sight (ADR-0388 §4:1), so its read of the pins writes one, reader ``run``."""
     harness = Harness()
     await _seeded(harness)
     observer = harness.observer(person_model=FakePersonModelStore(now=harness.clock), daily_calls=0)
@@ -335,7 +340,9 @@ async def test_the_due_finding_and_the_budget_read_unbound() -> None:
     members = [(one["store"], one["member"]) for one in _counted(logs)]
     assert ("memory", "episodes") not in members
     assert ("plans", "observer_calls_since") not in members
-    assert ("person_model", "export") not in members
+    assert [(one["store"], one["member"]) for one in _counted(logs) if one["reader"] == "run"] == [
+        ("person_model", "export")
+    ]
     assert ("plans", "observations") in members, "the run reads its record bound"
 
 
