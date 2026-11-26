@@ -3546,6 +3546,12 @@ _PLANTED_HOMES: Final[dict[str, tuple[str, RecordHome | None]]] = {
     ),
     "object-id-shared": ("""json_set(data, '$.home', json('{"kind":"shared","id":{}}'))""", None),
     "number-kind": ("""json_set(data, '$.home', json('{"kind":1,"id":null}'))""", None),
+    # An earlier value of a repeated key the decoder refuses, before one it would read.
+    "refused-earlier-duplicate": (
+        f"replace(data, '{_OWNERS_STORED}', "
+        """'"home":{"kind":"shared","id":"\\ud800","id":null}')""",
+        None,
+    ),
     # A lone surrogate's escape, which SQLite decodes to bytes no driver can read.
     "lone-surrogate-id": (
         f"replace(data, '{_OWNERS_STORED}', "
