@@ -78,9 +78,11 @@ upcoming-event producer and a work with no recorded facts a sight.
 > sight and a name never written get the one refusal, `UnresolvedEvidenceError` naming the id,
 > with nothing written.
 
-> **Normative.** A name a write adds is one the written record carries and the record stored
-> under its id did not. A name the stored record already carried is not judged again, so a write
-> to a memory whose support's episode has since been deleted is not refused for it.
+> **Normative.** A name a write adds is one the written record carries and no record the bound
+> store holds carried before the write, neither the record stored under its id nor any other. A
+> name a held record already carries is not judged again: a later write to a memory whose
+> support's episode has since been deleted is not refused for it, and nor is a support copied
+> from a held memory, as a dispute copies one (ADR-0345 §3:5, §3:8).
 
 > **Normative.** A name that resolves to a record the store holds of another home is refused
 > with ADR-0383 §4:7's error, as today. Neither judgement is one of a write's own checks: ADR-0383
@@ -262,13 +264,15 @@ Lane B11 builds it, with the switch, or a lane cut before it.
 - **`core/protocols.py`:** `StoryStore.create`'s notes, as §3:3 states. `MemoryStore.bound`'s and the write members' docstrings move
   the name judgement off the stored row and state §2:1 to §2:3 and §2:5; each conformance suite
   gains the cases: a withheld name and a never-written one refused alike, an already carried name
-  not judged again, a name held of another home refused as today, and a takeover lineage naming a
-  deleted episode written, the capture kept. `PlanStore.bound`'s and
+  not judged again, a dispute copying a held memory's confirmation whose asking episode is gone
+  written, a name held of another home refused as today, and a takeover lineage naming a deleted
+  episode written, the capture kept. `PlanStore.bound`'s and
   `NotificationStore.bound`'s docstrings state §6:1.
 - **`core/errors.py`:** `UnresolvedEvidenceError`'s docstring widens from a support's episode to
   any name §2:1 refuses. No new error.
 - **Stores:** the three memory stores and the canonical fake judge an added name over held
-  records in the withholding mode; the story stores and their fake take a create's notes.
+  records in the withholding mode, and look for a held record already carrying it only where it
+  does not resolve, so no name index is owed; the story stores and their fake take a create's notes.
 - **Orchestration:** `StoryCalls._start` makes one create carrying its notes; the observer drops
   a confirmation whose asking episode is not held (§2:4) and runs the pin pass through its holder
   by the run's sight (§4); `ActivationState` makes a work's sight for a work with no facts (§5);
