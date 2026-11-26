@@ -218,6 +218,8 @@ def summary_refusal_text(refusal: StorySummaryRefusal) -> str:
                 else f"note #{refusal.note}"
             )
             detail = f"{story} does not hold {held}"
+        case StorySummaryRefusalReason.ANOTHER_HOME:
+            detail = f"{story} is of another home"
         case _:  # pragma: no cover — exhaustive over a closed enumeration
             assert_never(refusal.reason)
     return f"Refused ({refusal.reason.value}): {detail}."

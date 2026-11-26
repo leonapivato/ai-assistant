@@ -1269,6 +1269,26 @@ class SqliteStoryStore:
         raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
         return _unique([self._followed(conn, story_id) for story_id in raised])
 
+    def _answer_refusal(
+        self, conn: sqlite3.Connection, flag: StoryFlagName, home: RecordHome | None = None
+    ) -> StoryRefusal | None:
+        """Refuse deciding ``flag`` in a write of ``home``, if it is refused.
+
+        ``unknown_flag``, then ``already_decided``, then ``another_home`` naming the
+        first story the flag concerns that is of another home than ``home``, since its
+        ``decided`` line would be written into a story of another home (ADR-0383 §3:2,
+        §4:7). ``home`` is the write's own; ``None``, for a decision that changes no
+        story, takes the home of the first story the flag concerns, so a flag whose
+        stories span two homes is refused. Withholding, a flag concerning a story this
+        store does not hold is ``unknown_flag`` first (§4:8), so ``another_home`` is
+        answered between stories it holds alone.
+        """
+        if refused := self._flag_refusal(conn, flag):
+            return refused
+        concerned = self._concerned(conn, flag)
+        own = self._home_of(conn, concerned[0]) if home is None else home
+        return self._home_refusal(conn, own, concerned)
+
     def _decide(
         self,
         conn: sqlite3.Connection,
@@ -1419,7 +1439,7 @@ class SqliteStoryStore:
                 conn, home, _story_members(members)
             ):
                 return StoryOutcome(refusal=refused)
-            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+            if flag is not None and (refused := self._answer_refusal(conn, flag, home)):
                 return StoryOutcome(refusal=refused)
             story_id = self._mint(conn, stamp, home)
             unique = _unique(members)
@@ -1481,7 +1501,9 @@ class SqliteStoryStore:
                             loop=(story_id, *chain[:-1]),
                         )
                     )
-            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+            if flag is not None and (
+                refused := self._answer_refusal(conn, flag, self._home_of(conn, story_id))
+            ):
                 return StoryOutcome(refusal=refused)
             for member in fresh:
                 self._add(conn, story_id, member, stamp)
@@ -1568,8 +1590,13 @@ class SqliteStoryStore:
                         )
                     )
                 # The flag is read off the records before the merge writes anything,
-                # and reported only after the merge's own loop check (ADR-0302 §4:5).
-                flag_refused = None if flag is None else self._flag_refusal(conn, flag)
+                # and reported only after the merge's own loop check (ADR-0302 §4:5);
+                # the homes of the stories it concerns are judged then too.
+                flag_refused = (
+                    None
+                    if flag is None
+                    else self._answer_refusal(conn, flag, self._home_of(conn, target))
+                )
                 logged = self._merge_writes(conn, absorbed, target, stamp)
                 # Every edge the merge added touches the target — it gained the
                 # absorbed story's members, and the absorbed story's holders gained
@@ -1686,7 +1713,9 @@ class SqliteStoryStore:
             carried = self._named_notes(conn, story_id, notes)
             if refused := _note_not_held(story_id, actor, notes, carried):
                 return StoryOutcome(refusal=refused)
-            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+            if flag is not None and (
+                refused := self._answer_refusal(conn, flag, self._home_of(conn, story_id))
+            ):
                 return StoryOutcome(refusal=refused)
             source = self._header(conn, story_id)
             assert source is not None  # noqa: S101 — the story refusal above found it
@@ -1767,7 +1796,9 @@ class SqliteStoryStore:
             carried = self._named_notes(conn, source, notes)
             if refused := _notes_refusal(source, actor, notes, carried, members=members):
                 return StoryOutcome(refusal=refused)
-            if flag is not None and (refused := self._flag_refusal(conn, flag)):
+            if flag is not None and (
+                refused := self._answer_refusal(conn, flag, self._home_of(conn, source))
+            ):
                 return StoryOutcome(refusal=refused)
             logged = 0
             for member in moved:
@@ -1803,7 +1834,7 @@ class SqliteStoryStore:
     ) -> StoryOutcome:
         stamp = self._stamp(actor, None)
         with self._transaction("leave a flag") as conn:
-            if refused := self._flag_refusal(conn, flag):
+            if refused := self._answer_refusal(conn, flag):
                 return StoryOutcome(refusal=refused)
             decided = self._decide(conn, flag, outcome, stamp)
         return StoryOutcome(story_id=decided[0], logged=len(decided))
@@ -1920,7 +1951,8 @@ class SqliteStoryStore:
         """The first of the summary's refusals a draft meets after the story's own, if any.
 
         ADR-0303 §4:4: ``summary_moved_on``, a flag's unknown story, a summary version read
-        naming an unknown story (§4:2), ``not_held``, ``over_cap``.
+        naming an unknown story (§4:2), ``not_held``, ``over_cap``; ADR-0383 §4:7's
+        ``another_home`` sits after the unknown stories and before ``not_held``.
 
         Raises:
             ValueError: If a summary version read names a version its story's log does not
@@ -1952,10 +1984,29 @@ class SqliteStoryStore:
             ):
                 msg = "a summary version read names a version its story's log does not hold"
                 raise ValueError(msg)
-        if refused := self._not_held(conn, story_id, draft):
+        if refused := self._draft_home_refusal(conn, story_id, draft) or self._not_held(
+            conn, story_id, draft
+        ):
             return refused
         if _summary_size(draft) > STORY_SUMMARY_CAP_CHARS:
             return StorySummaryRefusal(reason=StorySummaryRefusalReason.OVER_CAP, story_id=story_id)
+        return None
+
+    def _draft_home_refusal(
+        self, conn: sqlite3.Connection, story_id: str, draft: StorySummaryDraft
+    ) -> StorySummaryRefusal | None:
+        """Refuse a version naming a story of another home than ``story_id`` (ADR-0383 §4:7).
+
+        The flags' stories first, then the summary versions read, each already found
+        held; each named story's own home is compared, never followed through its merges.
+        """
+        home = self._home_of(conn, story_id)
+        named = [flag.story for flag in draft.flags if flag.story is not None]
+        for other in [*named, *(read.story for read in draft.read_pages)]:
+            if self._home_of(conn, other) != home:
+                return StorySummaryRefusal(
+                    reason=StorySummaryRefusalReason.ANOTHER_HOME, story_id=other
+                )
         return None
 
     def _not_held(

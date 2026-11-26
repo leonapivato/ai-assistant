@@ -1288,6 +1288,10 @@ def _summary_refusals() -> list[tuple[StorySummaryRefusal, str]]:
             ),
             'story "story:x" does not hold note #9',
         ),
+        (
+            StorySummaryRefusal(reason=StorySummaryRefusalReason.ANOTHER_HOME, story_id="story:y"),
+            'story "story:y" is of another home',
+        ),
     ]
 
 

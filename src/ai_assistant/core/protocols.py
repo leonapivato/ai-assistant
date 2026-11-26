@@ -7868,7 +7868,10 @@ class StoryStore(Protocol):
     A merge also changes no story of another home and names none in a membership it
     writes: each story member the story merged into gains, and every story holding the
     story absorbed, is of its home. So no write changes a story's home, nor a note's,
-    which is its story's (§4:6).
+    which is its story's (§4:6). A write answering a flag writes no ``decided`` line into
+    a story of another home than its own, and :meth:`write_summary` records no flag and
+    no summary version read naming a story of another home than the story written:
+    each is refused ``another_home`` too, as those members state.
 
     **Members** are exactly one of two kinds, carried with the id and never inferred
     from it: an activation, named by its activation id, or another story (§2).
@@ -7965,8 +7968,13 @@ class StoryStore(Protocol):
     the flag, the outcome its operation gives and the deciding actor, and no
     trigger. It checks the flag after every check the operation already makes:
     ``unknown_flag`` where the store's records hold no such flag, then
-    ``already_decided`` where a ``decided`` line already answers it; a refused write
-    writes nothing, its change included. The store reads only its own records for
+    ``already_decided`` where a ``decided`` line already answers it, then
+    ``another_home`` naming the first story the flag concerns that is of another home
+    than the write's own (ADR-0383 §3:2, §4:7): the home of the story a create mints, a
+    link links to, a split or a move moves from, or a merge merges into, and for
+    :meth:`leave_flag`, which changes no story, the home of the first story the flag
+    concerns, so a flag whose stories span two homes is decided by no write. A
+    refused write writes nothing, its change included. The store reads only its own records for
     these checks — the version log and the change log — and makes them inside the
     deciding write's transaction, so two writers cannot both answer one flag.
 
@@ -8010,8 +8018,9 @@ class StoryStore(Protocol):
             The minted story's id, or a refusal: ``no_members`` for an empty list,
             ``unknown_story`` or ``merged_story`` for a story member that is not one
             the store can hold, ``another_home`` for a story member of another home
-            than ``home`` (ADR-0383 §4:7), then ``unknown_flag`` or
-            ``already_decided``.
+            than ``home`` (ADR-0383 §4:7), then ``unknown_flag``,
+            ``already_decided``, or ``another_home`` for a story the flag concerns
+            of another home than ``home``.
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
@@ -8049,9 +8058,10 @@ class StoryStore(Protocol):
             ``no_members``, ``unknown_story``, ``merged_story``, ``another_home`` for
             a story member of another home than the story (ADR-0383 §4:7), or
             ``loop`` where a story member would make some story contain itself,
-            naming the stories forming the loop, then ``unknown_flag`` or
-            ``already_decided``. The store never merges, re-links or drops a link to
-            resolve a loop.
+            naming the stories forming the loop, then ``unknown_flag``,
+            ``already_decided``, or ``another_home`` for a story the flag concerns of
+            another home than the story. The store never merges, re-links or drops a
+            link to resolve a loop.
 
         Raises:
             ValueError: If an argument is malformed, including an activation member
@@ -8127,7 +8137,8 @@ class StoryStore(Protocol):
             or ``merged_story`` for either side, ``another_home`` naming B where it is
             of another home than A (ADR-0383 §4:7), ``self_merge`` where A is B, or
             ``loop`` where the result would leave some story containing itself, then
-            ``unknown_flag`` or ``already_decided``.
+            ``unknown_flag``, ``already_decided``, or ``another_home`` for a story the
+            flag concerns of another home than B.
 
         Raises:
             ValueError: If an argument is malformed.
@@ -8176,8 +8187,9 @@ class StoryStore(Protocol):
             C's id, or a refusal: ``no_members``, ``unknown_story``,
             ``merged_story``, ``another_home`` for a story member of another home than
             A (ADR-0383 §4:7), ``not_a_member`` naming a member A does not hold, or,
-            for ``planning``, ``note_not_held`` naming A, then ``unknown_flag`` or
-            ``already_decided``.
+            for ``planning``, ``note_not_held`` naming A, then ``unknown_flag``,
+            ``already_decided``, or ``another_home`` for a story the flag concerns of
+            another home than A.
 
         Raises:
             ValueError: If an argument is malformed.
@@ -8235,8 +8247,9 @@ class StoryStore(Protocol):
             ``not_a_member`` naming a member the first story does not hold; for
             ``planning``, ``note_not_held`` naming the first story where it does not
             hold a note named; or, for a note move, ``no_notes`` naming the first
-            story where it holds none of the notes named; then ``unknown_flag`` or
-            ``already_decided``.
+            story where it holds none of the notes named; then ``unknown_flag``,
+            ``already_decided``, or ``another_home`` for a story the flag concerns of
+            another home than the first story.
 
         Raises:
             ValueError: If an argument is malformed: a story member named, or the
@@ -8267,8 +8280,11 @@ class StoryStore(Protocol):
         Returns:
             The first story it wrote a line on, in the order the stories a flag
             concerns are given, with the count of its lines, or a refusal:
-            ``unknown_flag`` where the store's records hold no such flag, or
-            ``already_decided`` where a ``decided`` line already answers it.
+            ``unknown_flag`` where the store's records hold no such flag,
+            ``already_decided`` where a ``decided`` line already answers it, or
+            ``another_home`` where the stories it concerns are of two homes, naming
+            the first of another home than the first story it concerns (ADR-0383
+            §4:7).
 
         Raises:
             ValueError: If an argument is malformed, including an ``outcome`` other
@@ -8424,7 +8440,8 @@ class StoryStore(Protocol):
         recorded as taken in, and stays pending where it is pending. A draft taking in
         what the story does not hold when the write runs is refused (ADR-0302 §7). A
         summary version the draft names as read is checked only as an identity the store
-        holds, never as a member (§4:2). A refused write writes nothing.
+        holds, never as a member (§4:2), and, as a flag's story is, for its story's home
+        (ADR-0383 §4:7). A refused write writes nothing.
 
         Args:
             story_id: The story whose summary is written.
@@ -8438,7 +8455,10 @@ class StoryStore(Protocol):
             has been written since ``as_of``, so the version the summary was built on
             is no longer the current one; ``unknown_story`` for a flag naming a
             story the store does not hold, then for a summary version read naming one;
-            ``not_held`` for the first, in this order, of an episode named as taken
+            ``another_home`` for a flag naming a story of another home than the
+            story written, then for a summary version read of one, each named
+            story's own home compared and not followed through its merges (ADR-0383
+            §4:7); ``not_held`` for the first, in this order, of an episode named as taken
             in that is not one of its activation members and a note named as taken
             in that it does not hold, naming that activation or note; and
             ``over_cap`` where the lines together exceed ``STORY_SUMMARY_CAP_CHARS``,
@@ -8592,9 +8612,10 @@ class StoryStore(Protocol):
           story it does not hold without counting it (§8:1).
         - A page of a story it holds is that story's whole, as unbound: its member count,
           entries, lines, notes and versions, and the names they carry. That no name it
-          gives back is of a story it does not hold (§8:3) rests on §4:7's refusal of a
-          name across homes: for a summary version's flag and ``read_pages`` entry, and a
-          ``decided`` line, that refusal is lane B5f's to build (#3711).
+          gives back is of a story it does not hold (§8:3) rests on the refusals this
+          store makes of a name across homes (§4:7): a story member, a merge or a move,
+          a summary version's flag and summary version read, and a ``decided`` line,
+          each refused ``another_home`` with nothing written.
         - :meth:`create`, :meth:`link`, :meth:`unlink`, :meth:`merge`, :meth:`split` and
           :meth:`move` refuse ``unknown_story`` for a story they name, written to or as a
           member, that it does not hold, in that refusal's place in the fixed check
@@ -8605,11 +8626,12 @@ class StoryStore(Protocol):
           through the stories it holds alone.
         - :meth:`append_note` and :meth:`write_summary` refuse ``unknown_story`` for a
           story it does not hold, and :meth:`write_summary` for a flag or a summary version
-          read naming one.
+          read naming one, so its ``another_home`` is answered only for a story it holds.
         - A flag the story that raised it, the story it names, or either as followed
           through its merges, is a story it does not hold is a flag never raised:
           ``unknown_flag`` from :meth:`leave_flag` and from every write given it as
-          ``answers``.
+          ``answers``, so a decision's ``another_home`` is answered only between
+          stories it holds.
         - :meth:`create` mints a story in the ``home`` it is handed whether or not the
           sight sees it (§4:1, §7:5): a write mints, and changes no record it does not
           hold. A story the sight does not see is then one it does not hold.

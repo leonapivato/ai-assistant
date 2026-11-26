@@ -336,6 +336,24 @@ def _not_held(state: _State, story_id: str, draft: StorySummaryDraft) -> StorySu
     return None
 
 
+def _draft_home_refusal(
+    state: _State, story_id: str, draft: StorySummaryDraft
+) -> StorySummaryRefusal | None:
+    """A story of another home than ``story_id`` the draft names (ADR-0383 §4:7).
+
+    The flags' stories first, then the summary versions read, each already found held;
+    each named story's own home is compared, never followed through its merges.
+    """
+    home = state.stories[story_id].home
+    named = [flag.story for flag in draft.flags if flag.story is not None]
+    for other in [*named, *(read.story for read in draft.read_pages)]:
+        if state.stories[other].home != home:
+            return StorySummaryRefusal(
+                reason=StorySummaryRefusalReason.ANOTHER_HOME, story_id=other
+            )
+    return None
+
+
 @dataclass(frozen=True)
 class _Stamp:
     actor: StoryActor
@@ -624,6 +642,21 @@ class FakeStoryStore:
         raised = [flag.story] if flag.flag.story is None else [flag.story, flag.flag.story]
         return _unique([self._followed(state, story_id) for story_id in raised])
 
+    def _answer_refusal(
+        self, state: _State, flag: StoryFlagName, home: RecordHome | None = None
+    ) -> StoryRefusal | None:
+        """``unknown_flag``, ``already_decided``, then a story it concerns of another home.
+
+        ``home`` is the write's own; ``None``, for a decision changing no story, the
+        home of the first story the flag concerns (ADR-0383 §3:2, §4:7), as the durable
+        store judges it.
+        """
+        if refused := self._flag_refusal(state, flag):
+            return refused
+        concerned = self._concerned(state, flag)
+        own = state.stories[concerned[0]].home if home is None else home
+        return self._home_refusal(state, own, concerned)
+
     def _decide(
         self, state: _State, flag: StoryFlagName, outcome: StoryDecision, stamp: _Stamp
     ) -> list[str]:
@@ -722,7 +755,7 @@ class FakeStoryStore:
             state, checked_home, _story_members(named)
         ):
             return StoryOutcome(refusal=refused)
-        if flag is not None and (refused := self._flag_refusal(state, flag)):
+        if flag is not None and (refused := self._answer_refusal(state, flag, checked_home)):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         story_id = self._mint(state, stamp, checked_home)
@@ -769,7 +802,9 @@ class FakeStoryStore:
                             loop=(target, *chain[:-1]),
                         )
                     )
-        if flag is not None and (refused := self._flag_refusal(state, flag)):
+        if flag is not None and (
+            refused := self._answer_refusal(state, flag, state.stories[target].home)
+        ):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         for member in fresh:
@@ -828,8 +863,13 @@ class FakeStoryStore:
                 refusal=StoryRefusal(reason=StoryRefusalReason.SELF_MERGE, story_id=absorbed)
             )
         # The flag is read off the records before the merge writes anything, and
-        # reported only after the merge's own loop check (ADR-0302 §4:5).
-        flag_refused = None if flag is None else self._flag_refusal(self._state, flag)
+        # reported only after the merge's own loop check (ADR-0302 §4:5); the homes of
+        # the stories it concerns are judged then too.
+        flag_refused = (
+            None
+            if flag is None
+            else self._answer_refusal(self._state, flag, self._state.stories[target].home)
+        )
         stamp = self._stamp(checked_actor, checked_trigger)
         # Applied to a copy and kept only if no loop closed, so a refusal writes nothing.
         state = copy.deepcopy(self._state)
@@ -929,7 +969,9 @@ class FakeStoryStore:
         carried = self._named_notes(state, source, named_notes)
         if refused := _note_not_held(source, checked_actor, named_notes, carried):
             return StoryOutcome(refusal=refused)
-        if flag is not None and (refused := self._flag_refusal(state, flag)):
+        if flag is not None and (
+            refused := self._answer_refusal(state, flag, state.stories[source].home)
+        ):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         # The story a split mints takes the home of the story it is split from (§2:3).
@@ -985,7 +1027,9 @@ class FakeStoryStore:
         carried = self._named_notes(state, source, named_notes)
         if refused := _notes_refusal(source, checked_actor, named_notes, carried, members=named):
             return StoryOutcome(refusal=refused)
-        if flag is not None and (refused := self._flag_refusal(state, flag)):
+        if flag is not None and (
+            refused := self._answer_refusal(state, flag, state.stories[source].home)
+        ):
             return StoryOutcome(refusal=refused)
         stamp = self._stamp(checked_actor, checked_trigger)
         logged = 0
@@ -1016,7 +1060,7 @@ class FakeStoryStore:
         checked_actor, _ = _checked_write(actor, None)
         recorded = _leave_outcome(outcome)
         state = self._state
-        if refused := self._flag_refusal(state, checked):
+        if refused := self._answer_refusal(state, checked):
             return StoryOutcome(refusal=refused)
         decided = self._decide(state, checked, recorded, self._stamp(checked_actor, None))
         return StoryOutcome(story_id=decided[0], logged=len(decided))
@@ -1111,7 +1155,9 @@ class FakeStoryStore:
             ):
                 msg = "a summary version read names a version its story's log does not hold"
                 raise ValueError(msg)
-        if refused := _not_held(state, story_id, draft):
+        if refused := _draft_home_refusal(state, story_id, draft) or _not_held(
+            state, story_id, draft
+        ):
             return refused
         if _summary_size(draft) > STORY_SUMMARY_CAP_CHARS:
             return StorySummaryRefusal(reason=StorySummaryRefusalReason.OVER_CAP, story_id=story_id)
