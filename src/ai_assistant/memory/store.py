@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory._channel_reads import channel_of, check_channel_page
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
+from ai_assistant.memory._home_guard import refuse_crossing_names, refuse_home_change
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -62,13 +63,14 @@ from ai_assistant.memory._walk import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         BeliefBand,
         MemoryRecord,
         MemoryWrite,
+        RecordHome,
         WalkPosition,
     )
 
@@ -238,12 +240,16 @@ class InMemoryMemoryStore:
             The stored record's id.
 
         Raises:
+            CrossHomeWriteError: ``record.id`` names a stored record of another home
+                (ADR-0383 §4:6), or the record names a record of another home this store
+                holds, as a lineage or an evidence pointer (§4:7). Nothing is written.
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind`` (ADR-0108 §4), or the record carries a home no write may
                 carry (ADR-0383 §2:3, §4:7). Nothing is written.
         """
         _refuse_home(record)
         self._refuse_cross_kind(record)
+        refuse_crossing_names([record], self._home_after({record.id: record}))
         # Deep copy so a caller mutating the record (including nested fields like
         # validity, which drives read filtering) after add cannot reach stored
         # state — matching FakeMemoryStore and the serialised persistent store.
@@ -291,13 +297,15 @@ class InMemoryMemoryStore:
         (ADR-0108 §4, on ADR-0081 §3's reasoning).
 
         The episode guard rides the same check (ADR-0286 §12:2-§12:4), shared with
-        the persistent store through ``_episode_guard``.
+        the persistent store through ``_episode_guard``, and so does the home guard
+        (ADR-0383 §4:6), through ``_home_guard``.
 
         Raises:
             MemoryStoreError: ``record.id`` names a stored record of a different
                 ``kind``, the write changes a stored episode's processing record or
                 response other than by extending an open one, or it changes or drops
                 the channel the stored episode is on (ADR-0283 §1, ADR-0286 §12).
+            CrossHomeWriteError: ``record.id`` names a stored record of another home.
         """
         stored = self._records.get(record.id)
         if stored is None:
@@ -309,6 +317,25 @@ class InMemoryMemoryStore:
                 f"a {stored.kind} record is already stored under that id"
             )
             raise MemoryStoreError(msg)
+        refuse_home_change(stored, record)
+
+    def _home_after(
+        self, written: Mapping[str, MemoryRecord]
+    ) -> Callable[[str], RecordHome | None]:
+        """The home each id would hold once ``written`` is stored (ADR-0383 §4:7).
+
+        From ``written`` where it writes the id, and otherwise from the records stored,
+        whatever their expiry or window: a retained record is held, and a name of it is
+        judged like any other.
+        """
+
+        def home_of(name: str) -> RecordHome | None:
+            found = written.get(name)
+            if found is None:
+                found = self._records.get(name)
+            return None if found is None else found.home
+
+        return home_of
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one atomic unit — all commit, or none do.
@@ -337,6 +364,11 @@ class InMemoryMemoryStore:
                 batch names the same id twice (ADR-0046 §3), or an element's record
                 carries a home no write may carry (ADR-0383 §2:3, §4:7). Nothing is
                 written.
+            CrossHomeWriteError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of another home (ADR-0383 §4:6), or the records the batch
+                would leave name a record of another home this store holds, as a
+                lineage or an evidence pointer, the batch's own records included (§4:7).
+                Nothing is written.
         """
         self._reject_repeated_ids(writes)
         for write in writes:
@@ -359,6 +391,7 @@ class InMemoryMemoryStore:
             # stored state, matching ``add``; and stamped, since every element that
             # stores a row takes a fresh revision (ADR-0219 §1).
             staged.append(self._stamped(write.record))
+        refuse_crossing_names(staged, self._home_after({record.id: record for record in staged}))
         for record in staged:
             self._records[record.id] = record
             self._issue_key(record.id)

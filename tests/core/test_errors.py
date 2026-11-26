@@ -14,6 +14,7 @@ import pytest
 
 from ai_assistant.core.errors import (
     AssistantError,
+    CrossHomeWriteError,
     EmbeddingDeadlineExpiredError,
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
@@ -145,6 +146,27 @@ def test_the_translation_and_the_seams_own_class_are_separate_hierarchies() -> N
     """
     assert not issubclass(MemoryStoreEmbeddingExpiredError, EmbeddingDeadlineExpiredError)
     assert not issubclass(EmbeddingDeadlineExpiredError, MemoryStoreError)
+
+
+# --- a write that crosses homes (ADR-0383 §4:6, §4:7, §13) ------------------
+# The one error ADR-0383 §13 names for a refusal where the writer sees the record it
+# names. A refusal of the memory write path, so it is caught by every handler the
+# path already has, and it is told apart from the evidence that did not resolve.
+
+
+def test_a_write_crossing_homes_is_caught_by_an_existing_memory_store_handler() -> None:
+    """Additive under ``except MemoryStoreError`` (ADR-0028 §5 stays true)."""
+    error = CrossHomeWriteError("names a record of another home")
+
+    assert isinstance(error, MemoryStoreError)
+    assert isinstance(error, AssistantError)
+    assert str(error) == "names a record of another home"
+
+
+def test_a_write_crossing_homes_is_not_evidence_that_did_not_resolve() -> None:
+    """A record of another home is held; neither refusal is catchable as the other."""
+    assert not issubclass(CrossHomeWriteError, UnresolvedEvidenceError)
+    assert not issubclass(UnresolvedEvidenceError, CrossHomeWriteError)
 
 
 # --- the keyring seam's two errors (ADR-0125 §6, §7) -------------------------

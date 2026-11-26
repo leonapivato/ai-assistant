@@ -110,6 +110,11 @@ from ai_assistant.memory._episode_format import (
 )
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._facts_upgrade import facts_episode
+from ai_assistant.memory._home_guard import (
+    named_records,
+    refuse_crossing_names,
+    refuse_home_change,
+)
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._parties_upgrade import parties_episode
 from ai_assistant.memory._placed_upgrade import placed_memory
@@ -2053,6 +2058,10 @@ class SqliteMemoryStore:
                 record carries a home no write may carry (ADR-0383 §2:3, §4:7; refused
                 before anything is embedded or written), or the write fails (the
                 write is transactional — a failure leaves the store unchanged).
+            CrossHomeWriteError: If ``record.id`` names a stored record of another home
+                (ADR-0383 §4:6), or the record names a record of another home this store
+                holds, as a lineage or an evidence pointer (§4:7). Refused in the write's
+                transaction, so nothing is written.
         """
         snapshot = record.model_copy(deep=True)
         _refuse_home(snapshot)
@@ -2069,8 +2078,9 @@ class SqliteMemoryStore:
     ) -> None:
         # The transaction rolls the partial multi-table write back on any failure,
         # so a later commit cannot persist an inconsistent record/vector pair.
-        with self._transaction(f"store memory {record.id!r}"):
+        with self._transaction(f"store memory {record.id!r}") as conn:
             self._persist_record(record, vector, labels)
+            self._refuse_crossing_names(conn, [record])
 
     def _persist_record(
         self, record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding] = ()
@@ -2185,7 +2195,9 @@ class SqliteMemoryStore:
             )
             raise MemoryStoreError(msg)
         if row is not None:
-            refuse_episode_change(self._decode(str(row[2])), record)
+            stored = self._decode(str(row[2]))
+            refuse_episode_change(stored, record)
+            refuse_home_change(stored, record)
         # One stamp per write that stores a row, taken from the issuer inside the
         # caller's transaction (ADR-0219 §1). Taken on both branches and after the
         # cross-kind refusal, so a refused write burns nothing and an upsert takes a
@@ -2313,6 +2325,11 @@ class SqliteMemoryStore:
                 twice (ADR-0046 §3), an element's record carries a home no write may
                 carry (ADR-0383 §2:3, §4:7), or any backend failure (with the
                 ``sqlite3`` cause retained). Nothing is written.
+            CrossHomeWriteError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of another home (ADR-0383 §4:6), or the records the batch
+                would leave name a record of another home this store holds, as a lineage
+                or an evidence pointer, the batch's own records included (§4:7). Nothing
+                is written.
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
@@ -2359,6 +2376,9 @@ class SqliteMemoryStore:
                     if mode is MemoryWriteMode.IF_UNCHANGED:
                         self._refuse_stale(conn, record.id, expected)
                     self._persist_record(record, vector, labels)
+                # ADR-0383 §4:7, judged once the whole batch is in place, so a name of a
+                # record the batch itself writes is judged by the home it writes there.
+                self._refuse_crossing_names(conn, [record for record, *_ in prepared])
         except MemoryStoreError:
             # `MemoryStoreStaleError` arrives through this arm too, as the
             # `MemoryStoreError` it is (ADR-0219 §3): the transaction has rolled
@@ -2394,6 +2414,37 @@ class SqliteMemoryStore:
             # raw.
             msg = f"failed to commit an atomic memory batch: {exc}"
             raise MemoryStoreError(msg) from exc
+
+    @staticmethod
+    def _refuse_crossing_names(conn: sqlite3.Connection, records: Sequence[MemoryRecord]) -> None:
+        """Refuse records that name a stored record of another home (ADR-0383 §4:7).
+
+        Run inside the write's own transaction, after its records are written and before
+        it commits, so the homes read are those the write would leave, the batch's own
+        included, and a refusal rolls the whole write back. Each named record's home is
+        read from its stored JSON, chunked to the connection's bound-parameter limit.
+
+        Raises:
+            CrossHomeWriteError: A record names a record of another home.
+            MemoryStoreError: A named record's stored home cannot be read: a corrupt
+                row, as :meth:`_decode` reports one.
+        """
+        names = sorted(set().union(*(named_records(record) for record in records)))
+        homes: dict[str, RecordHome] = {}
+        chunk = max(conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER), 1)
+        for start in range(0, len(names), chunk):
+            ids = names[start : start + chunk]
+            sql = (
+                "SELECT id, json_extract(data, '$.home') FROM records "  # noqa: S608 — placeholders only, bound below
+                f"WHERE id IN ({', '.join('?' * len(ids))})"
+            )
+            for record_id, home in conn.execute(sql, ids):
+                try:
+                    homes[str(record_id)] = RecordHome.model_validate_json(str(home))
+                except ValidationError as exc:
+                    msg = f"the home stored for {record_id!r} could not be read: {exc}"
+                    raise MemoryStoreError(msg) from exc
+        refuse_crossing_names(records, homes.get)
 
     @staticmethod
     def _refuse_stale(conn: sqlite3.Connection, record_id: str, expected: int | None) -> None:

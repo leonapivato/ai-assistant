@@ -172,6 +172,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    CrossHomeWriteError,
     MemoryStoreConflictError,
     MemoryStoreError,
     MemoryStoreStaleError,
@@ -4531,6 +4532,163 @@ class MemoryWriterContract:
         await store.add(_episodic(_THIRD_CITED, "a third exchange"))
         return store
 
+    # · a write stays in its home (ADR-0383 §4:6, §4:7)
+    # The writer refuses, with nothing written and no ruling sought where it decides
+    # before one: a memory resting on an episode of another home, and a fold or a
+    # retirement onto a memory of another home, where it holds both homes in one
+    # write. A name it adds to a stored memory (a support, a successor, a track-record
+    # entry) is refused by the store under it, in the same write.
+
+    async def _two_homes_store(self) -> FakeMemoryStore:
+        """The observer's three episodes, the owner's, and one of the shared things."""
+        store = await self._observer_store()
+        await store.add(
+            _episodic(_SHARED_CITED, "an exchange of the shared things").model_copy(
+                update=_SHARED_HOME
+            )
+        )
+        return store
+
+    async def test_ingest_of_a_memory_resting_on_an_episode_of_another_home_is_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0383 §4:7: an evidence pointer to an episode of another home is refused
+        before any ruling, nothing written; the same memory of that home is written."""
+        store = await self._two_homes_store()
+        before = await _snapshot(store)
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        crossing = _preference("new", evidence=(_SHARED_CITED,))
+
+        with pytest.raises(CrossHomeWriteError):
+            await make_writer(store, policy).ingest(_proposal(crossing))
+
+        assert policy.calls == []
+        assert await _snapshot(store) == before
+        own = crossing.model_copy(update=_SHARED_HOME)
+        result = await make_writer(store, policy).ingest(_proposal(own))
+        assert result.record_id == "new"
+        written = await store.get("new")
+        assert written is not None
+        assert written.home == RecordHome.shared()
+
+    @pytest.mark.parametrize("kind", _FOLD_KINDS)
+    async def test_a_fold_onto_a_memory_of_another_home_is_refused(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """ADR-0383 §4:7, ADR-0369 §2:6: a ``REINFORCE`` or ``SUPERSEDE`` would change a
+        memory of another home, and is refused with nothing written; onto a memory of
+        the proposal's own home it lands."""
+        incoming = _preference("new", evidence=(_OTHER_CITED,))
+        # A supersede retires no conflict its proposal restates (ADR-0159 §5).
+        wording = (
+            _CONTENT
+            if kind is MemoryDecisionKind.REINFORCE
+            else "prefers concise emails, an older note"
+        )
+        for home, refused in ((_SHARED_HOME, True), ({}, False)):
+            store = await self._two_homes_store()
+            target = _preference("existing", wording, evidence=(_SHARED_CITED if home else _CITED,))
+            await store.add(target.model_copy(update=home))
+            before = await _snapshot(store)
+            writer = make_writer(store, FakeMemoryPolicy(kind))
+
+            if refused:
+                with pytest.raises(CrossHomeWriteError):
+                    await writer.ingest(_proposal(incoming))
+                assert await _snapshot(store) == before
+            else:
+                result = await writer.ingest(_proposal(incoming))
+                assert result.decision.kind is kind
+                assert await _snapshot(store) != before
+
+    @pytest.mark.parametrize(
+        "kind",
+        [MemoryOperationKind.END, MemoryOperationKind.MARK_WRONG, MemoryOperationKind.REPLACE],
+        ids=["end", "mark-wrong", "replace"],
+    )
+    async def test_a_retiring_proposal_naming_a_memory_of_another_home_is_refused(
+        self, make_writer: WriterFactory, kind: MemoryOperationKind
+    ) -> None:
+        """ADR-0383 §4:7: a proposal retiring a memory of another home is refused before
+        any ruling, nothing written; retiring one of its own home lands."""
+        store = await self._two_homes_store()
+        theirs = await self._stored(
+            store, _preference("theirs", evidence=(_SHARED_CITED,)).model_copy(update=_SHARED_HOME)
+        )
+        ours = await self._stored(store, _preference("ours", evidence=(_THIRD_CITED,)))
+        before = await _snapshot(store)
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        new = _preference("new", _DISAGREEING, evidence=(_OTHER_CITED,))
+
+        with pytest.raises(CrossHomeWriteError):
+            await make_writer(store, policy).ingest(_retiring(new, theirs, kind))
+
+        assert policy.calls == []
+        assert await _snapshot(store) == before
+        result = await make_writer(store, policy).ingest(_retiring(new, ours, kind))
+        assert result.record_id == "new"
+
+    @pytest.mark.parametrize("name", ["support", "successor"])
+    async def test_apply_naming_a_record_of_another_home_is_refused(
+        self, make_writer: WriterFactory, name: str
+    ) -> None:
+        """ADR-0383 §4:7: an operation adding a support pointing at an episode of another
+        home, or naming a successor of another home, is refused whole with nothing
+        written; the same operation naming its own home lands."""
+        store = await self._two_homes_store()
+        read = await self._stored(store, _preference("existing"))
+        before = await _snapshot(store)
+        writer = make_writer(store, FakeMemoryPolicy())
+
+        def change(home: Mapping[str, RecordHome]) -> MemoryChange:
+            episode = _SHARED_CITED if home else _OTHER_CITED
+            other = _preference("other", _DISAGREEING, evidence=(episode,))
+            if name == "support":
+                support = said_support(episode, when=_WHEN, added_at=_WHEN)
+                operation = MemoryOperation(
+                    kind=MemoryOperationKind.ADD_SUPPORT,
+                    cites=support.points_at,
+                    at=_WHEN,
+                    by=MemoryWriterName.REMEMBER,
+                )
+                return MemoryChange(memory=read, operation=operation, support=support)
+            create = other.operations[0].model_copy(update={"replaces": ("existing",)})
+            successor = other.model_copy(update={"operations": (create,), **home})
+            operation = MemoryOperation(
+                kind=MemoryOperationKind.END,
+                cites=read.supports[0].points_at,
+                at=_WHEN,
+                by=MemoryWriterName.REMEMBER,
+                successor="other",
+            )
+            return MemoryChange(memory=read, operation=operation, successor=successor)
+
+        with pytest.raises(CrossHomeWriteError):
+            await writer.apply(change(_SHARED_HOME))
+
+        assert await _snapshot(store) == before
+        await writer.apply(change({}))
+        assert await _snapshot(store) != before
+
+    async def test_record_use_naming_an_episode_of_another_home_is_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0383 §4:7: a track-record entry naming an episode of another home is
+        refused with nothing written; one naming the memory's own home is recorded."""
+        store = await self._two_homes_store()
+        read = await self._stored(store, _preference("existing"))
+        before = await _snapshot(store)
+        writer = make_writer(store, FakeMemoryPolicy())
+
+        with pytest.raises(CrossHomeWriteError):
+            await writer.record_use(read, _entry(_SHARED_CITED))
+
+        assert await _snapshot(store) == before
+        await writer.record_use(read, _entry(_OTHER_CITED))
+        written = await store.get("existing")
+        assert isinstance(written, Memory)
+        assert [one.episode for one in written.track_record] == [_OTHER_CITED]
+
     # · the track record (§14:4, ADR-0328 §8)
 
     async def test_record_use_adds_one_entry_and_nothing_else(
@@ -5226,6 +5384,13 @@ def _assistant_backing(made: str) -> MemorySupport:
 
 #: A third episode, for a case whose memories rest on three different parts.
 _THIRD_CITED = "third-cited-episode"
+
+#: An episode of the shared things, where every other episode here is the owner's, for
+#: the cases of ADR-0383 §4:7.
+_SHARED_CITED = "shared-cited-episode"
+
+#: A record's home as the shared things, as a model update (ADR-0383 §2:1).
+_SHARED_HOME: Mapping[str, RecordHome] = {"home": RecordHome.shared()}
 
 
 def _entry(

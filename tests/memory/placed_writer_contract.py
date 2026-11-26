@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 import pytest
 
 from ai_assistant.core.channel_validation import declared_input
-from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
+from ai_assistant.core.errors import CrossHomeWriteError, MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     Attestation,
@@ -1481,6 +1481,74 @@ class PlacedWriterContract:
 
         assert (result.record_id, result.stale) == (None, ("m-lisbon",))
         assert await _all(store) == before
+
+    async def test_a_placed_proposal_naming_a_memory_of_another_home_is_refused(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0383 §4:7, ADR-0369 §2:7: a proposal placed against a memory of another
+        home is refused before any ruling, with nothing written and no partial fold; the
+        same placement against a memory of its own home is written."""
+        store = await self._world("owner", "later")
+        await store.add(_episode("theirs").model_copy(update={"home": RecordHome.shared()}))
+        await store.add(
+            memory("m-theirs", "Ana lives in Lisbon", _said("theirs")).model_copy(
+                update={"home": RecordHome.shared()}
+            )
+        )
+        ours = await self._hold(
+            make_placed_writer, store, memory("m-ours", "Ana lives in Lisbon", _said("owner"))
+        )
+        theirs = (await _all(store))["m-theirs"]
+        before = await _all(store)
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        proposed = memory("m-porto", "Ana lives in Porto", _said("later"))
+
+        with pytest.raises(CrossHomeWriteError):
+            await make_placed_writer(store, policy).ingest(
+                _placed(
+                    proposed,
+                    _pair(ours, PlacedRelation.NO_LONGER_TRUE),
+                    _pair(theirs, PlacedRelation.NO_LONGER_TRUE),
+                )
+            )
+
+        assert policy.calls == []
+        assert await _all(store) == before
+        result = await make_placed_writer(store, policy).ingest(
+            _placed(proposed, _pair(ours, PlacedRelation.NO_LONGER_TRUE))
+        )
+        assert result.record_id == "m-porto"
+        assert (await _all(store))["m-ours"].status is MemoryStatus.ENDED
+
+    async def test_a_label_naming_an_episode_of_another_home_is_refused(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0383 §4:7: a label suggested by an episode of another home names it, and is
+        refused with nothing written; one suggested by its own home's episode is kept."""
+        store = await self._world("owner")
+        await store.add(_episode("theirs").model_copy(update={"home": RecordHome.shared()}))
+        writer = make_placed_writer(
+            store, FakeMemoryPolicy(), labels=(_BOUNDS, FakeEmbedder(dimensions=256))
+        )
+        await writer.ingest(
+            _placed(memory("m-plain", "The user is allergic to peanuts", _said("owner")))
+        )
+        held = (await _all(store))["m-plain"]
+        before = await _all(store)
+
+        def change(episode: str) -> MemoryLabelChange:
+            return MemoryLabelChange(
+                memory=held, labels=("when eating out",), by=MemoryWriterName.OWNER, episode=episode
+            )
+
+        with pytest.raises(CrossHomeWriteError):
+            await writer.write_labels(change(_address("theirs")))
+
+        assert await _all(store) == before
+        written = await writer.write_labels(change(_address("owner")))
+        assert [(one.text, one.episode) for one in written.labels] == [
+            ("when eating out", _address("owner"))
+        ]
 
     async def test_a_placed_proposal_carrying_an_inference_or_a_pin_is_refused(
         self, make_placed_writer: PlacedWriterFactory

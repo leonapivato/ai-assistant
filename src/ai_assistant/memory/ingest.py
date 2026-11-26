@@ -77,6 +77,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
+from ai_assistant.memory._home_guard import refuse_other_home_evidence, refuse_other_home_targets
 from ai_assistant.memory._observer_writes import (
     added_inference_fault,
     inference_fault,
@@ -1697,6 +1698,9 @@ class MemoryIngestor:
 
     async def _ingest_once(self, observed: MemoryUpdateProposal) -> _Ingested:
         held = await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
+        # ADR-0383 §4:7: a fold writes the supports onto a stored memory and never this
+        # record, so the store would not see its own pointers; refused before any ruling.
+        refuse_other_home_evidence(observed.proposed, held)
         # ADR-0345 §2:2: every support carries its holder, set here by code. A holder is
         # derived from its part, so the proposal's fingerprint and its question key are
         # what they were (§11:11).
@@ -1782,6 +1786,11 @@ class MemoryIngestor:
         named = [pair.memory for pair in placement.pairs]
         found = await self._store.get_many(named) if named else {}
         read = {key: one for key, one in found.items() if isinstance(one, Memory)}
+        # ADR-0383 §4:7, ADR-0369 §2:7: a placement names memories of its own home alone,
+        # refused before any ruling, with nothing written.
+        refuse_other_home_targets(
+            observed.proposed, [read[key] for key in named if key in read], what="place it against"
+        )
         conflicts: list[MemoryRecord] = [read[key] for key in named if key in read]
         resolved = tuple(one.id for one in conflicts)
         ruled = observed.model_copy(update={"conflicts": resolved})
@@ -1895,6 +1904,7 @@ class MemoryIngestor:
         retirement = proposal.retiring
         if retirement is None:
             return None
+        refuse_other_home_targets(proposed, [retirement.memory], what="retire")
         cited = proposed.support_at(retirement.cites)
         if cited is None:  # pragma: no cover - retirement_fault found it among the backing
             msg = f"refusing to ingest {proposed.id!r}: its retirement cites no support of it"
@@ -2196,6 +2206,9 @@ class MemoryIngestor:
         if target is None:
             msg = f"fold target {decision.target_id!r} is not among the conflicts"
             raise MemoryStoreError(msg)
+        # ADR-0383 §4:7, ADR-0369 §2:6: the fold changes the target, which must be of
+        # the proposal's own home; refused before anything is written.
+        refuse_other_home_targets(proposal.proposed, [target], what="fold onto")
         _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
         _refuse_retiring_a_related_conflict(target, decision.kind, relations)
         if decision.kind is MemoryDecisionKind.SUPERSEDE:
@@ -2206,6 +2219,7 @@ class MemoryIngestor:
                 resolved=resolved,
                 relations=relations,
             )
+            refuse_other_home_targets(proposal.proposed, retired, what="retire")
             return _Applied(
                 await self._apply_supersede(retired, proposed),
                 tuple(record.id for record in retired),

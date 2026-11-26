@@ -587,6 +587,42 @@ class MemoryStoreEmbeddingExpiredError(MemoryStoreError):
     """
 
 
+class CrossHomeWriteError(MemoryStoreError):
+    """A write was refused for crossing homes (ADR-0383 §4:6, §4:7, §13).
+
+    ADR-0383 §13's one error "for §4:7's refusal where the writer sees the record it
+    names". It is raised, with nothing written, for a write that would:
+
+    - change a stored record's home (§4:6);
+    - change a record of a home other than its own, where the writer has both homes
+      at hand in the one write (§4:7, first item; ADR-0369 §2:6);
+    - place a proposal against a memory of another home (§4:7, second item;
+      ADR-0369 §2:7);
+    - leave a record naming a record of another home, as a lineage, an evidence
+      pointer or a placement target (§4:7, third item), where the writer holds both.
+
+    A home no write may carry at all (§4:7, fourth item, through
+    :func:`~ai_assistant.core.types.home_may_be_written`) is not this error: no other
+    record is named, so it stays the plain ``MemoryStoreError`` it already was. Nor is
+    the refusal of a name the writer's sight does not see (§4:8): that answers exactly
+    as a name of a record never written does, and never as this class.
+
+    **Narrowed out of :class:`MemoryStoreError`**, in :class:`UnresolvedEvidenceError`'s
+    shape: a producer that cites or folds onto a record of another home is told so by
+    its type rather than by a message. **Additive, not a narrowing**: a subclass *is* a
+    ``MemoryStoreError``, so every existing ``except MemoryStoreError`` still catches it
+    and ADR-0028 §5's "``MemoryStoreError`` is what crosses this seam" stays true as
+    written. One class serves every writer that refuses by raising: a seam whose
+    contract promises its own error base takes this class by adding that base here,
+    never by a second class. A store whose contract refuses by a typed outcome (a
+    :class:`~ai_assistant.core.types.StoryOutcome`, ADR-0289 §3) keeps refusing that
+    way and does not raise it.
+
+    It carries a message and nothing else, so it round-trips the wire from that
+    message alone (ADR-0085 §10a).
+    """
+
+
 class ConversationStoreError(AssistantError):
     """Reading from or writing to the conversation index failed (ADR-0074 §9).
 

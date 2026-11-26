@@ -28,6 +28,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    CrossHomeWriteError,
     MemoryStoreConflictError,
     MemoryStoreError,
     MemoryStoreStaleError,
@@ -113,6 +114,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     SupportHolder,
+    TrackRecordEntry,
     UnclearPoint,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -1172,6 +1174,77 @@ async def _replace(
             record=record, mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=stored.revision
         )
     await store.write_atomic([*head, write])
+
+
+async def _written(
+    store: MemoryStore, record: MemoryRecord, door: str, *, companion: bool = False
+) -> None:
+    """Write ``record`` as a new record through ``door``: ``add`` or a batch mode.
+
+    ``companion`` puts an unrelated insert ahead of it in the same batch, so a case can
+    assert that a refused write committed nothing of its batch.
+    """
+    if door == "add":
+        assert not companion
+        await store.add(record)
+        return
+    head = [MemoryWrite(record=_semantic("companion", "alpha"))] if companion else []
+    await store.write_atomic([*head, MemoryWrite(record=record, mode=MemoryWriteMode(door))])
+
+
+#: Two episodes of the two homes a write may carry, for the cases of ADR-0383 §4:7: one
+#: of the owner's domain, as every fixture here, and one of the shared things.
+_OURS: Final = "activation:act-ours"
+_THEIRS: Final = "activation:act-theirs"
+
+
+async def _two_homes(store: MemoryStore) -> None:
+    """Store :data:`_OURS`, the owner's, and :data:`_THEIRS`, the shared things'."""
+    await store.add(_episode(_OURS, "distinctive, ours"))
+    await store.add(_episode(_THEIRS, "distinctive, theirs").model_copy(update=_SHARED))
+
+
+def _naming_episode(pointer: str, episode: str) -> Memory:
+    """An owner's memory naming ``episode`` as an evidence pointer of kind ``pointer``.
+
+    ADR-0328 §4's support, §8's track-record entry and ADR-0345 §7:1's situation label.
+    Every other pointer it carries is to :data:`_OURS`.
+    """
+    match pointer:
+        case "support":
+            return memory("m", "distinctive, naming", said_support(episode))
+        case "track_record":
+            entry = TrackRecordEntry(
+                episode=episode,
+                relied_at=_REVISED,
+                held_up=True,
+                recorded_at=_REVISED,
+                recorded_by=MemoryWriterName.OBSERVER,
+            )
+            return memory("m", "distinctive, naming", said_support(_OURS), track_record=(entry,))
+        case "label":
+            label = SituationLabel(
+                text="when booking a table",
+                added_at=_REVISED,
+                added_by=MemoryWriterName.OBSERVER,
+                episode=episode,
+            )
+            return memory("m", "distinctive, naming", said_support(_OURS), labels=(label,))
+        case _:  # pragma: no cover - a name the parametrisation does not produce
+            raise AssertionError(pointer)
+
+
+def _naming_memory(lineage: str, named: str) -> Memory:
+    """An owner's memory naming ``named`` as its lineage (ADR-0328 §5:6).
+
+    ``successor``: retired by an end naming ``named`` as its successor; ``replaces``:
+    created replacing ``named``.
+    """
+    if lineage == "successor":
+        return _retired("m", "distinctive, retired", MemoryOperationKind.END, successor=named)
+    base = memory("m", "distinctive, replacing", said_support(_OURS))
+    create = base.operations[0].model_copy(update={"replaces": (named,)})
+    return base.model_copy(update={"operations": (create,)})
 
 
 class MemoryStoreContract:
@@ -4356,6 +4429,166 @@ class MemoryStoreContract:
 
         held = {record.id: record.home for record in await store.export()}
         assert held == {"a": RecordHome.owners(), "b": RecordHome.shared()}
+
+    # --- ADR-0383 §4:6, §4:7: a write stays in its home ---------------------------------
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    @pytest.mark.parametrize("held_home", ["owners", "shared"])
+    @pytest.mark.parametrize("kind", ["episode", "memory"])
+    async def test_a_write_changing_a_stored_records_home_is_refused(
+        self, store: MemoryStore, kind: str, held_home: str, door: str
+    ) -> None:
+        """ADR-0383 §4:6: no write changes a record's home, on ``add`` and every batch
+        mode that lands on a stored record, the batch refused whole and nothing written;
+        the same write keeping the home lands."""
+        home = RecordHome.owners() if held_home == "owners" else RecordHome.shared()
+        other = RecordHome.shared() if held_home == "owners" else RecordHome.owners()
+        base = _episode("t") if kind == "episode" else _semantic("t", "distinctive, held")
+        held = base.model_copy(update={"home": home})
+        await store.add(held)
+        before = await store.export()
+
+        moved = held.model_copy(update={"home": other, "content": "distinctive, moved"})
+        with pytest.raises(CrossHomeWriteError):
+            await _replace(store, moved, door, companion=door != "add")
+        assert await store.export() == before
+
+        await _replace(store, held.model_copy(update={"content": "distinctive, kept"}), door)
+        kept = await store.get("t")
+        assert kept is not None
+        assert (kept.home, kept.content) == (home, "distinctive, kept")
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "insert_if_absent"])
+    @pytest.mark.parametrize("pointer", ["support", "track_record", "label"])
+    async def test_a_memory_whose_evidence_points_at_an_episode_of_another_home_is_refused(
+        self, store: MemoryStore, pointer: str, door: str
+    ) -> None:
+        """ADR-0383 §4:7: a memory names no episode of another home this store holds, as
+        a support, a track-record entry or a situation label; refused with nothing
+        written, and the same memory naming an episode of its own home lands."""
+        await _two_homes(store)
+        before = await store.export()
+
+        with pytest.raises(CrossHomeWriteError):
+            await _written(store, _naming_episode(pointer, _THEIRS), door, companion=door != "add")
+        assert await store.export() == before
+
+        await _written(store, _naming_episode(pointer, _OURS), door)
+        assert await store.get("m") is not None
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "insert_if_absent"])
+    @pytest.mark.parametrize("lineage", ["successor", "replaces"])
+    async def test_a_memory_whose_lineage_names_a_memory_of_another_home_is_refused(
+        self, store: MemoryStore, lineage: str, door: str
+    ) -> None:
+        """ADR-0383 §4:7: a memory succeeded by, or replacing, a memory of another home is
+        refused with nothing written; naming one of its own home lands."""
+        await store.add(_semantic("ours", "distinctive, ours"))
+        await store.add(_semantic("theirs", "distinctive, theirs").model_copy(update=_SHARED))
+        before = await store.export()
+
+        with pytest.raises(CrossHomeWriteError):
+            await _written(store, _naming_memory(lineage, "theirs"), door, companion=door != "add")
+        assert await store.export() == before
+
+        await _written(store, _naming_memory(lineage, "ours"), door)
+        assert {record.id for record in await store.export()} == {"m", "ours", "theirs"}
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "if_unchanged"])
+    async def test_an_episode_taken_over_by_an_episode_of_another_home_is_refused(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0383 §4:7, ADR-0352 §5:2: the revision freezing a handed-over episode names
+        its taker by activation, whose episode is ``activation:<id>`` (ADR-0283 §2); a
+        taker of another home is refused with nothing written, one of its own lands."""
+        await _two_homes(store)
+        opened = _open_episode("episode", channel=_CONVERSATION_A)
+        await store.add(opened)
+        stopped = {
+            "status": ProcessingStatus.INTERRUPTED,
+            "reason": ProcessingReason.STOPPED,
+            "ended_at": _OCCURRED,
+            "understanding_omitted": UnderstandingOmission.NOT_REACHED,
+            "stages": ended_pass(_OCCURRED, ControllerRule.STOPPED),
+        }
+
+        def frozen(taker: str) -> EpisodicMemory:
+            return _revised(
+                opened,
+                processing={**stopped, "taken_over_by": taker},
+                content=_ANY,
+                placement=Placement(),
+            )
+
+        with pytest.raises(CrossHomeWriteError):
+            await _replace(store, frozen("act-theirs"), door, companion=door != "add")
+        assert await store.get("companion") is None
+        assert _unstamped_or_none(await store.get("episode")) == opened
+
+        await _replace(store, frozen("act-ours"), door)
+        assert _unstamped_or_none(await store.get("episode")) == frozen("act-ours")
+
+    @pytest.mark.parametrize("door", ["add", "upsert", "insert_if_absent"])
+    async def test_an_episode_holding_an_input_taken_from_another_home_is_refused(
+        self, store: MemoryStore, door: str
+    ) -> None:
+        """ADR-0383 §4:7, ADR-0349 §7:7: an input joined from another activation names
+        it, and one taken from an activation of another home is refused with nothing
+        written; one taken from its own home lands."""
+        await _two_homes(store)
+        merged = _activation_episode("merged")
+        assert merged.processing_record is not None
+        place = ChannelIdentity(channel_type="conversation", instance_id="c-1")
+
+        def holding(taken: str) -> EpisodicMemory:
+            joined = JoinedInput(
+                joined_at=_OCCURRED,
+                channel=place,
+                messages=(RecordedInputMessage(text="and for four", sent_at=_OCCURRED),),
+                taken_over_from=taken,
+            )
+            assert merged.processing_record is not None
+            record = merged.processing_record.model_copy(update={"joined": (joined,)})
+            return merged.model_copy(update={"processing_record": record})
+
+        before = await store.export()
+        with pytest.raises(CrossHomeWriteError):
+            await _written(store, holding("act-theirs"), door, companion=door != "add")
+        assert await store.export() == before
+
+        await _written(store, holding("act-ours"), door)
+        assert _unstamped_or_none(await store.get("merged")) == holding("act-ours")
+
+    async def test_names_inside_one_batch_are_judged_by_the_homes_the_batch_writes(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0383 §4:7: a batch that would leave a record naming another of another home
+        is refused whole, where both are in the batch; the same batch of one home lands."""
+        episode = _episode("activation:act-new", "distinctive, new episode")
+        naming = memory("m", "distinctive, naming", said_support("activation:act-new"))
+
+        with pytest.raises(CrossHomeWriteError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=episode.model_copy(update=_SHARED)),
+                    MemoryWrite(record=naming),
+                ]
+            )
+        assert await store.export() == []
+
+        await store.write_atomic([MemoryWrite(record=episode), MemoryWrite(record=naming)])
+        assert {record.id for record in await store.export()} == {"activation:act-new", "m"}
+
+    async def test_a_name_of_a_record_this_store_does_not_hold_is_not_judged_by_home(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0383 §4:7 judges a name of a record the store holds; whether a support's
+        episode is held is the writer's check (ADR-0328 §4:7), so the store writes it."""
+        await store.add(
+            memory("m", "distinctive, naming", said_support(_THEIRS)).model_copy(update=_SHARED)
+        )
+
+        assert await store.get("m") is not None
 
     async def test_the_two_refusals_stay_distinguishable(self, store: MemoryStore) -> None:
         # ADR-0219 §3 and §7: an INSERT_IF_ABSENT collision and a stale IF_UNCHANGED
