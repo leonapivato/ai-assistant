@@ -55,9 +55,10 @@ read; the next sweep reads it again, so the sweep converges rather than claiming
 completeness.
 
 **Following the stream is the owner's act** (ADR-0385 §4:1). The engine's stream reads
-each conversation's state, and the hub's own machine's listing of the conversations it
-reads them of, through stores bound to the owner's sight, made anew for each read, so no
-sight outlives the read it was made for. Whether a device reads a conversation is read
+each conversation's state, the hub's own machine's listing of the conversations it reads
+them of, and whether each conversation a state is sent of is one the sight sees, through
+stores bound to the owner's sight, made anew for each read, so no sight outlives the read
+it was made for. Whether a device reads a conversation is read
 from the conversation's devices as today: device rows are no domain's records (§3:2).
 **The pages of changes and a device's listing are not yet read through a bound store**
 (milestone 22's B10e): each mixes device rows, which a store bound to any sight gives
@@ -165,8 +166,9 @@ class ChangeStream:
                 §3:3).
             seen_chat: The chat space bound to the owner's sight, made anew for each
                 read: the hub's own machine's listing of the conversations whose state
-                the stream sends is read through it (ADR-0385 §4:1). ``None`` reads
-                ``chat``, as the canonical fake engine does.
+                the stream sends is read through it, and whether the owner's sight sees
+                each conversation a state is sent of (ADR-0385 §4:1). ``None`` reads
+                ``chat`` and sends every state, as the canonical fake engine does.
             running: What the engine runs now, per conversation.
             state_of: A conversation's current state, given what runs from it; the
                 engine's reads it through the memory store bound to the owner's sight,
@@ -374,6 +376,15 @@ class ChangeStream:
             return True
         return any(one.device_id == device.device_id and one.access.reads for one in devices)
 
+    async def _seen(self, conversation_id: str) -> bool:
+        """Whether the owner's sight sees the conversation, through a store bound for it.
+
+        Every conversation is seen where no bound store is handed.
+        """
+        if self._seen_chat is None:
+            return True
+        return await self._read(self._seen_chat().get(conversation_id)) is not None
+
     async def _sendable(
         self, device: RequestingDevice, entry: DeviceChange, reading: dict[str, bool]
     ) -> bool:
@@ -399,8 +410,13 @@ class ChangeStream:
 
         Whether it reads is asked again once the state is read, so a device removed
         while the episodes were being read is not sent it (ADR-0298 §7:5).
+
+        Whether the conversation is one the owner's sight sees is read first, through
+        the chat space bound for this read (ADR-0385 §4:1, §4:2): a state is sent of no
+        conversation it does not see, whatever the engine's account of what runs or was
+        forgotten names, so a count moved for one names nothing.
         """
-        if not await self._reads(device, conversation_id):
+        if not await self._seen(conversation_id) or not await self._reads(device, conversation_id):
             return None
         held = now.get(conversation_id)
         running = () if held is None else held.running
