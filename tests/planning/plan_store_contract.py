@@ -4568,6 +4568,38 @@ class PlanStoreContract:
         assert await store.activation_effects(["act-1"]) == ()
 
     @pytest.mark.parametrize(
+        ("first", "then"),
+        [
+            (RecordHome.owners(), RecordHome.shared()),
+            (RecordHome.shared(), RecordHome.owners()),
+        ],
+        ids=["the-owners-to-the-shared-things", "the-shared-things-to-the-owners"],
+    )
+    async def test_write_observation_refuses_to_change_a_held_records_home(
+        self, store: PlanStore, first: RecordHome, then: RecordHome
+    ) -> None:
+        """ADR-0383 §4:6: no write changes a record's home, so a rewrite naming another,
+        even one a write may carry, is refused with nothing written and no revision spent."""
+        held = await store.write_observation(
+            _observation(state=ObservationState.WAITING).model_copy(update={"home": first}),
+            expected_revision=0,
+        )
+
+        with pytest.raises(PlanningError):
+            await store.write_observation(
+                _observation().model_copy(update={"home": then}),
+                expected_revision=held.revision,
+            )
+        again = await store.write_observation(_observation("activation:act-2"), expected_revision=0)
+
+        assert await store.observations(["activation:act-1"]) == (held,)
+        assert again.revision == held.revision + 1
+        kept = await store.write_observation(
+            _observation().model_copy(update={"home": first}), expected_revision=held.revision
+        )
+        assert kept.home == first
+
+    @pytest.mark.parametrize(
         "home",
         [RecordHome.person("person:sam"), RecordHome.group("group:household")],
         ids=["another-persons", "a-groups"],

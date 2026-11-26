@@ -648,6 +648,12 @@ class FakePlanStore:
                     f"write expected {expected}; nothing is written"
                 )
                 raise PlanningError(msg)
+            if held is not None and held.home != written.home:
+                # ADR-0383 §4:6: a record written again keeps the home it had.
+                msg = (
+                    f"no write changes the home of {written.episode!r}'s record; nothing is written"
+                )
+                raise PlanningError(msg)
             if self._issued + 1 >= _REVISION_BOUND:
                 msg = "the plan store has issued every observation revision it can"
                 raise PlanningError(msg)

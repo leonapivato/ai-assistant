@@ -104,6 +104,7 @@ from ai_assistant.planning.observations import (
     checked_expected_revision,
     checked_observation,
     checked_since,
+    decide_observation_home,
     decide_observation_write,
     requested_episodes,
     stamped,
@@ -1607,6 +1608,7 @@ class SqlitePlanStore:
             decide_observation_write(
                 record.episode, held=None if held is None else held.revision, expected=expected
             )
+            decide_observation_home(held, record)
             stored = stamped(record, self._last_issued(conn) + 1)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES (?, ?) "

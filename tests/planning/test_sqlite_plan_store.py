@@ -1787,14 +1787,17 @@ async def test_each_record_keeps_its_home_as_its_kind_and_its_identifier(
         first = await store.write_observation(
             _observed().model_copy(update={"home": RecordHome.shared()}), expected_revision=0
         )
-        await store.write_observation(_observed(), expected_revision=first.revision)
+        await store.write_observation(
+            _observed().model_copy(update={"home": RecordHome.shared()}),
+            expected_revision=first.revision,
+        )
     finally:
         store.close()
 
     assert _homes(path) == {
         "e1": ("person", "person:owner"),
         "e2": ("shared", None),
-        "activation:act-1": ("person", "person:owner"),
+        "activation:act-1": ("shared", None),
     }
 
 
