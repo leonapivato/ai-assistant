@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     STORY_ID_PREFIX,
     STORY_SUMMARY_CAP_CHARS,
+    ExportedStory,
     Identifier,
     RecordHome,
     SightMode,
@@ -60,6 +61,7 @@ from ai_assistant.core.types import (
     StoryChange,
     StoryDecision,
     StoryEntry,
+    StoryExport,
     StoryFlagName,
     StoryHeader,
     StoryLogLine,
@@ -1429,3 +1431,42 @@ class FakeStoryStore:
         """
         self._counted("position", ())
         return self._state.tick
+
+    # --- the export (ADR-0385 §6:4, §11) ---------------------------------------
+
+    async def export(self) -> StoryExport:
+        """Read every story this fake holds, whole, for its export (ADR-0385 §11).
+
+        The stories in :meth:`stories`'s order, each with every part of it as that
+        part's read gives it, and nothing store-wide (ADR-0383 §8:5).
+        """
+        state = self._state
+        held = sorted(
+            ((story_id, story) for story_id, story in state.stories.items() if self._holds(story)),
+            key=lambda item: item[1].created_seq,
+            reverse=True,
+        )
+        self._counted("export", (story.home for _, story in held))
+        return StoryExport(
+            stories=tuple(self._exported(state, story_id, story) for story_id, story in held)
+        )
+
+    def _exported(self, state: _State, story_id: str, story: _Story) -> ExportedStory:
+        """One story whole: each part in the order its read gives it."""
+        kept = sorted(
+            (summary for owner, summary in state.kept.values() if owner == story_id),
+            key=lambda summary: summary.version,
+        )
+        return ExportedStory(
+            story=self._header_of(story_id, story),
+            members=tuple(sorted(story.entries.values(), key=lambda entry: entry.position)),
+            log=tuple(line for line in state.log if line.story_id == story_id),
+            notes=tuple(
+                sorted(
+                    (held.note for held in state.notes.values() if held.story_id == story_id),
+                    key=lambda note: note.note_id,
+                )
+            ),
+            versions=tuple(version for owner, version in state.versions if owner == story_id),
+            summaries=tuple(kept),
+        )

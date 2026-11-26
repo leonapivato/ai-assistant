@@ -107,6 +107,7 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     STORY_ID_PREFIX,
     STORY_SUMMARY_CAP_CHARS,
+    ExportedStory,
     Identifier,
     RecordHome,
     RecordHomeKind,
@@ -115,6 +116,7 @@ from ai_assistant.core.types import (
     StoryChange,
     StoryDecision,
     StoryEntry,
+    StoryExport,
     StoryFlagName,
     StoryHeader,
     StoryLogLine,
@@ -2404,6 +2406,72 @@ class SqliteStoryStore:
     def _position_sync(self) -> int:
         with self._transaction("read the story store's position", immediate=False) as conn:
             return self._ticks(conn)
+
+    # --- the export (ADR-0385 §6:4, §11) ---------------------------------------
+
+    async def export(self) -> StoryExport:
+        """Read every story this store holds, whole, for its export (ADR-0385 §11).
+
+        Counting, it writes one count event, of every story it gave back (ADR-0383 §11:1).
+        """
+        exported = await self._locked(self._export_sync)
+        self._counted("export", (one.story.home for one in exported.stories))
+        return exported
+
+    def _export_sync(self) -> StoryExport:
+        # One reading for the stories and every part of each. Withholding, the sight
+        # narrows the stories as :meth:`stories` narrows them, and a part is read only
+        # with its story (ADR-0383 §3:2, §7:2); unbound and counting, every story is read,
+        # and a row whose home cannot be read reports a corrupt row, as that list does.
+        where, params = self._seen() or ("1", [])
+        with self._transaction("export the story store", immediate=False) as conn:
+            rows = conn.execute(
+                f"SELECT {_HEADER_COLUMNS} FROM stories "  # noqa: S608 — module text; values bound
+                f"WHERE {where} ORDER BY created_seq DESC",
+                params,
+            ).fetchall()
+            stories = [self._exported(conn, _decoded(_header_from, row)) for row in rows]
+        return _decoded(lambda: StoryExport(stories=tuple(stories)))
+
+    @staticmethod
+    def _exported(conn: sqlite3.Connection, header: StoryHeader) -> ExportedStory:
+        """One story whole: its rows of each part, in the order each part's read gives them."""
+        story_id = header.story_id
+        entries = conn.execute(
+            "SELECT position, kind, member_id, linked_at, actor FROM members "
+            "WHERE story_id = ? ORDER BY position",
+            (story_id,),
+        ).fetchall()
+        lines = conn.execute(
+            "SELECT sequence, story_id, change, member_kind, member_id, other_story, "
+            "actor, trigger_id, at, answers, outcome, note FROM log "
+            "WHERE story_id = ? ORDER BY sequence",
+            (story_id,),
+        ).fetchall()
+        notes = conn.execute(
+            "SELECT id, text, author, written_during, outside, written_at FROM notes "
+            "WHERE story_id = ? ORDER BY id",
+            (story_id,),
+        ).fetchall()
+        versions = conn.execute(
+            "SELECT version, written_at, record FROM versions WHERE story_id = ? ORDER BY version",
+            (story_id,),
+        ).fetchall()
+        summaries = conn.execute(
+            "SELECT version, written_at, lines, outside FROM summaries "
+            "WHERE story_id = ? ORDER BY version",
+            (story_id,),
+        ).fetchall()
+        return _decoded(
+            lambda: ExportedStory(
+                story=header,
+                members=tuple(_entry_from(row) for row in entries),
+                log=tuple(_line_from(row) for row in lines),
+                notes=tuple(_note_from(row) for row in notes),
+                versions=tuple(_version_from(row) for row in versions),
+                summaries=tuple(_summary_from(row) for row in summaries),
+            )
+        )
 
 
 def _line_from(row: Sequence[Any]) -> StoryLogLine:

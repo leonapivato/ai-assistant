@@ -67,6 +67,14 @@ stories is of another home than its own, ``leave_flag`` on a flag across two hom
 included, is refused ``another_home`` after ``unknown_flag`` and ``already_decided``. Each
 writes nothing; a bound store answers it only between two stories it holds.
 
+And ADR-0385 §6:4, §11: the export, every story the store lists, a merged one included,
+each with every part that takes its home exactly as the store's own reads give it, and
+nothing store-wide (ADR-0383 §8:5); an empty store's holding no story; through a binding,
+what that binding's reads give back, the owner's sight from one domain holding nothing of
+the other in either build mode; and a frozen model that round-trips through its JSON. The
+§9:3 battery carries it too, so a bound store's export answers as the same store holding
+only what its sight sees.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -79,18 +87,21 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     STORY_ID_PREFIX,
     STORY_NOTE_MAX_CHARS,
     STORY_SUMMARY_CAP_CHARS,
+    ExportedStory,
     RecordHome,
     Sight,
     SightMode,
     StoryActor,
     StoryChange,
     StoryDecision,
+    StoryExport,
     StoryFlag,
     StoryFlagKind,
     StoryFlagName,
@@ -3458,6 +3469,7 @@ class StoryStoreContract:
             ("summary_at", lambda s: s.summary_at(shared, version), 1, 1),
             ("stories", lambda s: s.stories(limit=MAX_STORY_PAGE), 6, 3),
             ("stories_of", lambda s: s.stories_of(act("a1")), 2, 1),
+            ("export", lambda s: s.export(), 6, 3),
             ("position", lambda s: s.position(), 0, 0),
             ("header", lambda s: s.header("story:never"), 0, 0),
         ]
@@ -3607,6 +3619,142 @@ class StoryStoreContract:
             ("header", "run", 1)
         ]
 
+    # --- the export (ADR-0385 §6:4, §6:5, §11; ADR-0383 §3:2, §8:5) ----------------
+
+    async def test_an_empty_store_exports_no_story(self, store: StoryStore) -> None:
+        """§6:7's empty domain, at the store: unbound and through every binding, no story."""
+        assert await store.export() == StoryExport()
+        for sight in (*SIGHTS.values(), *_OWNERS_ACTS.values()):
+            assert await store.bound(sight).export() == StoryExport()
+
+    async def test_the_export_holds_every_story_whole_as_its_reads_give_it(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """§11: every story with each part that takes its home, as the store's reads give it.
+
+        Unbound, every story the store lists, newest first, a merged one included, each
+        with its header, its members, log lines, notes, versions and kept summaries walked
+        whole; and through every binding, the stories that binding's own reads give back,
+        each as they give it (ADR-0383 §12:2).
+        """
+        store = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(store)
+        exported = await store.export()
+        assert [one.story.story_id for one in exported.stories] == [
+            header.story_id for header in await _all_headers(store)
+        ]
+        assert {one.story.story_id for one in exported.stories} == set(names.values())
+        assert exported == await _export_from_reads(store)
+        standing = [one for one in exported.stories if one.story.merged_into is None]
+        assert all(one.members and one.log for one in standing)
+        assert any(one.notes for one in exported.stories)
+        assert any(one.versions and one.summaries for one in exported.stories)
+        for sight in (*SIGHTS.values(), *_OWNERS_ACTS.values()):
+            bound = store.bound(sight)
+            assert await bound.export() == await _export_from_reads(bound)
+
+    async def test_a_merged_story_is_exported_as_its_reads_leave_it(
+        self, store: StoryStore
+    ) -> None:
+        """ADR-0289 §3, ADR-0300 §3, ADR-0347 §2:4: a merged story is still a story.
+
+        It is carried with its header naming the story it was merged into, no members,
+        its own log lines, and its own versions and kept summaries as it was left; its
+        notes are carried once, on the story merged into, which holds them now.
+        """
+        absorbed = await made(store, act("a1"))
+        target = await made(store, act("a2"))
+        note = await noted(store, absorbed, "A note.")
+        as_of = (await state_of(store, absorbed)).as_of
+        version = await written(store, absorbed, draft(line("Its matter.")), as_of=as_of)
+        merged = await store.merge(absorbed, target, actor=_OWNER)
+        assert merged.refusal is None, merged
+        exported = {one.story.story_id: one for one in (await store.export()).stories}
+        assert set(exported) == {absorbed, target}
+        gone = exported[absorbed]
+        assert gone.story.merged_into == target
+        assert gone.members == ()
+        assert gone.notes == ()
+        assert list(gone.log) == await logged(store, absorbed)
+        assert (StoryChange.MERGED_INTO, target) in shape(list(gone.log))
+        assert gone.versions == (version,)
+        assert gone.summaries == (await store.summary_at(absorbed, version.version),)
+        assert exported[target].notes == (note,)
+        assert [entry.member for entry in exported[target].members] == [act("a2"), act("a1")]
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_bound_to_the_owners_sight_the_export_holds_the_domain_it_names_alone(
+        self, sight_store_factory: Callable[[SightMode], StoryStore], mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:3, §3:5, §6:4: from the owner's domain nothing of the shared things.
+
+        And from the shared things nothing of the owner's domain, from none both, in either
+        build mode, with no count event. No story the export carries names, as a member,
+        a log line's other story, a flag, a decision or a summary version read, a story it
+        does not carry (ADR-0383 §8:3).
+        """
+        store = sight_store_factory(mode)
+        names = await _sight_history(store)
+        owners = {names[name] for name in _OWNERS_STORIES}
+        shared = {names[name] for name in _SHARED_STORIES}
+        expected = {
+            "from-none": owners | shared,
+            "from-the-owners-domain": owners,
+            "from-the-shared-things": shared,
+        }
+        for act_name, sight in _OWNERS_ACTS.items():
+            with structlog.testing.capture_logs() as events:
+                exported = await store.bound(sight).export()
+            carried = {one.story.story_id for one in exported.stories}
+            assert carried == expected[act_name], act_name
+            assert all(sight.sees(one.story.home) for one in exported.stories)
+            assert _named_stories(exported) <= carried, act_name
+            assert not [event for event in events if event["event"] == "sight_counted"]
+
+    async def test_the_export_carries_nothing_store_wide(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """ADR-0383 §8:5, ADR-0385 §11: no position, no reading's ``as_of``, no count.
+
+        Two stores hold one history, and the second takes further writes on a story of the
+        shared things alone, so its position stands elsewhere: bound to the owner's sight
+        from the owner's domain, the two export alike.
+        """
+        assert set(StoryExport.model_fields) == {"stories"}
+        assert set(ExportedStory.model_fields) == {
+            "story",
+            "members",
+            "log",
+            "notes",
+            "versions",
+            "summaries",
+        }
+        quiet = sight_store_factory(SightMode.WITHHOLD)
+        busy = sight_store_factory(SightMode.WITHHOLD)
+        names = await _sight_history(quiet)
+        assert await _sight_history(busy) == names
+        shared = names["shared-two"]
+        await noted(busy, shared, "Later.", on="s2")
+        as_of = (await state_of(busy, shared)).as_of
+        await written(busy, shared, draft(line("Later.")), as_of=as_of)
+        assert await busy.position() > await quiet.position()
+        sight = _OWNERS_ACTS["from-the-owners-domain"]
+        assert await busy.bound(sight).export() == await quiet.bound(sight).export()
+        assert await busy.export() != await quiet.export()
+
+    async def test_the_export_round_trips_through_its_model(
+        self, sight_store_factory: Callable[[SightMode], StoryStore]
+    ) -> None:
+        """ADR-0385 §6:8: a frozen pydantic model, whole again from its JSON."""
+        store = sight_store_factory(SightMode.WITHHOLD)
+        await _sight_history(store)
+        exported = await store.export()
+        assert exported.stories
+        assert StoryExport.model_validate_json(exported.model_dump_json()) == exported
+        assert StoryExport.model_validate(exported.model_dump()) == exported
+        with pytest.raises(ValidationError):
+            exported.stories = ()
+
 
 #: The stories :func:`_sight_history` writes, by name, in each home.
 _OWNERS_STORIES = ("owners-one", "owners-two", "owners-split")
@@ -3689,6 +3837,63 @@ async def _all_headers(store: StoryStore) -> list[StoryHeader]:
         cursor = page.next_cursor
 
 
+def _pages_of(
+    read: Callable[..., Awaitable[Any]], story_id: str
+) -> Callable[[int | None], Awaitable[Any]]:
+    """A paged read of one story, two items a page, for :func:`_walked`."""
+    return lambda cursor: read(story_id, cursor=cursor, limit=2)
+
+
+async def _export_from_reads(store: StoryStore) -> StoryExport:
+    """What ``store``'s export must be: every story it lists, each part read whole.
+
+    The stories newest first, as :func:`_all_headers` lists them; each with its view's
+    entries, its log lines, its notes and its versions, every page walked, and the kept
+    summary of each of its versions that has one, by ``summary_at`` (ADR-0385 §11).
+    """
+    stories: list[ExportedStory] = []
+    for header in await _all_headers(store):
+        story_id = header.story_id
+        views = await _walked(_pages_of(store.view, story_id))
+        logs = await _walked(_pages_of(store.log, story_id))
+        notes = await _walked(_pages_of(store.notes, story_id))
+        versions = await _walked(_pages_of(store.summary_versions, story_id))
+        written = [version for page in versions for version in page.versions]
+        kept = [await store.summary_at(story_id, version.version) for version in written]
+        stories.append(
+            ExportedStory(
+                story=header,
+                members=tuple(entry for page in views for entry in page.entries),
+                log=tuple(one for page in logs for one in page.lines),
+                notes=tuple(note for page in notes for note in page.notes),
+                versions=tuple(written),
+                summaries=tuple(summary for summary in kept if summary is not None),
+            )
+        )
+    return StoryExport(stories=tuple(stories))
+
+
+def _named_stories(exported: StoryExport) -> set[str]:
+    """Every story any part of ``exported`` names: a member, a line, a flag, a read."""
+    named: set[str] = set()
+    for one in exported.stories:
+        members = [entry.member for entry in one.members]
+        members += [entry.member for entry in one.log if entry.member is not None]
+        named |= {member.id for member in members if member.kind is StoryMemberKind.STORY}
+        for entry in one.log:
+            if entry.other_story is not None:
+                named.add(entry.other_story)
+            flag = entry.answers
+            if flag is not None and flag.story is not None:
+                named.add(flag.story)
+            if flag is not None and flag.flag is not None and flag.flag.story is not None:
+                named.add(flag.flag.story)
+        for version in one.versions:
+            named |= {read.story for read in version.read_pages}
+            named |= {flag.story for flag in version.flags if flag.story is not None}
+    return named
+
+
 def _first_version(state: tuple[Any, ...], story_id: str) -> int:
     """The first summary version :func:`everything` read off ``story_id``'s version log."""
     for item in state:
@@ -3735,7 +3940,7 @@ async def _sight_battery(store: StoryStore, names: dict[str, str]) -> list[ReadC
     Read off ``store`` unbound: each story's paged reads walked one item a page, its
     current summary, and every kept summary by every version any story wrote; every
     list walked, one story a page and whole; the reverse look-up of every member; a
-    story never written; and the position.
+    story never written; the position; and the export (ADR-0385 §11).
     """
     stories = [*names.values(), "story:never"]
     versions = sorted(
@@ -3770,5 +3975,6 @@ async def _sight_battery(store: StoryStore, names: dict[str, str]) -> list[ReadC
         ReadCall("stories(limit=2) walked", _walk("stories", limit=2)),
         ReadCall("stories(whole)", _on("stories", limit=MAX_STORY_PAGE)),
         ReadCall("position()", _on("position")),
+        ReadCall("export()", _on("export")),
     ]
     return calls

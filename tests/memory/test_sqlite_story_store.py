@@ -1219,6 +1219,62 @@ async def test_the_owners_sight_holds_no_story_with_no_home_in_either_mode(
         store.close()
 
 
+@pytest.mark.parametrize(("kind", "home_id"), _ODD_HOMES)
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_no_binding_exports_anything_of_a_story_whose_home_the_store_cannot_read(
+    mode: SightMode, kind: object, home_id: object
+) -> None:
+    """ADR-0383 §5:3, ADR-0385 §6:4: the home of no one is in no bound store's export.
+
+    A story whose home columns were altered outside the store, with its note, its version,
+    its kept summary and its log lines, is carried by no withholding binding and by no
+    binding to the owner's sight in either build mode; the story of the shared things
+    beside it is. Unbound, the export reads it and reports a corrupt row, as the list of
+    stories does.
+    """
+    store = _bound_store(mode)
+    try:
+        odd = await homed(store, RecordHome.owners(), act("a1"))
+        kept = await homed(store, RecordHome.shared(), act("a1"))
+        await noted(store, odd, "Note.")
+        await written(store, odd, draft(line("Line.")), as_of=(await state_of(store, odd)).as_of)
+        _set_home(store, odd, kind, home_id)
+        sights = [Sight.of_owners_act(None), Sight.of_owners_act(RecordHome.shared())]
+        if mode is SightMode.WITHHOLD:
+            sights += SIGHTS.values()
+        for sight in sights:
+            exported = await store.bound(sight).export()
+            carried = [one.story.story_id for one in exported.stories]
+            assert odd not in carried
+            assert carried == ([kept] if sight.sees(RecordHome.shared()) else [])
+        with pytest.raises(StoryStoreError):
+            await store.export()
+    finally:
+        store.close()
+
+
+async def test_the_export_reports_a_corrupt_part_and_reads_none_of_a_story_not_held() -> None:
+    """ADR-0385 §6:9: a store error, nothing returned in part, for a part that does not decode.
+
+    A version of the owner's story altered to no longer decode fails the whole export as
+    ``StoryStoreError``; a binding that does not hold that story never reads it, and
+    exports the story of the shared things it holds.
+    """
+    store = _bound_store(SightMode.WITHHOLD)
+    try:
+        owners = await homed(store, RecordHome.owners(), act("a1"))
+        shared = await homed(store, RecordHome.shared(), act("s1"))
+        await raised(store, owners, StoryFlag(kind=StoryFlagKind.TWO_MATTERS))
+        store._conn.execute("DROP TRIGGER versions_never_rewritten")
+        store._conn.execute("UPDATE versions SET record = 'not json' WHERE story_id = ?", (owners,))
+        with pytest.raises(StoryStoreError):
+            await store.export()
+        exported = await store.bound(SIGHTS["run-over-the-shared-things"]).export()
+        assert [one.story.story_id for one in exported.stories] == [shared]
+    finally:
+        store.close()
+
+
 async def test_counting_reads_a_kept_summary_of_a_story_with_no_home_and_counts_it_so() -> None:
     """§7:10, §11:1: counting answers as unbound, which reads no header for a kept summary."""
     store = _bound_store(SightMode.COUNT)
