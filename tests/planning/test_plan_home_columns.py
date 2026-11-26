@@ -164,3 +164,35 @@ def test_seen_person_sql_answers_as_the_predicate_on_every_row(
         assert answered[number] == int(expected), (number, stored[number], asker)
     if _sees_nothing_but_its_own(sight) and sight.activation is None:
         assert where == "0"
+
+
+@pytest.mark.parametrize("sight_name", list(SIGHTS))
+def test_text_that_is_not_utf8_is_no_home_and_no_error(
+    conn: sqlite3.Connection, sight_name: str
+) -> None:
+    """§5:3: a column holding text that is not UTF-8 names no home, beside the own activation too.
+
+    The readers take the column's bytes and decode them strictly, so such a row matches
+    nothing and the statement never raises.
+    """
+    sight = SIGHTS[sight_name]
+    conn.execute("CREATE TABLE homes(home_kind TEXT, home_id TEXT, activation_id TEXT)")
+    conn.execute("CREATE TABLE persons(person TEXT, data TEXT)")
+    malformed = "CAST(x'80' AS TEXT)"
+    conn.execute(f"INSERT INTO homes VALUES ('person', {malformed}, ?)", (OWN_ACTIVATION,))  # noqa: S608 — the test's own text
+    conn.execute(f"INSERT INTO homes VALUES ({malformed}, NULL, ?)", (OWN_ACTIVATION,))  # noqa: S608
+    conn.execute(
+        f"INSERT INTO persons VALUES ({malformed}, ?)",  # noqa: S608
+        (json.dumps({"activation_id": OWN_ACTIVATION}),),
+    )
+    where, params = seen_sql(sight, made_by="activation_id")
+    assert conn.execute(f"SELECT {where} FROM homes", params).fetchall() == [(0,), (0,)]  # noqa: S608
+    person_where, person_params = seen_person_sql(
+        sight,
+        made_by="CASE WHEN json_valid(data) THEN json_extract(data, '$.activation_id') END",
+    )
+    answered = conn.execute(
+        f"SELECT {person_where} FROM persons",  # noqa: S608 — the module's own text
+        person_params,
+    ).fetchall()
+    assert answered == [(0,)]
