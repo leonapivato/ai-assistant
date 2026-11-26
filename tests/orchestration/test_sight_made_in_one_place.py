@@ -8,12 +8,15 @@ again (§6:4 to §6:6), in :meth:`ActivationState._see
 (§6:7), a run's and a tidy-up's (§6:8) are made where milestone 22's B9 and B8c put them,
 each adding its place here.
 
-**How it reads "constructs".** Any call of ``Sight`` or ``SightBound`` or of one of their
-members (``Sight.of_work``, ``Sight.model_validate``, ``SightBound.person`` …); any call of
+**How it reads "constructs".** Any reference to ``Sight`` or ``SightBound`` outside an
+annotation, by its own name or as an attribute (``Sight(...)``, ``Sight.of_work``,
+``types.Sight.of_work``, ``ai_assistant.core.types.SightBound.person``, a reference kept
+to call later), since naming the type at run time is how one is made; any call of
 ``meet`` or ``of_tidy_up``, which make a sight from one held; any import of either name
 under another; and any assignment to a ``_sight`` attribute, the field the work's sight is
 held in. A stage reads the sight its pass carries (``ActivationState.sight``,
-``activation_state.work_sight``) and makes none.
+``activation_state.work_sight()``) and makes none. Reaching the type by a string
+(``getattr(types, "Sight")``) is not read.
 """
 
 from __future__ import annotations
@@ -37,13 +40,30 @@ PLACES: Final = frozenset({"activation_state.py:ActivationState._see"})
 _ROOT: Final = Path(ai_assistant.orchestration.__file__).parent
 
 
+def _annotations_of(tree: ast.Module) -> list[ast.expr]:
+    """Every annotation in ``tree``: parameters', returns' and annotated names'."""
+    found: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            found.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.returns:
+            found.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            found.append(node.annotation)
+    return found
+
+
 class _Makers(ast.NodeVisitor):
     """Each place in one module that makes a sight, by its qualified name."""
 
-    def __init__(self, module: str) -> None:
+    def __init__(self, module: str, tree: ast.Module) -> None:
         self._module = module
         self._scope: list[str] = []
         self.found: set[str] = set()
+        # Every node inside an annotation, where naming a type makes nothing.
+        self._annotations = {
+            id(inner) for annotation in _annotations_of(tree) for inner in ast.walk(annotation)
+        }
 
     def _here(self) -> str:
         return f"{self._module}:{'.'.join(self._scope) or '<module>'}"
@@ -59,14 +79,20 @@ class _Makers(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         called = node.func
-        if (isinstance(called, ast.Name) and called.id in _SIGHT_TYPES) or (
-            isinstance(called, ast.Attribute)
-            and (
-                called.attr in _MAKING_MEMBERS
-                or (isinstance(called.value, ast.Name) and called.value.id in _SIGHT_TYPES)
-            )
-        ):
+        if isinstance(called, ast.Attribute) and called.attr in _MAKING_MEMBERS:
             self.found.add(self._here())
+        self.generic_visit(node)
+
+    def _referred(self, node: ast.Name | ast.Attribute) -> None:
+        named = node.id if isinstance(node, ast.Name) else node.attr
+        if named in _SIGHT_TYPES and id(node) not in self._annotations:
+            self.found.add(self._here())
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self._referred(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        self._referred(node)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -98,8 +124,9 @@ def sight_makers(root: Path = _ROOT) -> frozenset[str]:
     """Every place under ``root`` that makes a sight, ``<module path>:<qualified name>``."""
     found: set[str] = set()
     for path in sorted(root.rglob("*.py")):
-        makers = _Makers(path.relative_to(root).as_posix())
-        makers.visit(ast.parse(path.read_text(encoding="utf-8")))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        makers = _Makers(path.relative_to(root).as_posix(), tree)
+        makers.visit(tree)
         found |= makers.found
     return frozenset(found)
 
@@ -121,8 +148,15 @@ class Stage:
         SightBound.anyone()
 def widened(state) -> None:
     state._sight = None
-def reads(state) -> None:
-    return state.sight
+def reads(state, sight: Sight) -> SightBound:
+    held: Sight = state.sight
+    return held
+from ai_assistant.core import types
+def qualified(facts) -> None:
+    types.Sight.of_work(facts, (), activation="a")
+def kept() -> None:
+    make = ai_assistant.core.types.SightBound.person
+    make("p")
 """
     (tmp_path / "stage.py").write_text(source, encoding="utf-8")
     assert sight_makers(tmp_path) == {
@@ -131,4 +165,6 @@ def reads(state) -> None:
         "stage.py:Stage.run",
         "stage.py:Stage.bound",
         "stage.py:widened",
+        "stage.py:qualified",
+        "stage.py:kept",
     }
