@@ -40,7 +40,14 @@ from ai_assistant.testing.structured import DEFAULT_STRUCTURED_MODEL
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider, StoryStore
+    from ai_assistant.core.protocols import (
+        ConversationStore,
+        MemoryStore,
+        ModelProvider,
+        PersonModelStore,
+        PlanStore,
+        StoryStore,
+    )
     from ai_assistant.core.types import Message
 
 #: The composition root's three values (ADR-0276 §4, §7), restated for the suites that
@@ -73,6 +80,12 @@ OWNERS_SIGHT: Final = Sight.of_work(
     (InputSender(person=OWNER_PERSON_ID, level=Sureness.NORMAL),),
     activation="00000000-0000-4000-8000-000000000000",
 )
+
+
+def owners_sight() -> Sight:
+    """:data:`OWNERS_SIGHT`, read as a look-up's scope reads its work's sight, at each read."""
+    return OWNERS_SIGHT
+
 
 #: The smallest well-formed proposal: a meaning grounded in the input alone.
 STATED_PROPOSAL: Final = json.dumps({"understanding": "The input means what it says."})
@@ -129,12 +142,25 @@ def understanding_stage(
     )
 
 
-def bound_stores(memory: MemoryStore, stories: StoryStore | None = None) -> BoundStores:
+def bound_stores(
+    memory: MemoryStore,
+    stories: StoryStore | None = None,
+    *,
+    people: PersonModelStore | None = None,
+    conversations: ConversationStore | None = None,
+    plans: PlanStore | None = None,
+) -> BoundStores:
     """The holder the composition root builds, over ``memory`` and ``stories``.
 
-    An empty story store where none is named.
+    An empty story store where none is named; each other store only where named.
     """
-    return BoundStores(memory=memory, stories=FakeStoryStore() if stories is None else stories)
+    return BoundStores(
+        memory=memory,
+        stories=FakeStoryStore() if stories is None else stories,
+        people=people,
+        conversations=conversations,
+        plans=plans,
+    )
 
 
 def windows_stage(memory: MemoryStore) -> WindowsStage:

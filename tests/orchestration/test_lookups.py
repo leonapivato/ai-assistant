@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from understanding_support import bound_stores, owners_sight
 
 from ai_assistant.core.errors import MemoryStoreError, PlanningError, StoryStoreError
 from ai_assistant.core.types import (
@@ -185,7 +186,7 @@ def test_the_ids_a_search_lists_for_planning_are_read_back() -> None:
 
 def test_a_search_keeps_at_least_one_record() -> None:
     with pytest.raises(ValueError, match="at least one"):
-        LookUps(memory=FakeMemoryStore(), views=None, search_limit=0)
+        LookUps(stores=bound_stores(FakeMemoryStore()), views=None, search_limit=0)
 
 
 # --- the memory search -------------------------------------------------------------------
@@ -202,9 +203,9 @@ async def test_a_search_splits_what_it_found_into_shown_and_held_by_id() -> None
         _fact("reported", "dentist moved to 3pm", outside=True),
         _fact("other", "the car is red"),
     )
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
     assert isinstance(answer, HeldByIds)
@@ -223,9 +224,9 @@ async def test_a_search_applies_the_audience_predicate_at_the_search() -> None:
         _fact("about-sam", "dentist for Sam on Monday", subjects=("Sam",)),
         _fact("reported", "dentist moved to 3pm", outside=True),
     )
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
-    with look_ups.scope(audience=UNBOUNDED, owner_records=False):
+    with look_ups.scope(audience=UNBOUNDED, owner_records=False, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
     assert isinstance(answer, HeldByIds)
@@ -248,9 +249,9 @@ class _Searched(FakeMemoryStore):
 async def test_a_search_asks_for_remembered_facts_alone_each_band_on_its_own() -> None:
     """ADR-0072 §5: each band read on its own, in precedence order, up to the limit."""
     store = _Searched()
-    look_ups = LookUps(memory=store, views=None, search_limit=4)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=4)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
     assert [search["query"] for search in store.searches] == ["dentist"] * 3
@@ -277,9 +278,9 @@ async def test_inferences_never_displace_an_assertion_below_the_limit() -> None:
     store = _Searched()
     for record in (inferred, _fact("said", "my dentist is Dr Rao")):
         await store.add(record)
-    look_ups = LookUps(memory=store, views=None, search_limit=1)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=1)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist appointment"))
 
     assert isinstance(answer, HeldByIds)
@@ -295,9 +296,9 @@ class _Down(FakeMemoryStore):
 
 
 async def test_a_search_the_store_cannot_answer_is_not_done() -> None:
-    look_ups = LookUps(memory=_Down(), views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(_Down()), views=None, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
     _failed(answer, ToolFailureKind.UNAVAILABLE)
@@ -306,7 +307,7 @@ async def test_a_search_the_store_cannot_answer_is_not_done() -> None:
 async def test_a_search_outside_a_scope_reads_nothing_and_is_not_done() -> None:
     """A look-up reads under the pass's audience; with none given it reads nothing."""
     store = _Searched()
-    look_ups = LookUps(memory=store, views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(store), views=None, search_limit=5)
 
     answer = await look_ups.run(_call(SEARCH_MEMORY, query="dentist"))
 
@@ -315,9 +316,9 @@ async def test_a_search_outside_a_scope_reads_nothing_and_is_not_done() -> None:
 
 
 async def test_a_blank_query_is_not_done() -> None:
-    look_ups = LookUps(memory=_Searched(), views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(_Searched()), views=None, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(SEARCH_MEMORY, query="  "))
 
     _failed(answer, ToolFailureKind.INVALID_REQUEST)
@@ -330,9 +331,9 @@ async def test_a_story_read_reads_the_view_under_the_scope_and_holds_it_for_the_
     """ADR-0307 §6:4, §6:6: the view under the pass's audience and owner-only placement."""
     view = PlanningStory(story_id="story-1", tidied_at=None, changes=2)
     views = _Views({"story-1": view})
-    look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=views, search_limit=5)
 
-    with look_ups.scope(audience=UNBOUNDED, owner_records=False) as scope:
+    with look_ups.scope(audience=UNBOUNDED, owner_records=False, sight=owners_sight) as scope:
         answer = await look_ups.run(_call(READ_STORY, decision="d7", matter="story-1"))
 
     assert isinstance(answer, ToolResult)
@@ -346,9 +347,9 @@ async def test_a_story_read_reads_the_view_under_the_scope_and_holds_it_for_the_
 async def test_a_story_read_asks_for_the_page_of_older_notes_it_names() -> None:
     """#2893: a read naming a page of the story's older notes reads that page."""
     views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
-    look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=views, search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True):
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         answer = await look_ups.run(_call(READ_STORY, matter="story-1", older_notes_page=3))
 
     assert isinstance(answer, ToolResult)
@@ -359,11 +360,11 @@ async def test_a_story_read_asks_for_the_page_of_older_notes_it_names() -> None:
 @pytest.mark.parametrize("page", [0, -1, True, "2", 1.5])
 async def test_a_story_read_naming_no_page_of_one_or_more_is_not_done(page: object) -> None:
     views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
-    look_ups = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=views, search_limit=5)
 
     # The offered schema refuses it first; the runner refuses it again.
     loose = READ_STORY.model_copy(update={"parameters_schema": {"type": "object"}})
-    with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight) as scope:
         answer = await look_ups.run(_call(loose, matter="story-1", older_notes_page=page))
 
     _failed(answer, ToolFailureKind.INVALID_REQUEST)
@@ -372,9 +373,9 @@ async def test_a_story_read_naming_no_page_of_one_or_more_is_not_done(page: obje
 
 
 async def test_a_story_read_of_a_story_not_held_is_not_done() -> None:
-    look_ups = LookUps(memory=FakeMemoryStore(), views=_Views(), search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=_Views(), search_limit=5)
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight) as scope:
         answer = await look_ups.run(_call(READ_STORY, matter="gone"))
 
     _failed(answer, ToolFailureKind.INVALID_REQUEST)
@@ -387,9 +388,11 @@ async def test_a_story_read_of_a_story_not_held_is_not_done() -> None:
     ids=["stories", "plans", "memory"],
 )
 async def test_a_story_read_whose_stores_cannot_be_read_is_not_done(error: Exception) -> None:
-    look_ups = LookUps(memory=FakeMemoryStore(), views=_Views(raises=error), search_limit=5)
+    look_ups = LookUps(
+        stores=bound_stores(FakeMemoryStore()), views=_Views(raises=error), search_limit=5
+    )
 
-    with look_ups.scope(audience=BOUNDED, owner_records=True) as scope:
+    with look_ups.scope(audience=BOUNDED, owner_records=True, sight=owners_sight) as scope:
         answer = await look_ups.run(_call(READ_STORY, matter="story-1"))
 
     _failed(answer, ToolFailureKind.UNAVAILABLE)
@@ -398,11 +401,11 @@ async def test_a_story_read_whose_stores_cannot_be_read_is_not_done(error: Excep
 
 async def test_a_story_read_with_no_views_or_no_scope_is_not_done() -> None:
     views = _Views({"story-1": PlanningStory(story_id="story-1", tidied_at=None, changes=0)})
-    unwired = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5)
-    with unwired.scope(audience=BOUNDED, owner_records=True):
+    unwired = LookUps(stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5)
+    with unwired.scope(audience=BOUNDED, owner_records=True, sight=owners_sight):
         _failed(await unwired.run(_call(READ_STORY, matter="story-1")), ToolFailureKind.INTERNAL)
 
-    wired = LookUps(memory=FakeMemoryStore(), views=views, search_limit=5)
+    wired = LookUps(stores=bound_stores(FakeMemoryStore()), views=views, search_limit=5)
     _failed(await wired.run(_call(READ_STORY, matter="story-1")), ToolFailureKind.INTERNAL)
     assert views.reads == []
 
@@ -412,7 +415,7 @@ async def test_a_story_read_with_no_views_or_no_scope_is_not_done() -> None:
 
 async def test_a_follow_up_answers_the_result_it_names() -> None:
     """ADR-0308 §6:6-§6:7: acting runs it against the held results."""
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5)
 
     answer = await look_ups.run(_call(FOLLOW_UP, result="result:abc"))
 
@@ -420,7 +423,7 @@ async def test_a_follow_up_answers_the_result_it_names() -> None:
 
 
 async def test_a_follow_up_naming_no_result_is_not_done() -> None:
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5)
 
     # The offered schema refuses it first; the runner refuses it again.
     loose = FOLLOW_UP.model_copy(update={"parameters_schema": {"type": "object"}})
@@ -431,6 +434,6 @@ async def test_a_follow_up_naming_no_result_is_not_done() -> None:
 
 async def test_a_call_that_is_no_look_up_is_not_done() -> None:
     other = SEARCH_MEMORY.model_copy(update={"id": "other", "capability": "other"})
-    look_ups = LookUps(memory=FakeMemoryStore(), views=None, search_limit=5)
+    look_ups = LookUps(stores=bound_stores(FakeMemoryStore()), views=None, search_limit=5)
 
     _failed(await look_ups.run(_call(other, query="x")), ToolFailureKind.INVALID_REQUEST)

@@ -16,6 +16,7 @@ from typing import Final
 import pytest
 from test_engine import tool
 from test_engine_phases import _BOOK
+from understanding_support import bound_stores
 
 from ai_assistant.core.channel_validation import sent_by_a_person
 from ai_assistant.core.config import Settings
@@ -198,8 +199,7 @@ async def _no_stop(activation_id: str) -> ActivationStop:
 def _matters(states: list[ActivationState], *, held: int = DEFAULT_HELD_INPUT_LIMIT) -> Matters:
     return Matters(
         running=lambda: states,
-        plans=FakePlanStore(now=lambda: _AT),
-        memory=FakeMemoryStore(now=lambda: _AT),
+        stores=bound_stores(FakeMemoryStore(now=lambda: _AT), plans=FakePlanStore(now=lambda: _AT)),
         stop=_no_stop,
         held_input_limit=held,
         in_progress_limit=DEFAULT_IN_PROGRESS_LIMIT,

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from exchange_support import reported, section, tags
+from understanding_support import OWNERS_SIGHT, bound_stores
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -73,7 +74,12 @@ from ai_assistant.orchestration.planning import (
 from ai_assistant.orchestration.remembering import candidate_of, is_remember
 from ai_assistant.orchestration.renames import Void, current_arguments, translated
 from ai_assistant.orchestration.story_calls import LINK_STORY
-from ai_assistant.testing import FakeConversationStore, FakeToolCallingCompleter, default_prompt
+from ai_assistant.testing import (
+    FakeConversationStore,
+    FakeMemoryStore,
+    FakeToolCallingCompleter,
+    default_prompt,
+)
 from ai_assistant.tools.forecast import FORECAST_READ
 from ai_assistant.tools.send_email import EMAIL
 from ai_assistant.tools.web_search import WEB_SEARCH
@@ -460,9 +466,11 @@ async def test_search_connections_finds_an_unshown_conversation_and_labels_it() 
             author=MessageAuthor.ASSISTANT, text="the dentist on Tuesday", home=RecordHome.owners()
         ),
     )
-    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+    search = ConnectionSearch(
+        stores=bound_stores(FakeMemoryStore(), conversations=store), scan=10, page_size=5
+    )
 
-    found = await search.search("Porto trip", 1)
+    found = await search.search("Porto trip", 1, sight=OWNERS_SIGHT)
 
     assert [one.place for one in found.connections] == [f"conversation:{plans.id}"]
     assert not found.more
@@ -733,9 +741,11 @@ async def test_search_connections_matches_what_an_entry_says_it_can_do() -> None
     """§3:8: matched against what the entry would show, what it can do included."""
     store = FakeConversationStore()
     quiet = await store.start(home=RecordHome.owners())
-    search = ConnectionSearch(conversations=store, scan=10, page_size=5)
+    search = ConnectionSearch(
+        stores=bound_stores(FakeMemoryStore(), conversations=store), scan=10, page_size=5
+    )
 
-    found = await search.search("text messages", 1)
+    found = await search.search("text messages", 1, sight=OWNERS_SIGHT)
 
     assert [one.place for one in found.connections] == [f"conversation:{quiet.id}"]
 

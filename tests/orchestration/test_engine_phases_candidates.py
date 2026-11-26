@@ -16,7 +16,7 @@ from exchange_support import reported, section, tag, tags
 from structured_support import structured
 from test_engine import AT, Harness
 from test_engine_phases import _BOOK, _DIGESTED, _PHONE, _call, _conversation, _Policy, _settled
-from understanding_support import understanding_stage
+from understanding_support import bound_stores, understanding_stage
 
 from ai_assistant.core.types import (
     EpisodicMemory,
@@ -64,7 +64,7 @@ def _phases(
     """The thin path as the composition root builds it."""
 
     def build(harness: Harness) -> PhasePath:
-        looking = LookUps(memory=harness.memory, views=None, search_limit=5)
+        looking = LookUps(stores=bound_stores(harness.memory), views=None, search_limit=5)
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,

@@ -115,10 +115,14 @@ async def test_with_the_switch_on_the_store_is_wired_with_the_roots_bounds(
         assert (KEPT_IN_MIND_CHARS, PLANNING_SUGGESTIONS) == (1600, 5)
         store = _store(engine)
         assert store._chars == PROFILE_FIELD_CHARS
-        # ADR-0383 §7:10, §11:1: a binding of it only counts in this build, and nothing
-        # in the root binds it yet.
+        # ADR-0383 §7:10, §11:1: a binding of it only counts in this build, and the
+        # root hands the block the one holder, over this same store, which binds it
+        # per work (§9:1); the store the root holds is never bound itself.
         assert store._sight_mode is SightMode.COUNT
         assert store._sight is None
+        assert blocks._stores is engine._matters._stores
+        assert blocks._stores._people is store
+        assert blocks._stores._memory is engine._memory
         path = tmp_path / PERSON_MODEL_FILENAME
         assert path.is_file()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600

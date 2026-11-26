@@ -39,6 +39,13 @@ What a call came back with reaches planning under labels: the peer view of the a
 it named, read fresh (:class:`PeerShown`), with, for a stop, what it set up that is still
 live, held by the call's decision in the caller's scope for the phases to show under the
 call's result.
+
+**Through the caller's sight** (ADR-0383 §7:7). The peer view a call reads, and the stop
+record a take writes, go through the stores bound to the sight the calling work carries
+(:attr:`~ai_assistant.orchestration.activation_state.ActivationState.sight`), read here and
+never made (§9:2): an activation whose episode that sight does not see is shown with no
+view, as one with no episode. The stop call's own stop is the Task Manager's, which binds
+nothing yet (milestone 22's B8d).
 """
 
 from __future__ import annotations
@@ -81,7 +88,7 @@ from ai_assistant.orchestration.planning import PeerShown
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-    from ai_assistant.core.types import FrozenJson, ToolCall
+    from ai_assistant.core.types import FrozenJson, Sight, ToolCall
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.disclosure import TurnSupply
@@ -321,6 +328,22 @@ def calling(caller: MatterCaller | None) -> Iterator[None]:
         _CALLING.reset(token)
 
 
+def _sight_of(caller: MatterCaller) -> Sight:
+    """The sight the calling work carries, which binds every read a call makes (ADR-0383 §7:7).
+
+    Read, never made (§9:2).
+
+    Raises:
+        RuntimeError: Where the calling activation has no sight, which no admitted work
+            lacks: no read of a store is made for it (§6:3).
+    """
+    sight = caller.state.sight
+    if sight is None:
+        msg = "a call on running work reads a store only by its work's sight (ADR-0383 §7:7)"
+        raise RuntimeError(msg)
+    return sight
+
+
 def current_caller() -> MatterCaller | None:
     """The caller :func:`calling` holds, or ``None`` outside such a scope."""
     return _CALLING.get()
@@ -476,7 +499,9 @@ class MatterCalls:
             caller.not_as_asked[decision] = short
         if answered is TakeAnswer.TAKEN:
             # §7:21: after the step, as an absorption's is; awaited to its end.
-            await self._matters.record_stop(named, deadline=None, stage="acting")
+            await self._matters.record_stop(
+                named, deadline=None, stage="acting", sight=_sight_of(caller)
+            )
         caller.shown[decision] = PeerShown(
             activation_id=named,
             answered=answered.value,
@@ -504,7 +529,9 @@ class MatterCalls:
         §3:2); a read of it that fails is shown as not read, and the stop stands.
         """
         try:
-            view = await self._matters.peer(named, owner_records=caller.owner_records)
+            view = await self._matters.peer(
+                named, owner_records=caller.owner_records, sight=_sight_of(caller)
+            )
         except PlanningError, MemoryStoreError:
             if stopped is None:
                 raise

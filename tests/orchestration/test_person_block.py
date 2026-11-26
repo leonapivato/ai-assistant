@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from structlog.testing import capture_logs
+from understanding_support import OWNERS_SIGHT
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -197,20 +198,20 @@ def _ended(
 async def test_no_person_is_given_no_block() -> None:
     world = _World()
 
-    assert await world.blocks.assemble(None, supply=BOUNDED) is None
+    assert await world.blocks.assemble(None, supply=BOUNDED, sight=OWNERS_SIGHT) is None
 
 
 async def test_a_person_the_store_does_not_hold_is_given_no_block() -> None:
     world = _World()
 
-    assert await world.blocks.assemble("person:someone", supply=BOUNDED) is None
+    assert await world.blocks.assemble("person:someone", supply=BOUNDED, sight=OWNERS_SIGHT) is None
 
 
 async def test_the_block_carries_the_profile_as_set() -> None:
     world = _World()
     await world.people.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Robin", act=PANEL)
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert block.person_id == OWNER_PERSON_ID
@@ -230,7 +231,7 @@ async def test_the_slot_shows_pins_oldest_first_then_style_newest_marked_first_e
     await world.pin("m:sister", "m:diet")
     await world.mark("m:brief", "m:diet", "m:jokes")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [(one.memory.id, one.pinned) for one in block.kept] == [
@@ -252,7 +253,7 @@ async def test_a_removed_pin_or_mark_is_not_shown() -> None:
     await world.people.remove_pin(OWNER_PERSON_ID, pinned.record_id)
     await world.people.remove_style_mark(OWNER_PERSON_ID, marked.record_id)
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert block.kept == ()
@@ -269,7 +270,7 @@ async def test_the_budget_stops_before_the_first_memory_that_would_exceed_it() -
     )
     await world.pin("m:a", "m:b", "m:c", "m:d")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:a", "m:b"]
@@ -281,7 +282,7 @@ async def test_a_wording_exactly_at_the_budget_is_shown() -> None:
     await world.held(_fact("m:a", "a" * 12))
     await world.pin("m:a")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:a"]
@@ -295,7 +296,7 @@ async def test_a_memory_resting_on_outside_content_never_enters_the_slot() -> No
     await world.pin("m:out", "m:diet")
     await world.mark("m:out")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert outside.rests_on_outside_content
     assert block is not None
@@ -312,8 +313,8 @@ async def test_the_record_rule_is_applied_to_the_slot() -> None:
     )
     await world.pin("m:about-ada", "m:diet")
 
-    unbounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=UNBOUNDED)
-    bounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    unbounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=UNBOUNDED, sight=OWNERS_SIGHT)
+    bounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert unbounded is not None
     assert bounded is not None
@@ -327,7 +328,7 @@ async def test_a_pin_on_a_current_memory_is_read_live_alone() -> None:
     await world.held(_fact("m:diet", "Eats no meat."))
     await world.pin("m:diet")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:diet"]
@@ -348,7 +349,7 @@ async def test_a_pin_follows_two_retirements_to_its_chains_current_end() -> None
     )
     await world.pin("m:old")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:new"]
@@ -380,7 +381,7 @@ async def test_a_chain_is_followed_to_its_current_end_however_long() -> None:
     )
     await world.pin("m:0")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == [f"m:{hops}"]
@@ -403,7 +404,7 @@ async def test_a_retirement_landing_as_the_live_read_is_made_is_followed() -> No
     await world.held(_fact("m:old", "Lives in Porto."))
     await world.pin("m:old")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:new"]
@@ -427,7 +428,7 @@ async def test_the_latest_operation_naming_a_successor_governs(
     )
     await world.pin("m:old")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == [shown]
@@ -443,7 +444,7 @@ async def test_a_retired_memory_a_live_read_returns_is_never_shown_as_current() 
     )
     await world.pin("m:old", "m:stuck")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:new"]
@@ -456,7 +457,7 @@ async def test_two_pins_reaching_one_memory_show_it_once() -> None:
     )
     await world.pin("m:old", "m:new")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:new"]
@@ -490,7 +491,7 @@ async def test_a_pin_whose_chain_reaches_no_current_memory_is_shown_in_no_block(
     await world.held(_fact("m:new", "Lives in Coimbra."))
     await world.pin("m:old")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert block.kept == ()
@@ -504,7 +505,7 @@ async def test_a_style_mark_follows_successors_as_a_pin_does() -> None:
     )
     await world.mark("m:old")
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [(one.memory.id, one.pinned) for one in block.kept] == [("m:new", False)]
@@ -545,7 +546,7 @@ async def test_suggestions_resting_on_outside_content_never_reach_planning() -> 
     await world.people.record_suggestion(OWNER_PERSON_ID, _pin("m:out"))
     await world.people.record_suggestion(OWNER_PERSON_ID, _pin("m:diet"))
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [(one.kind, one.field, one.value) for one in block.suggestions] == [
@@ -566,8 +567,8 @@ async def test_a_pin_suggestions_memory_must_be_current_and_pass_the_record_rule
     for one in ("m:old", "m:about-ada", "m:gone"):
         await world.people.record_suggestion(OWNER_PERSON_ID, _pin(one))
 
-    unbounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=UNBOUNDED)
-    bounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    unbounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=UNBOUNDED, sight=OWNERS_SIGHT)
+    bounded = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert unbounded is not None
     assert bounded is not None
@@ -584,7 +585,7 @@ async def test_suggestions_are_newest_first_up_to_the_count() -> None:
             OWNER_PERSON_ID, _field(ProfileField.ADDRESS, value, SupportOrigin.USER_MESSAGE)
         )
 
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is not None
     assert [one.value for one in block.suggestions] == ["Bobbin", "Rob"]
@@ -604,7 +605,7 @@ async def test_equal_instants_keep_the_order_the_store_made_them_in() -> None:
         await memory_store.add(record)
     for one in ("m:a", "m:b"):
         await people.add_pin(OWNER_PERSON_ID, one, act=PANEL)
-    pins_only = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    pins_only = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
     for one in ("m:a", "m:b"):
         pin = next(pin for pin in (await _model(people)).standing_pins if pin.memory_id == one)
         await people.remove_pin(OWNER_PERSON_ID, pin.id)
@@ -615,7 +616,7 @@ async def test_equal_instants_keep_the_order_the_store_made_them_in() -> None:
             OWNER_PERSON_ID, _field(ProfileField.ADDRESS, value, SupportOrigin.USER_MESSAGE)
         )
 
-    block = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert pins_only is not None
     assert [one.memory.id for one in pins_only.kept] == ["m:a", "m:b"]
@@ -660,7 +661,7 @@ async def test_a_memory_forgotten_while_the_activation_runs_is_dropped_before_a_
     await world.pin("m:diet")
     await world.mark("m:brief")
     await world.people.record_suggestion(OWNER_PERSON_ID, _pin("m:sister"))
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
     assert block is not None
     assert block.memory_ids == {"m:diet", "m:brief", "m:sister"}
 
@@ -682,7 +683,7 @@ async def test_a_memory_retired_while_the_activation_runs_is_still_held() -> Non
     world = _World()
     await world.held(_fact("m:diet", "Eats no meat."))
     await world.pin("m:diet")
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
     assert block is not None
 
     await world.held(
@@ -700,7 +701,7 @@ async def test_a_block_whose_memories_are_all_held_is_kept_as_it_is() -> None:
     world = _World()
     await world.held(_fact("m:diet", "Eats no meat."))
     await world.pin("m:diet")
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
     assert block is not None
 
     assert await still_held(block, world.memory) is block
@@ -710,7 +711,7 @@ async def test_a_memory_store_that_cannot_be_read_before_a_round_leaves_no_memor
     world = _World()
     await world.held(_fact("m:diet", "Eats no meat."))
     await world.pin("m:diet")
-    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
     assert block is not None
 
     with capture_logs() as logs:
@@ -732,7 +733,7 @@ async def test_a_person_model_store_fault_gives_no_block_and_says_so_without_val
     world.people.fail_next()
 
     with capture_logs() as logs:
-        block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+        block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is None
     [logged] = [one for one in logs if one["event"] == "person_block_unread"]
@@ -746,7 +747,7 @@ async def test_a_memory_store_fault_gives_no_block() -> None:
     blocks = PersonBlocks(store=people, memory=FakeMemoryStore(failure="down"))
 
     with capture_logs() as logs:
-        block = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+        block = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is None
     assert [one["reason"] for one in logs if one["event"] == "person_block_unread"] == [
@@ -771,7 +772,7 @@ async def test_a_history_read_fault_on_a_mixed_batch_gives_no_block() -> None:
     await world.pin("m:diet", "m:old")
 
     with capture_logs() as logs:
-        block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+        block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     assert block is None
     assert world.memory.reads == [("live", ("m:diet", "m:old")), ("history", ("m:old",))]
@@ -787,7 +788,7 @@ async def test_an_assembled_block_is_logged_by_its_counts_alone() -> None:
     await world.pin("m:diet")
 
     with capture_logs() as logs:
-        await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+        await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED, sight=OWNERS_SIGHT)
 
     [logged] = [one for one in logs if one["event"] == "person_block"]
     assert (logged["pinned"], logged["kept"], logged["left_out"], logged["suggestions"]) == (

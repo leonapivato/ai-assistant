@@ -154,10 +154,18 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(  # noq
         assert phases._task_calls is not None
         assert phases._matters is engine._matters
         # One look-ups runner behind every look-up, over the root's own memory store and
-        # the story views' reads, whose scope the path opens around acting.
+        # the story views' reads, whose scope the path opens around acting; each of its
+        # reads, the episode look-ups' and the connections search's, through the one
+        # holder the engine's running-work coordinator reads through (ADR-0383 §9:1).
         look_ups = phases._look_ups
         assert isinstance(look_ups, LookUps)
-        assert look_ups._memory is engine._memory
+        assert look_ups._stores is engine._matters._stores
+        assert look_ups._stores._memory is engine._memory
+        assert look_ups._stores._plans is engine._plans
+        assert look_ups._episodes is not None
+        assert look_ups._episodes._stores is look_ups._stores
+        assert look_ups._connections is not None
+        assert look_ups._connections._stores is look_ups._stores
         assert look_ups._views is phases._story_reads
         assert look_ups._search_limit == PHASES_MEMORY_SEARCH_LIMIT
         # Each story call runs through acting's own-records seam, over the root's own
