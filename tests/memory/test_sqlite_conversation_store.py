@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     NewMessage,
     RecordHome,
     SendOutcome,
+    Sight,
     SightMode,
 )
 from ai_assistant.memory import conversation_store
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
-    from ai_assistant.core.types import Sight
     from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The store's own defaults, restated here rather than imported (see the fake's
@@ -2010,6 +2010,56 @@ async def test_a_reply_is_compared_with_the_home_its_targets_row_keeps(
             conversation, said.model_copy(update={"message_id": "m-3"})
         )
         assert (alone.outcome, alone.position) == (SendOutcome.RECORDED, 2)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_owners_sight_holds_no_record_with_no_home_in_either_mode(
+    tmp_path: Path, mode: SightMode
+) -> None:
+    """ADR-0385 §3:3, §3:5 with ADR-0383 §5:3: the owner's sight from none sees no such row.
+
+    Bound to the owner's sight, in either mode, a conversation whose home columns were
+    cleared outside the store is one never started, a message whose columns were
+    cleared in a conversation it holds is one never written, and no count event is
+    written; the rest is held.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now, sight_mode=mode)
+    try:
+        cleared = (await store.start(home=RecordHome.owners())).id
+        kept = (await store.start(home=RecordHome.owners())).id
+        for text in ("first", "second"):
+            await store.append_message(
+                kept,
+                NewMessage(author=MessageAuthor.ASSISTANT, text=text, home=RecordHome.owners()),
+            )
+        raw = sqlite3.connect(path, isolation_level=None)
+        try:
+            raw.execute(
+                "UPDATE conversations SET home_kind = NULL, home_id = NULL WHERE id = ?",
+                (cleared,),
+            )
+            raw.execute(
+                "UPDATE messages SET home_kind = NULL, home_id = NULL "
+                "WHERE conversation_id = ? AND position = 1",
+                (kept,),
+            )
+        finally:
+            raw.close()
+        bound = store.bound(Sight.of_owners_act(None))
+        with structlog.testing.capture_logs() as events:
+            assert await bound.get(cleared) is None
+            assert await bound.transcript(cleared) is None
+            page = await bound.transcript(kept)
+            exported = await bound.export()
+            assert await bound.delete_message(kept, 1) is False
+        assert page is not None
+        assert [one.position for one in page.entries] == [2]
+        assert [one.id for one in exported.conversations] == [kept]
+        assert [one.position for one in exported.messages] == [2]
+        assert not [event for event in events if event["event"] == "sight_counted"]
     finally:
         store.close()
 

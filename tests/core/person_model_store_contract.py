@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     ProposedSuggestion,
     QuestionPart,
     RecordHome,
+    Sight,
     SightMode,
     SuggestionKind,
     SuggestionState,
@@ -136,6 +137,15 @@ def ticking(start: datetime | None = None) -> Callable[[], datetime]:
     first = start or datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
     seconds = count()
     return lambda: first + timedelta(seconds=next(seconds))
+
+
+#: The owner's sights, one for each domain an owner's act may name and one for none
+#: (ADR-0385 §3:3), by name.
+_OWNERS_ACTS: Final[dict[str, Sight]] = {
+    "from-none": Sight.of_owners_act(None),
+    "from-the-owners-domain": Sight.of_owners_act(RecordHome.owners()),
+    "from-the-shared-things": Sight.of_owners_act(RecordHome.shared()),
+}
 
 
 class PersonModelStoreFactory(Protocol):
@@ -1001,6 +1011,91 @@ class PersonModelStoreContract:
         model = await bound.read(OWNER_PERSON_ID)
         assert model is not None
         assert [one.memory_id for one in model.pins] == [MEMORY]
+
+    # --- a store bound to the owner's sight (ADR-0385 §3:3 to §3:5) ----------------
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    @pytest.mark.parametrize("act", list(_OWNERS_ACTS))
+    async def test_the_owners_sight_is_withheld_for_in_either_mode_and_counts_nothing(
+        self, sight_store_factory: SightStoreFactory, act: str, mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:5: bound to the owner's sight, a store withholds in either mode.
+
+        §9:3's obligation, with the bound store built in ``mode``: it answers every call
+        in the battery as the same store holding only what the owner's sight sees, in
+        the counting build too, and writes no ``sight_counted`` event (ADR-0383 §11:1).
+        """
+        sight = _OWNERS_ACTS[act]
+        bound_store, _ = await self._sight_pair(sight_store_factory, mode)
+        _, holding_only = await self._sight_pair(sight_store_factory, SightMode.WITHHOLD)
+        if not sight.sees(RecordHome.owners()):
+            await holding_only.clear()
+        with structlog.testing.capture_logs() as events:
+            await assert_answers_alike(bound_store.bound(sight), holding_only, _sight_battery())
+        assert not [event for event in events if event["event"] == "sight_counted"]
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_holds_the_domain_it_names_and_from_none_both(
+        self, sight_store_factory: SightStoreFactory, mode: SightMode
+    ) -> None:
+        """ADR-0385 §3:3, §3:4: the owner's model from none and from the owner's domain.
+
+        The store holds the owner's model alone, whose home is the owner's domain
+        (ADR-0383 §5:2), so the sight from the shared things holds nothing of it.
+        """
+        store, _ = await self._sight_pair(sight_store_factory, mode)
+        everything = await store.export()
+        assert everything.persons
+        for act in ("from-none", "from-the-owners-domain"):
+            assert await store.bound(_OWNERS_ACTS[act]).export() == everything, act
+        shared = store.bound(_OWNERS_ACTS["from-the-shared-things"])
+        exported = await shared.export()
+        assert exported == type(exported)()
+        assert await shared.read(OWNER_PERSON_ID) is None
+
+    @pytest.mark.parametrize("mode", list(SightMode))
+    async def test_the_owners_sight_refuses_a_write_naming_a_person_it_does_not_see(
+        self, sight_store_factory: SightStoreFactory, mode: SightMode
+    ) -> None:
+        """ADR-0383 §7:5, §8:2 for the owner's sight, in either mode.
+
+        From the shared things, a write naming the owner is ``unknown_person``, as for a
+        person never held, and ``clear`` erases nothing; nothing is written.
+        """
+        store, _ = await self._sight_pair(sight_store_factory, mode)
+        bound = store.bound(_OWNERS_ACTS["from-the-shared-things"])
+        before = await store.export()
+        refused = [
+            await bound.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Elsewhere", act=PANEL),
+            await bound.add_pin(OWNER_PERSON_ID, "memory:later", act=PANEL),
+            await bound.add_style_mark(OWNER_PERSON_ID, "memory:later"),
+        ]
+        assert [(one.kind, one.refusal) for one in refused] == [
+            (REFUSED, PersonModelRefusal.UNKNOWN_PERSON)
+        ] * len(refused)
+        assert await bound.clear() == 0
+        assert await store.export() == before
+
+    async def test_a_counting_store_bound_to_a_runs_sight_still_counts(
+        self, sight_store_factory: SightStoreFactory
+    ) -> None:
+        """ADR-0383 §7:10, §11:1 stand for every other reader of a store built to count.
+
+        Bound to the owner's sight, the store withholds and counts nothing; the same
+        store bound to a run's sight answers as unbound and counts, as before.
+        """
+        store, _ = await self._sight_pair(sight_store_factory, SightMode.COUNT)
+        with structlog.testing.capture_logs() as events:
+            withheld = await store.bound(_OWNERS_ACTS["from-the-shared-things"]).read(
+                OWNER_PERSON_ID
+            )
+            counted_read = await store.bound(SIGHTS["run-over-the-shared-things"]).read(
+                OWNER_PERSON_ID
+            )
+        counted = [event for event in events if event["event"] == "sight_counted"]
+        assert withheld is None
+        assert counted_read is not None
+        assert [(event["member"], event["reader"]) for event in counted] == [("read", "run")]
 
 
 def _numbered() -> Callable[[str], str]:

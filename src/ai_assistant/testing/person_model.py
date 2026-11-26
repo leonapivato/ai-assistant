@@ -249,12 +249,17 @@ class FakePersonModelStore:
         A shallow copy sharing every piece of this fake's state, with the sight set: the
         meet of the one it was already bound to, where it was (§6:6).
 
+        The mode it answers in is :meth:`~ai_assistant.core.types.Sight.answered_in`'s:
+        withholding for the owner's sight whatever mode this store was built in, with no
+        count event (ADR-0385 §3:5), and the mode it was built in for every other.
+
         Raises:
             ValueError: If this fake is already bound to a sight of another reader or
                 activation.
         """
         view = copy.copy(self)
         view._sight = sight if self._sight is None else self._sight.meet(sight)
+        view._sight_mode = view._sight.answered_in(self._sight_mode)
         return view
 
     def _sees(self, person_id: str) -> bool:

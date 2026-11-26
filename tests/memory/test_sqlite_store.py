@@ -72,6 +72,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     Provenance,
     RecordHome,
+    Sight,
     SightMode,
     SituationLabel,
     Validity,
@@ -3896,6 +3897,30 @@ async def test_a_row_altered_outside_the_store_is_never_read_wider_than_it_is(
     unbound = await store.get("m-columns-moved")
     assert unbound is not None
     assert unbound.home == RecordHome.owners()
+
+
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_owners_sight_holds_no_record_with_no_home_in_either_mode(
+    make_store: Callable[..., SqliteMemoryStore], mode: SightMode
+) -> None:
+    """ADR-0385 §3:3, §3:5 with ADR-0383 §5:3: the owner's sight from none sees no such record.
+
+    Bound to the owner's sight, in either mode, a record whose home columns were cleared
+    outside the store is given back by no read, a delete naming it answers ``False``,
+    and no count event is written; the shared record beside it is held.
+    """
+    store = make_store(sight_mode=mode)
+    await store.add(memory("m-no-home", "no home"))
+    await store.add(_shared(memory("m-kept", "kept")))
+    store._conn.execute(
+        "UPDATE records SET home_kind = NULL, home_id = NULL WHERE id = ?", ("m-no-home",)
+    )
+    bound = store.bound(Sight.of_owners_act(None))
+    with structlog.testing.capture_logs() as events:
+        assert await bound.get("m-no-home") is None
+        assert [record.id for record in await bound.export()] == ["m-kept"]
+        assert await bound.delete("m-no-home") is False
+    assert not [event for event in events if event["event"] == "sight_counted"]
 
 
 @pytest.mark.parametrize("encoding", ["UTF-16le", "UTF-16be"])

@@ -27,6 +27,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from notification_contract import (
     NOW,
     MutableClock,
@@ -47,6 +48,7 @@ from ai_assistant.core.types import (
     NotificationReach,
     QuietWindow,
     RecordHome,
+    Sight,
     SightMode,
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
@@ -1217,5 +1219,42 @@ async def test_a_record_whose_home_the_store_cannot_read_is_held_by_no_sight(
         assert again.kind is not NotificationDispositionKind.DROP, again
         with pytest.raises(NotificationStoreError):
             await store.get(odd)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("mode", list(SightMode))
+async def test_the_owners_sight_holds_no_record_with_no_home_in_either_mode(
+    mode: SightMode,
+) -> None:
+    """ADR-0385 §3:3, §3:5 with ADR-0383 §5:3: the owner's sight from none sees no such record.
+
+    Bound to the owner's sight, in either mode, a record whose home columns were cleared
+    outside the store is given back by no read, a write naming it answers as for a record
+    never written, and no count event is written; the shared record beside it is held.
+    """
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=":memory:", now=_fixed_now, sight_mode=mode
+    )
+    policy = DefaultNotificationPolicy()
+    try:
+        odd = (
+            await store.admit(candidate(key="k1"), home=RecordHome.owners(), policy=policy)
+        ).notification_id
+        kept = (
+            await store.admit(candidate(key="k2"), home=RecordHome.shared(), policy=policy)
+        ).notification_id
+        assert odd is not None
+        assert kept is not None
+        store._conn.execute(
+            "UPDATE notifications SET home_kind = NULL, home_id = NULL WHERE id = ?", (odd,)
+        )
+        bound = store.bound(Sight.of_owners_act(None))
+        with structlog.testing.capture_logs() as events:
+            assert await bound.get(odd) is None
+            assert [one.id for one in await bound.export()] == [kept]
+            assert await bound.dismiss(odd) is False
+            assert await bound.delete(odd) is False
+        assert not [event for event in events if event["event"] == "sight_counted"]
     finally:
         store.close()
