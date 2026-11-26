@@ -30,6 +30,7 @@ ADR-0328 keeps stays as it stood, read through §12 (§11:9): where a rule named
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemoryUpdateProposal,
         MemoryWriterName,
+        Sight,
         TrackRecordEntry,
     )
     from ai_assistant.memory._reconciler import ConflictReconciler, ReconcilerReport
@@ -1357,6 +1359,25 @@ class MemoryIngestor:
         # `decide` within one ingestor and keeps the common case off the retry path.
         self._lock = asyncio.Lock()
 
+    def bound(self, sight: Sight) -> MemoryIngestor:
+        """This writer, bound to ``sight`` (ADR-0383 §7:1, §7:6); the Protocol states the rest.
+
+        A shallow copy holding its store bound to ``sight`` — the meet of the store's own
+        sight, where it was bound already (§6:6) — and sharing everything else by
+        reference: the policy, the reconciler, the clocks, the id factory, the label
+        bounds and embedder, the trace emitter and the lock, so a bound writer and the
+        writer it was bound from serialise their read-modify-writes as one writer does.
+        Every read the writer makes for a write is of ``self._store``, so binding it is
+        the whole of binding them all.
+
+        Raises:
+            ValueError: If the store is already bound to a sight of another reader or
+                activation.
+        """
+        view = copy.copy(self)
+        view._store = self._store.bound(sight)
+        return view
+
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         """Detect conflicts, apply the policy, and persist the outcome (ADR-0328 §11:4).
 
@@ -1714,7 +1735,7 @@ class MemoryIngestor:
         observed = observed.model_copy(update={"proposed": proposed})
         if observed.placement is not None:
             return await self._ingest_placed(observed, refused_labels, held)
-        retiring = self._retiring(observed, held)
+        retiring = self._retiring(observed, held, await self._held_across_homes(observed))
         conflicts = await self._detect_conflicts(
             proposed, withheld=None if retiring is None else retiring.retirement.memory.id
         )
@@ -1875,20 +1896,48 @@ class MemoryIngestor:
             folded=placed.folded,
         )
 
+    async def _held_across_homes(self, proposal: MemoryUpdateProposal) -> tuple[Memory, ...]:
+        """The retired memory as the store holds it, where its copy is of another home.
+
+        ADR-0383 §4:7 refuses a proposal retiring a memory of another home, and §4:8 has
+        that refusal be the one a memory never written gets where the store does not
+        hold it: through a bound writer, one its sight does not see (§7:6). So the
+        memory the caller's copy names is read from the store before it is judged, and
+        only where that copy is of another home than the proposal's memory, the one case
+        the check could refuse. A memory the store does not hold is not judged here: its
+        write is refused as one to a memory the store does not hold (§7:5), as a
+        retirement of one never written is.
+
+        Returns:
+            The retired memory as the store holds it, or nothing.
+        """
+        retirement = proposal.retiring
+        if retirement is None or retirement.memory.home == proposal.proposed.home:
+            return ()
+        found = await self._store.get_history([retirement.memory.id])
+        return tuple(found.values())
+
     def _retiring(
-        self, proposal: MemoryUpdateProposal, held: Mapping[str, MemoryRecord]
+        self,
+        proposal: MemoryUpdateProposal,
+        held: Mapping[str, MemoryRecord],
+        across_homes: Sequence[Memory],
     ) -> _Retiring | None:
         """Refuse what the observer's admission rules forbid, and check the retirement.
 
         Before any ruling and with nothing written: an observer's inference the
         proposal's memory carries that ADR-0329 §9:7 forbids, or dates other than at
-        its episode; and a retiring operation §12:4 or §12:5 refuses, or that ADR-0328
-        §5 or §6:5 refuses on the retired memory as read — checked by applying it, at
-        the instant its write will carry, naming the new memory as an ``ACCEPT`` would.
+        its episode; a retiring operation on a memory of another home the store holds
+        (ADR-0383 §4:7); and a retiring operation §12:4 or §12:5 refuses, or that
+        ADR-0328 §5 or §6:5 refuses on the retired memory as read — checked by applying
+        it, at the instant its write will carry, naming the new memory as an ``ACCEPT``
+        would.
 
         Args:
             proposal: The proposal, as handed to ``ingest``.
             held: The episodes its supports point at, as the store holds them.
+            across_homes: The retired memory as the store holds it, where the
+                proposal's copy is of another home (:meth:`_held_across_homes`).
 
         Returns:
             The checked retirement, or ``None`` where the proposal carries none.
@@ -1908,7 +1957,7 @@ class MemoryIngestor:
         retirement = proposal.retiring
         if retirement is None:
             return None
-        refuse_other_home_targets(proposed, [retirement.memory], what="retire")
+        refuse_other_home_targets(proposed, across_homes, what="retire")
         cited = proposed.support_at(retirement.cites)
         if cited is None:  # pragma: no cover - retirement_fault found it among the backing
             msg = f"refusing to ingest {proposed.id!r}: its retirement cites no support of it"
