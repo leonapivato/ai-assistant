@@ -6,8 +6,8 @@
   (acceptance [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
   [#3711](https://github.com/leonapivato/ai-assistant/issues/3711)). It settles what the reads that
   join device rows to records of a home answer an owner's act: which device rows a conversation
-  store bound to the owner's sight holds (§2), a conversation's deletion once its row is dropped
-  (§3), what stays as it is (§4), and what each read then answers (§5). §6 records what it amends,
+  store bound to the owner's sight holds (§2), the home of a conversation's deletion, which
+  outlives its row (§3), what stays as it is (§4), and what each read then answers (§5). §6 records what it amends,
   §7 what building it needs.
 - Authorization: the coordinator's proposal under the owner's delegation of ratification, and
   not an owner ruling. The owner's only words here are #3709's record: on 2026-11-26, "Yes,
@@ -15,12 +15,13 @@
   coordinator assigned 0389, shows the owner the draft, and ratifies it once its reviews are
   green.
 - **Contract-surface decision; a decision only.** It changes no Protocol, type or code. It
-  names a change to `ConversationStore.bound`'s contract and its conformance suite (§7), so it
-  takes the adversarial and the architecture review. Building it is a breaking change under
+  names a change to `ConversationStore.bound`'s contract, its conformance suite and the conversation
+  store's format (§7), so it takes the adversarial and the architecture review. Building it is a breaking change under
   golden rule 5.
 - **Partially supersedes**
   [ADR-0383](0383-each-record-carries-its-home-and-every-read-a-work-a-producer-or-a-run-makes-is-of-a-store-bound-to-one-sight-which-answers-as-though-it-held-only-what-that-sight-sees.md)
-  (§3:3, in its reach; §7:2 and §9:3, each in the addition alone), as §6 records.
+  (§3's conversations row, in the addition alone; §3:3, in its reach; §7:2 and §9:3, each in the
+  addition alone), as §6 records.
 
 ## Context
 
@@ -62,7 +63,9 @@ reference, such as §2:1, is to this decision's own clauses.
 We will have a conversation store bound to the owner's sight hold "my devices" and the device rows
 of each conversation it holds, as the unbound store holds them, so a device's listing, the chat's
 changes and the change stream's pages read through it and give back what the owner reads today;
-a store bound to any other sight holds no device row, as now.
+a store bound to any other sight holds no device row, as now; and have a conversation's deletion
+keep its home, so every bound store gives it back by that home after the conversation's row is
+gone.
 
 ### 1. Status and scope
 
@@ -70,7 +73,8 @@ a store bound to any other sight holds no device row, as now.
 > rule 5, ADR-0015 §5).
 
 > **Normative.** This decision rules the hub ADR-0383 §1:2 rules, and only the reads above. It
-> changes nothing a store bound to a work's, a producer's or a run's sight answers.
+> changes nothing a store bound to a work's, a producer's or a run's sight answers, save §3:2's
+> deletion of a conversation whose row is dropped.
 
 ### 2. The device rows the owner's sight holds
 
@@ -81,8 +85,8 @@ a store bound to any other sight holds no device row, as now.
 
 > **Normative.** Of the change stream it holds every change to "my devices"; a conversation's
 > start, with its devices, and each change setting its devices, where it holds the conversation; a
-> message's addition or deletion where it holds the message; and a conversation's deletion where it
-> holds the conversation, or, the conversation's row being dropped, as §3 says.
+> message's addition or deletion where it holds the message; and a conversation's deletion where its
+> sight sees the deletion's home (§3:2), with the devices the deletion records.
 
 > **Normative.** It answers every member over what §2:1 and §2:2 have it hold, as ADR-0383 §7:2 has
 > a bound store answer over the records it holds, the sight applied before it orders, limits,
@@ -106,8 +110,29 @@ both from one store, as the owner reads them now.
 
 ### 3. A conversation's deletion once its row is dropped
 
-**Not yet written.** The choice is laid out for a ruling on the pull request; this section is
-written once it is made, and §6 and §7 then gain what it amends and needs.
+> **Normative.** A conversation's deletion in the change stream carries its conversation's home,
+> written in the step that records the deletion, by a stamp and by a reclaim alike, and never
+> changed (ADR-0383 §3:2, §4:6). It is stored in the conversation store's file alone:
+> `ConversationDeletedChange` gains no field, and nothing on the wire moves.
+
+> **Normative.** A bound store gives back a conversation's deletion where its sight sees the
+> deletion's home, whether or not the conversation's row still stands, and withholds it where its
+> sight does not; no bound store reads the home of a deletion from the conversation's row.
+
+> **Normative.** The upgrade that adds the home writes the owner's domain into every deletion the
+> file holds, whether or not its conversation's row still stands, as ADR-0383 §5:1 writes it into
+> every conversation, and no other change row gains a home: a start's, a message's and a set's are
+> read as §2:2 and ADR-0383 §3:3 have them.
+
+> **Normative.** A stored deletion with no home, or with one the store cannot read, is held by no
+> bound store (ADR-0383 §5:3).
+
+Without §3:1, a device that missed a deletion while the conversation's row stood, offline past the
+grace or after any reclaim, would list the conversation for good, against ADR-0298 §7:5; and a
+deletion given to the owner whatever its home would name another person's dropped conversation to
+the owner once another person is admitted. The home is stored whole on the same ground as ADR-0383
+§2:2: naming another person later changes no stored shape. Every deletion row a file holds today is
+the owner's, so the upgrade says so truthfully.
 
 ### 4. What stays as it is
 
@@ -142,8 +167,8 @@ written once it is made, and §6 and §7 then gain what it amends and needs.
 
 In this milestone every conversation and message is the owner's or the shared things' (ADR-0383
 §2:3, §5:1), both of which the owner's sight from none sees, so each read gives back what it gives
-back today, save §3's case and a stored record with no home, which is withheld (ADR-0383 §5:3).
-Nothing the owner's devices show changes.
+back today, a conversation's deletion after its row is dropped included (§3), save a stored
+record with no home, which is withheld (ADR-0383 §5:3). Nothing the owner's devices show changes.
 
 ### 6. Relationship to earlier decisions
 
@@ -152,16 +177,22 @@ Nothing the owner's devices show changes.
 > ADR-0383 §7:2 and §9:3, each in the addition alone: what such a store holds, and the store its
 > answers are compared with, include those device rows. Every other clause stands.
 
+> **Normative.** This decision partially supersedes ADR-0383 §3's table, its conversations row, in
+> the addition alone: a conversation's deletion in the change stream also carries one, its
+> conversation's, in the store's file (§3:1). Every other row stands.
+
 > **Normative.** This numbered draft records its replacements on ADR-0383's status line and in a
 > dated header note there, atomically with this ADR under ADR-0070 and ADR-0082, preserving its
 > ratified body. They take effect on its ratification.
 
 | Clause | How it stands |
 | --- | --- |
-| ADR-0383 §5:3, §7:8, §8:5, §10:5 | Stand (§4:3, §4:4, §2:4) |
+| ADR-0383 §5:1, §5:3, §7:8, §8:5, §10:5 | Stand (§3:3, §3:4, §4:3, §4:4, §2:4) |
+| ADR-0383 §5:4 | Stands: it binds the `core` models a home is a field of, and §3:1 adds none |
+| ADR-0326 §4:1, §5:3 | Bind §3:3's upgrade |
 | ADR-0385 §3:2, §3:5, §5:3, §6:4, §6:6 | Stand (§4) |
 | ADR-0385 §4:1 | Stands: `chat_changes` gives back records of a home and is a seeing member it binds, though §4's table of the members of its day leaves it out |
-| ADR-0298 §5, §7:4, §7:5; ADR-0296 §4:5 to §4:8 | Stand, read over what §2 has the store hold |
+| ADR-0298 §5, §7:4, §7:5; ADR-0296 §4:5 to §4:8 | Stand, read over what §2 and §3 have the store hold |
 
 ### 7. What building it needs
 
@@ -173,12 +204,27 @@ Lane B10g builds it.
   `my_devices` as unbound; `conversation_devices` as unbound for a conversation it holds and `None`
   for one it does not; `device_conversations`, `changes` and `device_changes` each equal to the
   same store holding only what §2:1 and §2:2 name, pages and snapshots included. The cases for the
-  other sights stand.
+  other sights stand. For every sight, it gains: a stamped conversation's deletion given back where
+  the sight sees its home and withheld where it does not, both before and after `drop_if_eligible`
+  removes the row; the same for a reclaimed conversation's deletion, which the reclaim records and
+  drops in one step (a store built with a retention); and, bound to the owner's sight, that
+  deletion reaching through `device_changes` every device that ever read the conversation, after
+  the drop.
 - **`core/types.py`:** nothing owed. `Sight.reader` already tells the owner's sight
   (`SightReader.OWNERS_ACT`).
 - **Stores:** `SqliteConversationStore` and `FakeConversationStore` alike, in `my_devices`,
   `conversation_devices`, `device_conversations`, `device_changes` and the change stream's
-  condition and start rows.
+  condition and start rows. Both write the conversation's home on its deletion, in
+  `stamp_deleted` and in `drop_if_eligible`'s reclaim, and read a deletion's home from it, for
+  withholding and for ADR-0383 §11:1's count alike.
+- **Format:** `chat_changes` gains `home_kind` and `home_id`, nullable as SQLite adds a column,
+  set on a `conversation_deleted` row alone. `CONVERSATION_RECORD_FORMAT` advances 15 → 16, with
+  ADR-0326 §4:1's upgrade: from 15, add the two columns where they are missing, a fresh file
+  included, so there is one shape; write the owner's domain into every `conversation_deleted` row;
+  leave every other byte. A build that serves 15 refuses a file at 16 (ADR-0326 §5:3). An upgrade
+  test opens a file at 15 holding a deletion with its row standing and one with it dropped, and
+  reads both as the owner's; another holds a deletion with no home after the upgrade and finds it
+  held by no bound store.
 - **Orchestration:** the engine's `_recent_conversations` for a device and `_chat_changes` for both
   callers read through the store bound to the owner's sight from none, the device's page through
   `device_checks.device_changes` over it; `ChangeStream._page` and `_read_conversations` read
@@ -186,7 +232,9 @@ Lane B10g builds it.
   take that store as B10e's other acts do, and leave `_KEPT_UNBOUND`. `ChangeStream` and
   `ConversationLifecycle` leave ADR-0383 §9:1's list for its named exemptions, and `_LANES` loses
   B10g.
-- **Wire and formats:** none for §2, §4 and §5.
+- **Wire:** none. `ConversationDeletedChange`, `ChatChanges`, `DeviceChanges` and
+  `DeviceConversation` keep their shapes, `ConversationExport` holds no change, and
+  `PROTOCOL_VERSION` stays.
 
 ## Consequences
 
@@ -195,6 +243,8 @@ Lane B10g builds it.
 - No read an owner's act makes of the conversation store is unbound but the device checks and the
   writes and sweeps the merged decisions name.
 - A work, a producer and a run still see no device row.
+- A deleted conversation leaves every device that read it, whenever the device catches up, and the
+  conversation store's format moves once for it.
 - **Revisit** when a second person or a group is admitted: whose a device is, and what its rows
   then show the owner of another person's conversations.
 
@@ -205,7 +255,10 @@ Lane B10g builds it.
   `device_changes` cannot be filtered from outside the store.
 - **Leave the reads unbound under ADR-0385 §3:2.** Set aside: they give back conversations and
   messages, which have a home, of every home, against ADR-0385 §4:1.
-- **Give device rows the owner's home.** Set aside: it moves the format and decides milestone 5's
-  question of whose a device is.
+- **Give device rows the owner's home.** Set aside: it moves the format for every set of devices,
+  and decides, before another person is admitted, whose a device is.
+- **A dropped conversation's deletion given to the owner's sight whatever its home, or to no
+  sight.** Set aside (§3): the first would name another person's conversation to the owner once
+  another person is admitted; the second leaves a deleted conversation listed on a device for good.
 - **Hold device rows for every sight.** Set aside: a work would read devices, which ADR-0383 §3
   keeps from every reader.
