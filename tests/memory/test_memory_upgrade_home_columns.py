@@ -309,3 +309,19 @@ async def test_an_older_build_refuses_the_upgraded_file(legacy: Path) -> None:
 
     with pytest.raises(IncompatibleStateError):
         inspect_existing(str(legacy), accepted=MEMORY_RECORD_FORMATS - {MEMORY_RECORD_FORMAT})
+
+
+async def test_rows_at_a_rowid_of_zero_or_below_are_filled_too(legacy: Path) -> None:
+    """The fill pages from the lowest ``rowid`` there is, not from zero."""
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("UPDATE records SET rowid = -5 WHERE id = 'mem-bare'")
+        conn.execute("UPDATE records SET rowid = 0 WHERE id = 'mem-shared'")
+
+    store = _open(legacy)
+    try:
+        assert _homes(legacy)["mem-bare"] == _OWNERS
+        assert _homes(legacy)["mem-shared"] == ("shared", None)
+        given = await store.bound(SIGHTS["run-over-the-shared-things"]).export()
+        assert [record.id for record in given] == ["mem-shared"]
+    finally:
+        store.close()
