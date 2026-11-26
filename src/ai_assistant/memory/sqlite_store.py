@@ -125,6 +125,8 @@ from ai_assistant.memory._sight import (
     count_given,
     count_records,
     made_by_id,
+    read_home,
+    register_home_reader,
     seen_sql,
 )
 from ai_assistant.memory._transactions import transaction
@@ -473,21 +475,6 @@ def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
     )
 
 
-def _home_or_none(stored: object) -> RecordHome | None:
-    """A stored home read back, or ``None`` where there is none or it cannot be read.
-
-    ``stored`` is :data:`STORED_HOME_OBJECT_SQL`'s text, the home object as the record
-    decoder finds it, so validating it reads the home the decoder reads, and fails
-    where the decoder would (ADR-0383 §5:3).
-    """
-    if stored is None:
-        return None
-    try:
-        return RecordHome.model_validate_json(str(stored))
-    except ValidationError:
-        return None
-
-
 class SqliteMemoryStore:
     """A persistent, semantically-searchable ``MemoryStore``.
 
@@ -501,11 +488,12 @@ class SqliteMemoryStore:
     expression reads the home from the row's JSON: no column, index or format label
     is added for it.
 
-    Withholding reads each row's home as the record decoder reads it
-    (:data:`~ai_assistant.memory._sight.STORED_HOME_SQL`), so the statement and the
-    predicate over the decoded record agree on every row. Counting classifies each
+    Withholding reads each row's home by the record decoder itself, which the
+    connection carries as a SQL function
+    (:func:`~ai_assistant.memory._sight.register_home_reader`), so the statement and
+    the predicate over the decoded record agree on every row. Counting classifies each
     record a read gave back by its decoded home, and :meth:`channel_episode_ids`, which
-    decodes nothing, by validating the home object the decoder would find
+    decodes nothing, by the same reader over the home object the decoder would find
     (:data:`~ai_assistant.memory._sight.STORED_HOME_OBJECT_SQL`).
     """
 
@@ -611,6 +599,9 @@ class SqliteMemoryStore:
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
+            # The record decoder's reading of a home, as a SQL function the sight's
+            # expression calls (ADR-0383 §7:3).
+            register_home_reader(conn)
             # Serialize format inspection with initialization by other openers.
             # BEGIN acquires the lock without modifying database pages. Refuse
             # old state before chmod or schema writes, then restrict permissions
@@ -3469,7 +3460,7 @@ class SqliteMemoryStore:
             count_given(
                 sight,
                 "channel_episode_ids",
-                ((_home_or_none(home), made_by_id(kind, rid)) for _, rid, kind, home in rows),
+                ((read_home(home), made_by_id(kind, rid)) for _, rid, kind, home in rows),
             )
         return tuple(ChannelEpisodeId(number=number, episode_id=rid) for number, rid, _, _ in rows)
 

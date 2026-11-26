@@ -12,13 +12,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 import structlog
+from pydantic import ValidationError
 
-from ai_assistant.core.types import EpisodicMemory, MemoryKind
+from ai_assistant.core.types import EpisodicMemory, MemoryKind, RecordHome
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Iterable
 
-    from ai_assistant.core.types import MemoryRecord, RecordHome, Sight
+    from ai_assistant.core.types import MemoryRecord, Sight
 
 _log = structlog.get_logger(__name__)
 
@@ -82,44 +84,61 @@ def count_records(sight: Sight, member: str, records: Iterable[MemoryRecord]) ->
 #: The JSON text of a ``records`` row's home object as the record decoder finds it,
 #: or ``NULL`` where it finds none: the **last** top-level ``home`` key, as the decoder
 #: keeps the last of a key given twice, and only where that is an object. The text is
-#: the object's own, escapes kept, so validating it as a ``RecordHome`` reads exactly
-#: the home the decoder would, and fails exactly where the decoder would fail on it
-#: (ADR-0383 §5:3). Invalid JSON has no home.
+#: the object's own, escapes and repeated keys kept, so validating it as a
+#: ``RecordHome`` reads exactly the home the decoder would, and fails exactly where the
+#: decoder would fail on it (ADR-0383 §5:3). Invalid JSON has no home.
 STORED_HOME_OBJECT_SQL: Final = (
     "(SELECT CASE WHEN h.type = 'object' THEN h.value END "
     "FROM json_each(CASE WHEN json_valid(data) THEN data END) h "
     "WHERE h.key = 'home' ORDER BY h.id DESC LIMIT 1)"
 )
 
-#: That home object, read in SQL as the record decoder reads it and rendered in the
-#: compact form ``RecordHome.model_dump_json()`` gives, or ``NULL`` where the decoder
-#: could read no home there (ADR-0383 §5:3, §7:3). Its keys are ``kind`` and ``id`` and
-#: no other, in any order, the last of each where one is given twice; ``kind`` is a
-#: string, and ``id`` a string, ``null`` or absent (read as ``null``). A value of any
-#: other type, or another key, renders nothing. So the rendering equals a valid home's
-#: text exactly where the decoder reads that home, and is compared in SQL alone: it
-#: never reaches the driver, which a lone surrogate's escape would make undecodable.
-STORED_HOME_SQL: Final = (
-    "(SELECT CASE WHEN NOT EXISTS ("  # noqa: S608 — module literals alone
-    "SELECT 1 FROM json_each(o.home) e WHERE e.key NOT IN ('kind', 'id')) "
-    "AND (SELECT e.type FROM json_each(o.home) e WHERE e.key = 'kind' "
-    "ORDER BY e.id DESC LIMIT 1) = 'text' "
-    "AND coalesce((SELECT e.type FROM json_each(o.home) e WHERE e.key = 'id' "
-    "ORDER BY e.id DESC LIMIT 1), 'null') IN ('text', 'null') "
-    "THEN json_object("
-    "'kind', (SELECT e.value FROM json_each(o.home) e WHERE e.key = 'kind' "
-    "ORDER BY e.id DESC LIMIT 1), "
-    "'id', (SELECT e.value FROM json_each(o.home) e WHERE e.key = 'id' "
-    "ORDER BY e.id DESC LIMIT 1)) END "
-    f"FROM (SELECT {STORED_HOME_OBJECT_SQL} AS home) o)"
-)
+#: The SQL function :func:`register_home_reader` gives a connection.
+HOME_READER: Final = "assistant_record_home"
+
+#: A row's home as the record decoder reads it, rendered as
+#: ``RecordHome.model_dump_json()`` renders it, or ``NULL`` where the decoder reads none.
+STORED_HOME_SQL: Final = f"{HOME_READER}({STORED_HOME_OBJECT_SQL})"
+
+
+def read_home(stored: object) -> RecordHome | None:
+    """The home the record decoder reads in a stored home object, or ``None``.
+
+    The decoder itself (``RecordHome``'s validation) over the object's own JSON text,
+    so nothing re-implements how it reads a repeated key, a key order, a value's type
+    or an escape (ADR-0383 §5:3, §7:3). ``None`` where there is no object or the
+    decoder refuses it.
+    """
+    if not isinstance(stored, str):
+        return None
+    try:
+        return RecordHome.model_validate_json(stored)
+    except ValidationError:
+        return None
+
+
+def _rendered_home(stored: object) -> str | None:
+    home = read_home(stored)
+    return None if home is None else home.model_dump_json()
+
+
+def register_home_reader(conn: sqlite3.Connection) -> None:
+    """Give ``conn`` :data:`HOME_READER`, the decoder's reading as a SQL function.
+
+    Deterministic, so SQLite may evaluate it once per distinct argument; a statement
+    applies a sight by comparing its value with the homes the sight sees, and that is
+    the decoder's answer on every row, so the statement and the predicate over the
+    decoded record agree by construction (§7:3).
+    """
+    conn.create_function(HOME_READER, 1, _rendered_home, deterministic=True)
 
 
 def seen_sql(sight: Sight) -> tuple[str, list[object]]:
     """The persistent store's expression of ``sight`` over a ``records`` row (§7:3).
 
-    A row is seen where its home, read as the record decoder reads it
-    (:data:`STORED_HOME_SQL`), is one every bound sees
+    A row is seen where its home, read by the record decoder itself
+    (:data:`STORED_HOME_SQL`, on a connection :func:`register_home_reader` prepared),
+    is one every bound sees
     (:attr:`~ai_assistant.core.types.Sight.homes_seen`), or where it is the episode of
     the sight's activation (§7:4). A row with no home the decoder could read is seen by
     no sight (§5:3).
