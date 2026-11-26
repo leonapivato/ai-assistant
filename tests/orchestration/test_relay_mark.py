@@ -261,7 +261,10 @@ def test_a_reminder_coming_due_carries_no_authority() -> None:
         ChannelIdentity(channel_type="task_scheduler", instance_id="schedule"), senders=()
     ):
         working = path.begin_task(
-            activation_id="a-3", trigger=_recorded_trigger(ASSISTANTS_WORDS), lineage=()
+            activation_id="a-3",
+            trigger=_recorded_trigger(ASSISTANTS_WORDS),
+            lineage=(),
+            owner_records=True,
         )
 
     assert _read(working) == (False, False, False), "the assistant's, not outside (§5:2)"

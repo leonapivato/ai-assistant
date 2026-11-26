@@ -261,6 +261,7 @@ from ai_assistant.orchestration.device_checks import DeviceChecks, device_change
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
     TurnSupply,
+    admits_owner_placed,
     notification_is_speakable,
 )
 from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page, without_open_episodes
@@ -7210,16 +7211,15 @@ class Engine:
             modality=Modality.TEXT,
             context=_EMPTY_CHANNEL_CONTEXT,
         )
+        # ADR-0323 §9:6: the line is private, declared by setting it up, so a record
+        # placed for the owner alone may be shown (ADR-0307 §6:4).
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         working = _TurnPass(
             utterance=taken.text,
             requested=None,
             context=_EMPTY_CHANNEL_CONTEXT,
             deadline=(asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()),
-            # ADR-0323 §9:6: the line is private, declared by setting it up, so a
-            # record placed for the owner alone may be shown (ADR-0307 §6:4).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
+            supply=supply,
             transcript=window,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
@@ -7230,7 +7230,10 @@ class Engine:
                 target=target,
                 description=TELEGRAM.description,
                 trigger=trigger,
-                owner_records=True,
+                # ADR-0383 §10:3: whether the audience may be shown what is placed for
+                # the owner alone, made from the pass's posture; whose records it reads
+                # is the sight's alone.
+                owner_records=admits_owner_placed(supply),
             ),
             input=resolved,
             activation=state,
@@ -7299,16 +7302,15 @@ class Engine:
                 senders=trigger.senders if users else (),
                 facts=state.work_facts,
             )
+        # The conversation's own devices (ADR-0293 §7:4): a bounded audience, so a record
+        # placed for the owner alone may be shown (ADR-0307 §6:4).
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         working = _TurnPass(
             utterance=taken.text,
             requested=taken.conversation_id,
             context=_EMPTY_CHANNEL_CONTEXT,
             deadline=(asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()),
-            # The conversation's own devices (ADR-0293 §7:4): a bounded audience, so a
-            # record placed for the owner alone may be shown (ADR-0307 §6:4).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
+            supply=supply,
             transcript=window,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
@@ -7318,7 +7320,8 @@ class Engine:
                 window=window,
                 conversation_id=taken.conversation_id,
                 trigger=trigger,
-                owner_records=True,
+                # ADR-0383 §10:3, as on the line's pass.
+                owner_records=admits_owner_placed(supply),
             ),
             activation=state,
         )
@@ -7378,14 +7381,13 @@ class Engine:
         state = active_state()
         trigger = None if state is None else state.trigger
         activation_id = None if state is None else state.activation_id
+        # ADR-0276 §4: an informational-event pass is of bounded audience, so a record
+        # placed for the owner alone may be shown (ADR-0307 §6:4).
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         event = _EventPass(
             input=resolved,
             deadline=deadline,
-            # ADR-0276 §4: an informational-event pass is of bounded audience, so a
-            # record placed for the owner alone may be shown (ADR-0307 §6:4).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
+            supply=supply,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
             story_links_wired=self._story_links is not None,
@@ -7394,7 +7396,8 @@ class Engine:
                 # (ADR-0275 §2); its rounds still need one to claim under.
                 activation_id=_uuid() if activation_id is None else activation_id,
                 trigger=trigger,
-                owner_records=True,
+                # ADR-0383 §10:3, as on the line's pass.
+                owner_records=admits_owner_placed(supply),
             ),
             activation=state,
         )
@@ -8013,11 +8016,16 @@ class Engine:
                 )
             ),
         )
+        # The approvals are private (§3:2), so a record placed for the owner alone may be
+        # shown (ADR-0307 §6:4).
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         working_phases = phases.begin_approval(
             activation_id=activation_id,
             trigger=trigger,
             context=(context,),
             asked_from=brings.asked,
+            # ADR-0383 §10:3, as on the line's pass.
+            owner_records=admits_owner_placed(supply),
         )
         scheduling = self._approval_scheduling(state, brings.suggests)
         if scheduling is not None:
@@ -8029,11 +8037,7 @@ class Engine:
         event = _TaskPass(
             input=resolved,
             deadline=deadline,
-            # The approvals are private (§3:2), so a record placed for the owner alone may
-            # be shown (ADR-0307 §6:4).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
+            supply=supply,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
             story_links_wired=self._story_links is not None,
@@ -8649,9 +8653,14 @@ class Engine:
                 )
             ),
         )
+        # The schedule is private (§2:4), so a record placed for the owner alone may be
+        # shown (ADR-0307 §6:4).
+        supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
         working_phases = phases.begin_task(
             activation_id=activation_id,
             trigger=trigger,
+            # ADR-0383 §10:3, as on the line's pass.
+            owner_records=admits_owner_placed(supply),
             lineage=tuple(
                 PlaceItem(
                     author=PlaceAuthor.TASK_SCHEDULER,
@@ -8678,11 +8687,7 @@ class Engine:
         event = _TaskPass(
             input=resolved,
             deadline=deadline,
-            # The schedule is private (§2:4), so a record placed for the owner alone may
-            # be shown (ADR-0307 §6:4).
-            supply=BoundedAudienceSupply(
-                speakable_attested_sources=self._speakable_attested_sources
-            ),
+            supply=supply,
             understanding_wired=self._understanding is not None,
             recall_wired=self._recall is not None,
             story_links_wired=self._story_links is not None,
