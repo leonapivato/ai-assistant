@@ -1,0 +1,686 @@
+{
+  "awaiting": [
+    "conv-kept"
+  ],
+  "changes": {
+    "changes": [
+      {
+        "conversation_id": null,
+        "devices": [
+          {
+            "access": "read_write",
+            "device_id": "phone"
+          },
+          {
+            "access": "read",
+            "device_id": "watch"
+          }
+        ],
+        "kind": "devices_changed",
+        "seq": 1
+      },
+      {
+        "conversation_id": "conv-dropped",
+        "kind": "conversation_deleted",
+        "seq": 5
+      },
+      {
+        "conversation_id": "conv-idle",
+        "kind": "conversation_deleted",
+        "seq": 6
+      },
+      {
+        "conversation_id": "conv-kept",
+        "devices": [
+          {
+            "access": "read_write",
+            "device_id": "phone"
+          },
+          {
+            "access": "read",
+            "device_id": "watch"
+          }
+        ],
+        "kind": "conversation_started",
+        "seq": 7
+      },
+      {
+        "conversation_id": "conv-kept",
+        "devices": [
+          {
+            "access": "read",
+            "device_id": "laptop"
+          },
+          {
+            "access": "read_write",
+            "device_id": "phone"
+          },
+          {
+            "access": "read",
+            "device_id": "watch"
+          }
+        ],
+        "kind": "devices_changed",
+        "seq": 8
+      },
+      {
+        "kind": "message_added",
+        "message": {
+          "author": "user",
+          "conversation_id": "conv-kept",
+          "cut_off": false,
+          "device_id": "phone",
+          "home": {
+            "id": "person:owner",
+            "kind": "person"
+          },
+          "message_id": "k-1",
+          "options": [],
+          "position": 1,
+          "replies_to": null,
+          "text": "Is the shop open?",
+          "written_at": "2026-11-26T20:00:00Z"
+        },
+        "seq": 9
+      },
+      {
+        "kind": "message_added",
+        "message": {
+          "author": "assistant",
+          "conversation_id": "conv-kept",
+          "cut_off": false,
+          "device_id": null,
+          "home": {
+            "id": "person:owner",
+            "kind": "person"
+          },
+          "message_id": null,
+          "options": [],
+          "position": 2,
+          "replies_to": null,
+          "text": "Until six.",
+          "written_at": "2026-11-26T20:00:00Z"
+        },
+        "seq": 10
+      },
+      {
+        "conversation_id": "conv-owners-gone",
+        "kind": "conversation_deleted",
+        "seq": 15
+      },
+      {
+        "conversation_id": "conv-shared-gone",
+        "kind": "conversation_deleted",
+        "seq": 16
+      }
+    ],
+    "next_after": 16
+  },
+  "device_changes/laptop": {
+    "changes": [
+      {
+        "change": {
+          "conversation_id": "conv-kept",
+          "devices": [
+            {
+              "access": "read",
+              "device_id": "laptop"
+            },
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "devices_changed",
+          "seq": 8
+        },
+        "snapshot": []
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "user",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": "phone",
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": "k-1",
+            "options": [],
+            "position": 1,
+            "replies_to": null,
+            "text": "Is the shop open?",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 9
+        }
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "assistant",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": null,
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": null,
+            "options": [],
+            "position": 2,
+            "replies_to": null,
+            "text": "Until six.",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 10
+        }
+      }
+    ],
+    "next_after": 16
+  },
+  "device_changes/phone": {
+    "changes": [
+      {
+        "change": {
+          "conversation_id": null,
+          "devices": [
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "devices_changed",
+          "seq": 1
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-dropped",
+          "kind": "conversation_deleted",
+          "seq": 5
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-idle",
+          "kind": "conversation_deleted",
+          "seq": 6
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-kept",
+          "devices": [
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "conversation_started",
+          "seq": 7
+        },
+        "snapshot": []
+      },
+      {
+        "change": {
+          "conversation_id": "conv-kept",
+          "devices": [
+            {
+              "access": "read",
+              "device_id": "laptop"
+            },
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "devices_changed",
+          "seq": 8
+        }
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "user",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": "phone",
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": "k-1",
+            "options": [],
+            "position": 1,
+            "replies_to": null,
+            "text": "Is the shop open?",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 9
+        }
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "assistant",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": null,
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": null,
+            "options": [],
+            "position": 2,
+            "replies_to": null,
+            "text": "Until six.",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 10
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-owners-gone",
+          "kind": "conversation_deleted",
+          "seq": 15
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-shared-gone",
+          "kind": "conversation_deleted",
+          "seq": 16
+        }
+      }
+    ],
+    "next_after": 16
+  },
+  "device_changes/watch": {
+    "changes": [
+      {
+        "change": {
+          "conversation_id": null,
+          "devices": [
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "devices_changed",
+          "seq": 1
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-dropped",
+          "kind": "conversation_deleted",
+          "seq": 5
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-idle",
+          "kind": "conversation_deleted",
+          "seq": 6
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-kept",
+          "devices": [
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "conversation_started",
+          "seq": 7
+        },
+        "snapshot": []
+      },
+      {
+        "change": {
+          "conversation_id": "conv-kept",
+          "devices": [
+            {
+              "access": "read",
+              "device_id": "laptop"
+            },
+            {
+              "access": "read_write",
+              "device_id": "phone"
+            },
+            {
+              "access": "read",
+              "device_id": "watch"
+            }
+          ],
+          "kind": "devices_changed",
+          "seq": 8
+        }
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "user",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": "phone",
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": "k-1",
+            "options": [],
+            "position": 1,
+            "replies_to": null,
+            "text": "Is the shop open?",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 9
+        }
+      },
+      {
+        "change": {
+          "kind": "message_added",
+          "message": {
+            "author": "assistant",
+            "conversation_id": "conv-kept",
+            "cut_off": false,
+            "device_id": null,
+            "home": {
+              "id": "person:owner",
+              "kind": "person"
+            },
+            "message_id": null,
+            "options": [],
+            "position": 2,
+            "replies_to": null,
+            "text": "Until six.",
+            "written_at": "2026-11-26T20:00:00Z"
+          },
+          "seq": 10
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-owners-gone",
+          "kind": "conversation_deleted",
+          "seq": 15
+        }
+      },
+      {
+        "change": {
+          "conversation_id": "conv-shared-gone",
+          "kind": "conversation_deleted",
+          "seq": 16
+        }
+      }
+    ],
+    "next_after": 16
+  },
+  "device_conversations/laptop": [
+    {
+      "access": "read",
+      "conversation": {
+        "deleted_at": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "id": "conv-kept",
+        "last_active_at": "2026-11-26T20:00:00Z",
+        "last_turn_at": null,
+        "started_at": "2026-11-26T20:00:00Z"
+      }
+    }
+  ],
+  "device_conversations/phone": [
+    {
+      "access": "read_write",
+      "conversation": {
+        "deleted_at": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "id": "conv-kept",
+        "last_active_at": "2026-11-26T20:00:00Z",
+        "last_turn_at": null,
+        "started_at": "2026-11-26T20:00:00Z"
+      }
+    }
+  ],
+  "device_conversations/watch": [
+    {
+      "access": "read",
+      "conversation": {
+        "deleted_at": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "id": "conv-kept",
+        "last_active_at": "2026-11-26T20:00:00Z",
+        "last_turn_at": null,
+        "started_at": "2026-11-26T20:00:00Z"
+      }
+    }
+  ],
+  "devices/conv-dropped": null,
+  "devices/conv-idle": null,
+  "devices/conv-kept": [
+    {
+      "access": "read",
+      "device_id": "laptop"
+    },
+    {
+      "access": "read_write",
+      "device_id": "phone"
+    },
+    {
+      "access": "read",
+      "device_id": "watch"
+    }
+  ],
+  "devices/conv-owners-gone": null,
+  "devices/conv-shared-gone": null,
+  "export": {
+    "conversations": [
+      {
+        "deleted_at": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "id": "conv-kept",
+        "last_active_at": "2026-11-26T20:00:00Z",
+        "last_turn_at": null,
+        "started_at": "2026-11-26T20:00:00Z"
+      }
+    ],
+    "exported_at": "2026-11-26T22:00:00Z",
+    "messages": [
+      {
+        "author": "user",
+        "conversation_id": "conv-kept",
+        "cut_off": false,
+        "device_id": "phone",
+        "effect_id": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "message_id": "k-1",
+        "options": [],
+        "position": 1,
+        "replies_to": null,
+        "text": "Is the shop open?",
+        "written_at": "2026-11-26T20:00:00Z"
+      },
+      {
+        "author": "assistant",
+        "conversation_id": "conv-kept",
+        "cut_off": false,
+        "device_id": null,
+        "effect_id": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "message_id": null,
+        "options": [],
+        "position": 2,
+        "replies_to": null,
+        "text": "Until six.",
+        "written_at": "2026-11-26T20:00:00Z"
+      }
+    ],
+    "schema_version": 8
+  },
+  "get/conv-dropped": null,
+  "get/conv-idle": null,
+  "get/conv-kept": {
+    "deleted_at": null,
+    "home": {
+      "id": "person:owner",
+      "kind": "person"
+    },
+    "id": "conv-kept",
+    "last_active_at": "2026-11-26T20:00:00Z",
+    "last_turn_at": null,
+    "started_at": "2026-11-26T20:00:00Z"
+  },
+  "get/conv-owners-gone": null,
+  "get/conv-shared-gone": null,
+  "my_devices": [
+    {
+      "access": "read_write",
+      "device_id": "phone"
+    },
+    {
+      "access": "read",
+      "device_id": "watch"
+    }
+  ],
+  "recent": [
+    {
+      "deleted_at": null,
+      "home": {
+        "id": "person:owner",
+        "kind": "person"
+      },
+      "id": "conv-kept",
+      "last_active_at": "2026-11-26T20:00:00Z",
+      "last_turn_at": null,
+      "started_at": "2026-11-26T20:00:00Z"
+    }
+  ],
+  "stamped": [
+    "conv-owners-gone",
+    "conv-shared-gone"
+  ],
+  "taken_in/conv-dropped": {},
+  "taken_in/conv-idle": {},
+  "taken_in/conv-kept": {},
+  "taken_in/conv-owners-gone": {},
+  "taken_in/conv-shared-gone": {},
+  "transcript/conv-dropped": null,
+  "transcript/conv-idle": null,
+  "transcript/conv-kept": {
+    "as_of": 16,
+    "conversation_id": "conv-kept",
+    "entries": [
+      {
+        "author": "user",
+        "conversation_id": "conv-kept",
+        "cut_off": false,
+        "device_id": "phone",
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "message_id": "k-1",
+        "options": [],
+        "position": 1,
+        "replies_to": null,
+        "text": "Is the shop open?",
+        "written_at": "2026-11-26T20:00:00Z"
+      },
+      {
+        "author": "assistant",
+        "conversation_id": "conv-kept",
+        "cut_off": false,
+        "device_id": null,
+        "home": {
+          "id": "person:owner",
+          "kind": "person"
+        },
+        "message_id": null,
+        "options": [],
+        "position": 2,
+        "replies_to": null,
+        "text": "Until six.",
+        "written_at": "2026-11-26T20:00:00Z"
+      }
+    ]
+  },
+  "transcript/conv-owners-gone": null,
+  "transcript/conv-shared-gone": null,
+  "untaken/conv-dropped": [],
+  "untaken/conv-idle": [],
+  "untaken/conv-kept": [
+    {
+      "author": "user",
+      "conversation_id": "conv-kept",
+      "cut_off": false,
+      "device_id": "phone",
+      "home": {
+        "id": "person:owner",
+        "kind": "person"
+      },
+      "message_id": "k-1",
+      "options": [],
+      "position": 1,
+      "replies_to": null,
+      "text": "Is the shop open?",
+      "written_at": "2026-11-26T20:00:00Z"
+    }
+  ],
+  "untaken/conv-owners-gone": [],
+  "untaken/conv-shared-gone": []
+}
