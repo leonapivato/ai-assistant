@@ -477,6 +477,7 @@ def _manager(plans: FakePlanStore, memory: FakeMemoryStore) -> TaskManager:
     return TaskManager(
         stores=holder(plans=plans, memory=memory),
         plans=plans,
+        memory=memory,
         running=lambda: (),
         is_running=lambda _one: False,
         starting=lambda _one: False,
@@ -530,6 +531,30 @@ async def test_the_owners_task_calls_read_and_write_as_today(senders: tuple[Any,
     assert [one.task_id for one in scheduled] == [task_id]
     assert tap is not None
     assert cancelled.task is not None
+
+
+async def test_the_task_managers_operations_from_outside_run_with_no_work() -> None:
+    """ADR-0350 §10:1-§10:4: the queries and the cancel serve from outside too, one
+    implementation each, as the owner's own acts over the stores unbound (B10); a work's
+    forms, with no work running, read nothing and fail (ADR-0383 §7:7)."""
+    manager, _, task_id = await _tasks_world()
+
+    scheduled = await manager.scheduled_outside_a_work(OWNER_PERSON_ID)
+    recent = await manager.recent_outside_a_work(OWNER_PERSON_ID, supply=None)
+    for works in (
+        manager.scheduled(OWNER_PERSON_ID),
+        manager.recent(OWNER_PERSON_ID, supply=None),
+        manager.cancel(task_id),
+        manager.ticket_tap(_REQUEST),
+    ):
+        with pytest.raises(RuntimeError, match="sight"):
+            await works
+    cancelled = await manager.cancel_outside_a_work(task_id)
+
+    assert [one.task_id for one in scheduled] == [task_id]
+    assert recent == ()
+    assert cancelled.task is not None
+    assert not cancelled.task.pending
 
 
 # --- the engine's read of a task's lineage, its window (ADR-0350 §6:5) ------------------------

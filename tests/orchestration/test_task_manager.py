@@ -126,6 +126,7 @@ class _World:
             # for removing finished tasks (§7:8) and the owner's replace.
             stores=holder(plans=self.plans, memory=self.memory),
             plans=self.plans,
+            memory=self.memory,
             running=lambda: tuple(self.states),
             is_running=lambda one: one in self.running,
             starting=lambda one: one in self.starting,
@@ -495,8 +496,7 @@ async def test_a_task_is_kept_while_a_task_below_it_is_pending() -> None:
     await world.manager.tidy([task.id])
     assert await world.held(task.id) is OccurrenceState.DONE
 
-    with in_a_work(at=AT):
-        await world.manager.cancel(below.id)
+    await world.manager.cancel_outside_a_work(below.id)
     assert await world.held(below.id) is None
     assert await world.held(task.id) is None
 
@@ -768,12 +768,10 @@ async def test_a_cancel_and_a_push_racing_are_decided_by_whichever_lands_first()
     cancelled_first = await write_task(world.plans, activation())
     pushed_first = await write_task(world.plans, activation())
 
-    with in_a_work(at=AT):
-        await world.manager.cancel(cancelled_first.id)
+    await world.manager.cancel_outside_a_work(cancelled_first.id)
     late_push = await world.plans.mark_occurrence_pushed(cancelled_first.id, 1, activation())
     started = await pushed(world.plans, pushed_first)
-    with in_a_work(at=AT):
-        late_cancel = await world.manager.cancel(pushed_first.id)
+    late_cancel = await world.manager.cancel_outside_a_work(pushed_first.id)
 
     assert late_push.value == "not_pending"
     assert late_cancel.task is None
