@@ -734,3 +734,49 @@ async def test_a_pin_on_a_memory_of_another_home_earns_no_support() -> None:
     assert outcome.pinned == 1
     assert len((await _held(harness, "m-wifi")).supports) == 1
     assert len((await _held(harness, "m-veg")).supports) == 2
+
+
+async def test_no_mark_names_a_memory_of_another_home_whose_validity_has_closed() -> None:
+    """§4:7: a memory kept as history, its end already past (ADR-0345 §6:2), is still the
+    shared things', which a live read would leave out; the history read judges it."""
+    harness = Harness()
+    store = _store(harness)
+    await _three(harness)
+    one = await harness.memory.get(address("one"))
+    assert one is not None
+    await harness.memory.delete(address("one"))
+    await harness.hold(one.model_copy(update={"home": RecordHome.shared()}))
+    end = (AT - timedelta(days=1)).isoformat()
+    scout = FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}]))
+    commit = FakeModelProvider.scripted(
+        framing(
+            {
+                "wording": _CLAIM,
+                "supports": [
+                    {
+                        "part": "P1",
+                        "direction": "for",
+                        "backs_as_worded": True,
+                        "how_sure": "sure",
+                        "about_when": end,
+                    }
+                ],
+                "subjects": [],
+                "involved": [],
+                "valid_until": end,
+                "style": True,
+            }
+        )
+    )
+    observer = harness.observer(scout=scout, commit=commit, person_model=store)
+
+    with capture_logs() as logs:
+        outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (created,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert created.home == RecordHome.shared()
+    assert created.validity.valid_until is not None
+    assert await harness.memory.get_many([created.id]) == {}, "a live read leaves it out"
+    assert (await _model(store)).style_marks == ()
+    assert [one["stage"] for one in logs if one.get("reason") == "another_home"] == ["mark"]

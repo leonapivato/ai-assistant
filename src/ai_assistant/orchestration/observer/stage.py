@@ -814,8 +814,12 @@ class Observer:
     async def _of_another_home(self, person: PersonFields, memory_ids: Sequence[str]) -> set[str]:
         """The memories of ``memory_ids`` the store holds of another home than the person's.
 
-        One live read; a memory the store no longer holds is not judged, and is left to
-        the person-model store as before (ADR-0383 §4:8 is the bound stores').
+        Read through the history read, which answers every memory the store holds,
+        whatever its status and whether its validity window is open or closed (ADR-0342
+        §2): a mark or a pin suggestion names a memory however it stands, so a live read,
+        which leaves out one whose window has closed, would let one of another home pass.
+        A memory the store no longer holds is not judged, and is left to the
+        person-model store as before (ADR-0383 §4:8 is the bound stores').
 
         Raises:
             MemoryStoreError: If the memories cannot be read.
@@ -823,7 +827,7 @@ class Observer:
         wanted = list(dict.fromkeys(memory_ids))
         if not wanted:
             return set()
-        found = await self._memory.get_many(wanted)
+        found = await self._memory.get_history(wanted)
         domain = _domain(person)
         return {
             one
