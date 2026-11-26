@@ -1498,7 +1498,7 @@ def test_a_rerun_keeps_the_observers_summaries_and_not_the_reconcilers_and_count
 
         async def observe_episodes(self) -> RunOutcome:
             observer = self.engine._observer
-            reconciler = observer._writer._writes._writer._reconciler
+            reconciler = observer._stores._writer._reconciler
             routes = {
                 "scout": observer._scout,
                 "commit": observer._commit,
