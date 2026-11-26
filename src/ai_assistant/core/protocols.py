@@ -1075,6 +1075,20 @@ class MemoryStore(Protocol):
     ``content`` included, and the record's own validators still bound what an open
     episode may carry.
 
+    **A write stays in its home** (ADR-0383 §4:6, §4:7). A write through :meth:`add`
+    or any :meth:`write_atomic` mode landing on a stored record of another home than
+    its own raises :class:`~ai_assistant.core.errors.CrossHomeWriteError` and writes
+    nothing: no write changes a record's home. Nor does a write leave a record naming
+    a record of another home this store holds, as a lineage or an evidence pointer: a
+    memory's support, operation, open question, track-record entry or situation label
+    pointing at an episode, a memory it replaces or names as its successor, and an
+    episode's taker or the activation a joined input was taken over from, each by its
+    episode's id ``activation:<activation_id>`` (ADR-0283 §2). The names are judged
+    over the state the write would leave, so a batch whose own records would cross is
+    refused whole. A name of a record the store does not hold is not judged here
+    (whether a support's episode is held is the writer's check, ADR-0328 §4:7), and no
+    other field of a record is read as a name.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
     are handed, how :meth:`get_many` and :meth:`get_history` observe their
@@ -1132,6 +1146,10 @@ class MemoryStore(Protocol):
                 drop its channel (ADR-0286 §12), or the record carries a home
                 :func:`~ai_assistant.core.types.home_may_be_written` does not allow
                 (ADR-0383 §2:3, §4:7) — nothing is written — or the write fails.
+            CrossHomeWriteError: ``record.id`` names a stored record of another home,
+                or the record names a record of another home this store holds, as a
+                lineage or an evidence pointer (ADR-0383 §4:6, §4:7; this Protocol's
+                docstring). Nothing is written.
         """
         ...
 
@@ -1202,6 +1220,11 @@ class MemoryStore(Protocol):
                 does not allow (ADR-0383 §2:3, §4:7), any other backend failure, or a
                 malformed batch (two writes to the same id, ADR-0046 §3). Nothing is
                 written.
+            CrossHomeWriteError: an ``UPSERT`` or ``IF_UNCHANGED`` element's id names a
+                stored record of another home, or the records the batch would leave name
+                a record of another home this store holds, as a lineage or an evidence
+                pointer, the batch's own records included (ADR-0383 §4:6, §4:7; this
+                Protocol's docstring). Nothing is written.
         """
         ...
 
@@ -2271,7 +2294,9 @@ class MemoryWriter(Protocol):
 
         **The refusals before a ruling.** A proposal whose memory carries a support
         pointing at an episode the store does not hold is refused with
-        ``UnresolvedEvidenceError`` and nothing written (§4:7). Conflict detection
+        ``UnresolvedEvidenceError`` and nothing written (§4:7), and one pointing at an
+        episode of another home than the memory's own, or retiring a memory of another
+        home, with ``CrossHomeWriteError`` (ADR-0383 §4:7). Conflict detection
         surfacing more conflicts than the writer resolves in one ingest is refused
         (ADR-0079 §1). **After the ruling and before any write**, a write-producing
         ruling on a ``DataTier.SECRET`` proposal is refused (ADR-0078 §5b check 0), and
@@ -2313,6 +2338,10 @@ class MemoryWriter(Protocol):
           ``occasion`` that sets a validity end (§8:4); and one whose validity end lies
           after its create's instant where the support its create cites names no
           about-when at that end (§6:1).
+        - **A placement against a memory of another home is refused** (ADR-0383 §4:7,
+          ADR-0369 §2:7) with ``CrossHomeWriteError``, before any ruling and with
+          nothing written, wherever the named memory is read: a producer places a
+          proposal only against memories of its own memory's home.
 
         Args:
             proposal: The candidate memory and why it was proposed. Its ``conflicts``
@@ -2341,6 +2370,11 @@ class MemoryWriter(Protocol):
             FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record the
                 proposal's supports point at — the only arm a caller may continue past
                 (ADR-0116 §2, §4).
+            CrossHomeWriteError: If a support points at an episode of another home than
+                the proposal's memory, the proposal retires a memory of another home, or
+                a placed proposal names one (before any ruling, the policy not asked); or
+                if a ``REINFORCE`` or ``SUPERSEDE`` would fold onto or retire a memory of
+                another home (ADR-0383 §4:7; ADR-0369 §2:6, §2:7). Nothing is written.
         """
         ...
 
@@ -2374,6 +2408,10 @@ class MemoryWriter(Protocol):
                 revision moved, or it is gone. Nothing is written; re-read and
                 re-decide.
             MemoryStoreConflictError: If the successor's id names a stored record.
+            CrossHomeWriteError: If the support it adds points at an episode of another
+                home than the memory's, or the successor is of another home, or itself
+                names a record of another home (ADR-0383 §4:7), refused by the store in
+                the same write. Nothing is written.
             MemoryStoreError: If any other rule refuses the operation, or a store
                 failure. Nothing is written.
         """
@@ -2400,6 +2438,8 @@ class MemoryWriter(Protocol):
             MemoryStoreStaleError: If the stored memory is not the one read: its
                 revision moved, or it is gone. Nothing is written; re-read and
                 re-decide.
+            CrossHomeWriteError: If the entry names an episode of another home than the
+                memory's (ADR-0383 §4:7), refused by the store. Nothing is written.
             MemoryStoreError: If ``memory`` is not one a store returned (it carries
                 no revision), or a store failure. Nothing is written.
         """
@@ -2424,6 +2464,9 @@ class MemoryWriter(Protocol):
 
         Raises:
             MemoryStoreStaleError: If the stored memory is not the one read.
+            CrossHomeWriteError: If ``change.episode`` is of another home than the
+                memory's and a new label would name it (ADR-0383 §4:7), refused by the
+                store. Nothing is written.
             MemoryStoreError: If the labels break the composition root's bounds, the
                 writer was wired with none, or a store failure. Nothing is written.
         """
