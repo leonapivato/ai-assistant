@@ -727,16 +727,27 @@ class Observer:
         bound store does not give back is one the sight does not see (§7:2): nothing of
         the episode is recorded.
 
+        **The record must be the one the episode was queued with** (ADR-0329 §16:2,
+        §16:6). One written since, by another writer, is the conditional write's case:
+        the attempt is not made and the run stops, as a write expecting the queued
+        revision would have been refused, so an episode processed in between is never
+        opened again.
+
         Raises:
             _Unread: Where the record cannot be read, or the sight does not see it.
+            _NotRecorded: Where the record is not the one the episode was queued with.
         """
         try:
             found = await seen.plans.observations([due.episode])
         except PlanningError as exc:
             raise _Unread(_reason(exc)) from exc
         held = next(iter(found), None)
-        if held is None and due.record is not None:
-            raise _Unread("unseen")
+        if held is None:
+            if due.record is not None:
+                raise _Unread("unseen")
+            return None
+        if due.record != DueRecord(state=held.state, revision=held.revision):
+            raise _NotRecorded
         return held
 
     async def _attempted(self, due: Due, seen: _Seen, started: datetime) -> ObservationState | None:
