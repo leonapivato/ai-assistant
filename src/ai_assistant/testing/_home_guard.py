@@ -1,23 +1,25 @@
-"""The canonical fakes' copy of ``ai_assistant.memory._home_guard`` (ADR-0383 §4:6, §4:7).
+"""The canonical fakes' copy of ``ai_assistant.memory._home_guard`` (ADR-0383 §4, ADR-0388).
 
 Repeated rather than imported, as ``_episode_guard``'s checks are repeated in the fake
 memory store: ``ai_assistant.testing`` may not import a subsystem (golden rule 1). The
 shared conformance suites run the same cases against the fakes and the stores, so the
 two copies cannot drift apart unseen.
 
-Every refusal here is :class:`~ai_assistant.core.errors.CrossHomeWriteError`, with
-nothing written.
+Every refusal here is :class:`~ai_assistant.core.errors.CrossHomeWriteError`, save
+:func:`refuse_unresolved_names`'s,
+:class:`~ai_assistant.core.errors.UnresolvedEvidenceError`; each with nothing written.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import CrossHomeWriteError
+from ai_assistant.core.errors import CrossHomeWriteError, UnresolvedEvidenceError
 from ai_assistant.core.types import ConfirmationPart, EpisodicMemory, Memory, part_episode
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Set as AbstractSet
 
     from ai_assistant.core.types import MemoryRecord, RecordHome, SupportPart
 
@@ -189,3 +191,74 @@ def refuse_other_home_targets(
                 f"of another home (ADR-0383 §4:7)"
             )
             raise CrossHomeWriteError(msg)
+
+
+def judged_names(record: MemoryRecord, *, own_episode: str | None) -> frozenset[str]:
+    """The names of ``record`` ADR-0388 §2:1 judges: :func:`named_records`, save one lineage.
+
+    The takeover lineage a work's capture writes on its own episode is not judged
+    (§2:5): where ``record`` is the episode ``own_episode`` names, the episode of the
+    activation of the sight the store is bound to, the activation that took it over
+    and each activation a joined input was taken from are left out. Nothing else is.
+
+    Args:
+        record: An episode or a memory a write would leave stored.
+        own_episode: The id of the bound sight's activation's episode, or ``None``
+            where the sight carries no activation.
+
+    Returns:
+        The names judged.
+    """
+    names = named_records(record)
+    if own_episode is not None and record.id == own_episode and isinstance(record, EpisodicMemory):
+        return names - _episode_names(record)
+    return names
+
+
+def refuse_unresolved_names(
+    records: Iterable[MemoryRecord],
+    *,
+    resolves: Callable[[str], bool],
+    carried: Callable[[frozenset[str]], AbstractSet[str]],
+    own_episode: str | None,
+) -> None:
+    """Refuse a write adding a name that resolves to no record the store holds (ADR-0388 §2).
+
+    A withholding bound store's judgement, over the records it holds alone (§2:3,
+    ADR-0383 §7:2): ``resolves`` answers whether a name resolves once the write is
+    made, to a record of the same write or one the bound store holds, and ``carried``
+    which of the names given a record the bound store holds already carried before
+    the write, the record stored under the written id or any other (§2:2). It is asked
+    only of names that do not resolve, so no index of names is needed (§9). A name
+    withheld from the sight and one never written are refused alike, by the ids alone.
+
+    Args:
+        records: The records the write would leave stored, in the write's order.
+        resolves: Whether a name resolves once the write is made.
+        carried: Of the names given, those a held record already carried.
+        own_episode: The id of the bound sight's activation's episode, whose takeover
+            lineage is not judged (§2:5), or ``None``.
+
+    Raises:
+        UnresolvedEvidenceError: A record adds a name that does not resolve, naming
+            each such name. Nothing is written.
+    """
+    unresolved: dict[str, list[str]] = {}
+    for record in records:
+        names = sorted(
+            name for name in judged_names(record, own_episode=own_episode) if not resolves(name)
+        )
+        if names:
+            unresolved[record.id] = names
+    if not unresolved:
+        return
+    already = carried(frozenset(name for names in unresolved.values() for name in names))
+    for record_id, names in unresolved.items():
+        added = [name for name in names if name not in already]
+        if added:
+            msg = (
+                f"cannot write {record_id!r}: it names "
+                f"{', '.join(repr(name) for name in added)}, which resolves to no record "
+                f"this store holds (ADR-0388 §2:1)"
+            )
+            raise UnresolvedEvidenceError(msg, added)

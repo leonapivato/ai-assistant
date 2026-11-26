@@ -75,7 +75,13 @@ from ai_assistant.core.types import (
     record_band,
     record_transaction_time,
 )
-from ai_assistant.testing._home_guard import refuse_crossing_names, refuse_home_change
+from ai_assistant.testing._home_guard import (
+    episode_address,
+    named_records,
+    refuse_crossing_names,
+    refuse_home_change,
+    refuse_unresolved_names,
+)
 from ai_assistant.testing._sight import count_records, made_by
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -539,6 +545,42 @@ class FakeMemoryStore:
         if self._sight is not None and self._sight_mode is SightMode.COUNT:
             count_records(self._sight, member, records)
 
+    def _refuse_unresolved(self, records: Sequence[MemoryRecord]) -> None:
+        """Refuse a write adding a name that resolves to no record this fake holds.
+
+        ADR-0388 §2:1 to §2:3 and §2:5, judged only where this fake is bound and
+        withholds, over the state before the write, as the memory stores judge it. Unbound,
+        or bound in the counting mode, nothing is judged here (§1:2).
+
+        Raises:
+            UnresolvedEvidenceError: A record adds a name that does not resolve.
+        """
+        sight = self._sight
+        if sight is None or self._sight_mode is SightMode.COUNT:
+            return
+        written = {record.id for record in records}
+
+        def resolves(name: str) -> bool:
+            stored = self._records.get(name)
+            return name in written or (stored is not None and self._holds(stored))
+
+        refuse_unresolved_names(
+            records,
+            resolves=resolves,
+            carried=self._carried,
+            own_episode=None if sight.activation is None else episode_address(sight.activation),
+        )
+
+    def _carried(self, names: frozenset[str]) -> frozenset[str]:
+        """Of ``names``, those a record this fake holds already carries (ADR-0388 §2:2)."""
+        found: set[str] = set()
+        for stored in self._records.values():
+            if self._holds(stored):
+                found |= named_records(stored) & names
+                if len(found) == len(names):
+                    break
+        return frozenset(found)
+
     def _refuse_unheld(
         self, record_id: str, mode: MemoryWriteMode, expected: int | None = None
     ) -> None:
@@ -593,6 +635,8 @@ class FakeMemoryStore:
             CrossHomeWriteError: ``record.id`` names a stored record of another home
                 (ADR-0383 §4:6), or the record names a record of another home this store
                 holds, as a lineage or an evidence pointer (§4:7). Nothing is written.
+            UnresolvedEvidenceError: Bound and withholding, the record adds a name that
+                resolves to no record this fake holds (ADR-0388 §2:1). Nothing is written.
         """
         snapshot = record.model_copy(deep=True)
         _refuse_home(snapshot)
@@ -600,6 +644,7 @@ class FakeMemoryStore:
             self._refuse_unheld(snapshot.id, MemoryWriteMode.UPSERT)
             self._refuse_cross_kind(snapshot)
             refuse_crossing_names([snapshot], self._home_after({snapshot.id: snapshot}))
+            self._refuse_unresolved([snapshot])
             self._records[snapshot.id] = self._stamped(snapshot)
             self._issue_key(snapshot.id)
         return snapshot.id
@@ -676,13 +721,16 @@ class FakeMemoryStore:
         """The home each id would hold once ``written`` is stored (ADR-0383 §4:7).
 
         From ``written`` where it writes the id, and otherwise from the records stored,
-        whatever their expiry or window, as the persistent store reads them.
+        whatever their expiry or window, as the persistent store reads them. Bound and
+        withholding, only from the records this fake holds (ADR-0388 §2:3).
         """
 
         def home_of(name: str) -> RecordHome | None:
             found = written.get(name)
             if found is None:
                 found = self._records.get(name)
+                if found is not None and not self._holds(found):
+                    found = None
             return None if found is None else found.home
 
         return home_of
@@ -729,6 +777,9 @@ class FakeMemoryStore:
                 would leave name a record of another home this store holds, as a
                 lineage or an evidence pointer, the batch's own records included (§4:7).
                 Nothing is written.
+            UnresolvedEvidenceError: Bound and withholding, a record the batch would
+                leave adds a name that resolves neither to a record of the batch nor to
+                one this fake holds (ADR-0388 §2:1). Nothing is written.
         """
         staged = [
             (write.record.model_copy(deep=True), write.mode, write.expected_revision)
@@ -757,6 +808,7 @@ class FakeMemoryStore:
                 [record for record, _, _ in staged],
                 self._home_after({record.id: record for record, _, _ in staged}),
             )
+            self._refuse_unresolved([record for record, _, _ in staged])
             for record, _, _ in staged:
                 self._records[record.id] = self._stamped(record)
                 self._issue_key(record.id)

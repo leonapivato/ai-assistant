@@ -1089,9 +1089,10 @@ class MemoryStore(Protocol):
     episode's taker or the activation a joined input was taken over from, each
     activation by its episode's id ``activation:<activation_id>`` (ADR-0283 §2). The
     names are judged over the state the write would leave, so a batch whose own
-    records would cross is refused whole. A name of a record the store does not hold is
-    not judged here (whether a support's episode is held is the writer's check,
-    ADR-0328 §4:7), and no other field of a record is read as a name.
+    records would cross is refused whole. Unbound, or bound in the counting mode, a name
+    of a record the store does not hold is not judged here (whether a support's episode
+    is held is the writer's check, ADR-0328 §4:7); bound and withholding, it is judged
+    as :meth:`bound` states (ADR-0388 §2). No other field of a record is read as a name.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
@@ -1154,6 +1155,9 @@ class MemoryStore(Protocol):
                 or the record names a record of another home this store holds, as a
                 lineage or an evidence pointer (ADR-0383 §4:6, §4:7; this Protocol's
                 docstring). Nothing is written.
+            UnresolvedEvidenceError: Bound and withholding, the record adds a name that
+                resolves to no record the bound store holds (ADR-0388 §2:1; :meth:`bound`).
+                Nothing is written.
         """
         ...
 
@@ -1229,6 +1233,9 @@ class MemoryStore(Protocol):
                 a record of another home this store holds, as a lineage or an evidence
                 pointer, the batch's own records included (ADR-0383 §4:6, §4:7; this
                 Protocol's docstring). Nothing is written.
+            UnresolvedEvidenceError: Bound and withholding, a record the batch would leave
+                adds a name that resolves neither to a record of the batch nor to one the
+                bound store holds (ADR-0388 §2:1; :meth:`bound`). Nothing is written.
         """
         ...
 
@@ -2146,8 +2153,28 @@ class MemoryStore(Protocol):
         :meth:`purge_expired` remove, and count, only records it holds. A write's own
         checks are decided over every record the store holds, as the unbound store
         decides them (§7:11): an ``INSERT_IF_ABSENT`` collides with any stored id, the
-        cross-kind, episode and home guards judge the stored row, and an ``IF_UNCHANGED``
-        compares a revision only of a record it holds.
+        cross-kind and episode guards and the refusal of a changed home judge the stored
+        row, and an ``IF_UNCHANGED`` compares a revision only of a record it holds.
+
+        **The names a write leaves** (ADR-0388 §2:1 to §2:3, §2:5) are judged over the
+        records the bound store holds, and not over every stored row: neither judgement
+        is one of a write's own checks (§7:11). A write adding to a record a name this
+        Protocol's docstring lists that does not resolve, once the write is made, to a
+        record of the same write or one the bound store holds is refused with
+        :class:`~ai_assistant.core.errors.UnresolvedEvidenceError` naming the id, nothing
+        written, whether the name is withheld from ``sight`` or never written. A name a
+        write adds is one the written record carries and no record the bound store holds
+        carried before the write, the record stored under its id or any other: a name a
+        held record already carries is not judged again, so a later write to a memory
+        whose support's episode has since been deleted, and a support copied from a held
+        memory, as a dispute copies one, are not refused for it. A name resolving to a
+        record it holds of another home is refused with
+        :class:`~ai_assistant.core.errors.CrossHomeWriteError`, as unbound, and a name of
+        a record it does not hold is never refused as one of another home. The takeover
+        lineage a work's capture writes on its own episode, the episode of ``sight``'s
+        activation, is not judged for resolving (§2:5): the activation that took it over
+        and the activation each joined input was taken from may name episodes since
+        deleted. One resolving to a record it holds of another home is still refused.
 
         **What counts writes answers alike bound or not** (§8:5): an episode's number,
         a record's revision and a walk's position are issued by the one store-wide
@@ -2156,7 +2183,8 @@ class MemoryStore(Protocol):
         :meth:`clear` through a bound store discards them as unbound.
 
         **Counting** (§11:1 to §11:3). Every member answers exactly as the unbound store
-        does, no write included refused for the sight, and every read member writes one
+        does, no write included refused for the sight and no name judged over what it
+        sees (ADR-0388 §1:2), and every read member writes one
         event to the hub's log alone, carrying
         :class:`~ai_assistant.core.types.SightCount`'s numbers and codes: how many
         records the read gave back, how many ``sight`` would have withheld by reason,
@@ -2432,7 +2460,9 @@ class MemoryWriter(Protocol):
 
         Raises:
             UnresolvedEvidenceError: If a support points at an episode the store does
-                not hold (§4:7). Nothing is written and the policy is not asked.
+                not hold (§4:7). Nothing is written and the policy is not asked. Bound
+                to a sight over a withholding store, also where a write it makes adds a
+                name its store refuses (ADR-0388 §2:1; :meth:`bound`), after the ruling.
             MemoryStoreError: On every other refusal above, or a store failure.
                 Nothing is written. ``MemoryStoreStaleError`` where a write met a
                 record another writer moved, on each of a bounded number of attempts
@@ -2475,7 +2505,9 @@ class MemoryWriter(Protocol):
 
         Raises:
             UnresolvedEvidenceError: If the support it adds, or the successor's,
-                points at an episode the store does not hold.
+                points at an episode the store does not hold; or, bound over a
+                withholding store, the write adds any other name its store refuses
+                (ADR-0388 §2:1; :meth:`bound`). Nothing is written.
             MemoryStoreStaleError: If the stored memory is not the one read: its
                 revision moved, or it is gone. Nothing is written; re-read and
                 re-decide.
@@ -2512,6 +2544,10 @@ class MemoryWriter(Protocol):
                 re-decide.
             CrossHomeWriteError: If the entry names an episode of another home than the
                 memory's (ADR-0383 §4:7), refused by the store. Nothing is written.
+            UnresolvedEvidenceError: Bound over a withholding store, if the entry names
+                an episode its store holds no record of and no record it holds already
+                names (ADR-0388 §2:1; :meth:`bound`), refused by the store. Nothing is
+                written.
             MemoryStoreError: If ``memory`` is not one a store returned (it carries
                 no revision), or a store failure. Nothing is written.
         """
@@ -2539,6 +2575,10 @@ class MemoryWriter(Protocol):
             CrossHomeWriteError: If ``change.episode`` is of another home than the
                 memory's and a new label would name it (ADR-0383 §4:7), refused by the
                 store. Nothing is written.
+            UnresolvedEvidenceError: Bound over a withholding store, if a new label would
+                name ``change.episode`` and its store holds no such episode and no
+                record already naming it (ADR-0388 §2:1; :meth:`bound`). Nothing is
+                written.
             MemoryStoreError: If the labels break the composition root's bounds, the
                 writer was wired with none, or a store failure. Nothing is written.
         """
@@ -2577,6 +2617,14 @@ class MemoryWriter(Protocol):
           successor's supports point at, and writes the operation's memory through it.
         - :meth:`record_use` and :meth:`write_labels` write the memory they are handed
           through it.
+
+        **Every name a write adds is judged by that store** (ADR-0388 §2:1 to §2:3,
+        :meth:`MemoryStore.bound`), over the records it holds: where it withholds, a
+        name that resolves to no record it holds and that no record it holds already
+        carries is refused with ``UnresolvedEvidenceError``, nothing written, whether the
+        sight does not see it or it was never written; a confirmation's asking
+        activation, a track-record entry's or a label's episode and a lineage included.
+        A name resolving to a record it holds of another home is refused across homes.
 
         A write changing a memory the sight does not see, the memory an operation,
         an entry or a label write is handed included, is refused as a write to one
