@@ -1,6 +1,6 @@
 # 385. The owner's acts read through a sight of their own: seeing and deleting keep their members, and one new member exports one named domain whole
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-26
 - Scope: decision D3 of milestone 22, "Every record has a home" (acceptance
   [#3709](https://github.com/leonapivato/ai-assistant/issues/3709), batch
