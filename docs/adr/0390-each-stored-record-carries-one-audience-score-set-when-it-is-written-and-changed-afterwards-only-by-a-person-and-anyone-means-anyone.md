@@ -18,7 +18,8 @@
   change under golden rule 5, through what §10 names.
 - **Partially supersedes**, as §9 records: ADR-0369 (§2:5, §3:1, §4:1, §5:1 to §5:4, §6:1 to
   §6:3, §7:2 to §7:6, §7:8 to §7:10, §8:1, §9:4, §10:1, §10:4, §14:1 and §14:2, each for a stored
-  record); ADR-0372 (§3:2, in the addition alone, §3:5, §3:8, §4:3, §4:5 and §6:9);
+  record); ADR-0372 (§3:2, in the addition alone, §3:5, §3:8, §4:1 and §4:3, each for a stored
+  record, §4:5 and §6:9);
   [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) (§1:2,
   §2:1, §3:13 and §3:14, each for a stored record's score); and
   [ADR-0383](0383-each-record-carries-its-home-and-every-read-a-work-a-producer-or-a-run-makes-is-of-a-store-bound-to-one-sight-which-answers-as-though-it-held-only-what-that-sight-sees.md)
@@ -111,7 +112,8 @@ only by a person, keep live sharing for accounts alone, and read "anyone" as eve
 > the score.
 
 > **Normative.** No change to an account's sharing rule, to a place's start level or to any record
-> a stored record was written from changes that record's score.
+> a stored record was written from changes that record's score, save the narrowing §5:5 makes in
+> the act that narrows a record it names.
 
 A score widened on a record written from another domain's record is that person passing it on
 (ADR-0369 §11:1), in the owner's words of 2026-11-21: "By trusting someone with infomration, im
@@ -132,7 +134,7 @@ subjecting myself to that risk."
 
 > **Normative.** A read through a bound store (ADR-0383 §6:1) gives back a stored record only where
 > each bound sees it, by its home as ADR-0383 §6:2 has it or by its score: a person bound where
-> they are inside the score or ADR-0372 §4:1 lets them see it; a no-one bound or an anyone bound
+> they are inside the score; a no-one bound or an anyone bound
 > where the score is anyone; a group bound where the score takes in each of the group's members;
 > and a domain bound by its home alone.
 
@@ -145,6 +147,11 @@ subjecting myself to that risk."
 
 > **Normative.** Code decides who may see a stored record from its home and its score as it
 > stands, and no model decides it or takes part (ADR-0369 §6:3, ADR-0372 §4:6).
+
+> **Normative.** For a stored record, ADR-0372 §4:1 is read through its score, which takes in the
+> place's audience when it was said (ADR-0372 §3:1, §3:2) save as a narrowing, §5:5's included,
+> has since taken someone out; no reader sees a stored record by having been in that audience
+> alone.
 
 ### 6. Accounts keep live sharing
 
@@ -199,6 +206,7 @@ Superseded, each for a stored record:
 | ADR-0369 §10:1's and §10:4's reach and lines | The score (§5:3) |
 | ADR-0372 §3:5's *nothing widens it*; §3:8's sharing rule and line on a record | Save a person's act (§4:1); a rule on an account alone (§6:1) |
 | ADR-0372 §4:3's reach and limits; §6:9's placement | The score (§2:2, §5:1) |
+| ADR-0372 §4:1, what was said seen by the place's audience then | Through its score, which takes that audience in unless narrowed since (§5:7) |
 | ADR-0372 §4:5's first sentence, anyone as each person admitted | Anyone literally (§2:3); its second sentence stands, read with §5:3 |
 | ADR-0217 §1:2's reach and §2:1's placement, for who may receive a stored record | The score (§2:2) |
 | ADR-0217 §3:13 and §3:14's *narrows only*, on a `DERIVED` placement | A person widens a score whatever narrowed it, under ADR-0217 §3:17 (§4:3) |
@@ -207,9 +215,9 @@ Superseded, each for a stored record:
 | ADR-0372 §3:2, a work's message its mark with the place's audience | In the meet with each record it names (§5:5) |
 
 Read through and standing: ADR-0369 §1, §2, §3:2 to §3:8 and §8:2 for accounts, §7:1, §7:7, §9:1
-to §9:3, §10:2, §10:3, §10:5 to §10:8, §11 to §13; ADR-0372 §2, §3:1, §3:3, §3:4, §3:6, §3:7, §4:1,
-§4:2, §4:4, §4:6, §5 to §7; ADR-0370 §2 to §6, its "reach" in §5:5 and §6:4 read as the score;
-ADR-0307 §6:4, its "placed for the owner alone" read as scored for the home's people; ADR-0217
+to §9:3, §10:2, §10:3, §10:5 to §10:8, §11 to §13; ADR-0372 §2, §3:1, §3:3, §3:4, §3:6, §3:7,
+§4:1 save for a stored record, §4:2, §4:4, §4:6, §5 to §7; ADR-0370 §2 to §6, its "reach" in §5:5
+and §6:4 read as the score; ADR-0307 §6:4, its "placed for the owner alone" read as scored for the home's people; ADR-0217
 §2:2 to §2:6, §3:3, §3:15 to §3:17.
 
 **The record's list, against the texts.** Each clause the record of the rulings names says what it
@@ -262,7 +270,8 @@ to §3:5, a change or fold, a run, a record brought in, and a record with no sco
 person is whoever holds the data rights, and that a model's narrowing under ADR-0372 §3:6 stands
 beside a person's act; §4:2's bars; §4:3, that a `DERIVED` narrowing widens; §4:4; §5, that no
 line, limit on a stored kind or reduced form is read for a stored record, how each bound sees by
-the score, and §5:5's rule that a record's score lies inside each named record's; that §6:2 keeps ADR-0369
+the score, §5:5's rule that a record's score lies inside each named record's, and §5:7's reading
+of ADR-0372 §4:1 through the score; that §6:2 keeps ADR-0369
 §3 and §8 whole for an account; which changes of sharing bring the offer (§7:1); §8's
 dispositions; and every row of §9 beyond the six clauses the record names.
 
