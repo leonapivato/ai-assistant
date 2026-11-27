@@ -16,7 +16,7 @@
   Building it is a breaking change under golden rule 5, through the changes §13 names.
 - **Partially supersedes** ADR-0306 (§4:7), ADR-0351 (§4:2, §6:2), ADR-0356 (§7:7), ADR-0367
   (§4:7), ADR-0368 (§3:2, §3:5, §7:1, §7:5), ADR-0369 (§10:2, §10:3), ADR-0370 (§3:3, §3:4, §5:7,
-  §5:8), ADR-0371 (§2:1, §2:4 to §2:6, §5:1, §5:4, §8:2) and ADR-0383 (§6:4, §6:5), each in the
+  §5:8), ADR-0371 (§2:1, §2:4 to §2:6, §5:1, §5:4, §8:2) and ADR-0383 (§6:4 to §6:6), each in the
   scope §11 gives.
 
 ## Context
@@ -117,6 +117,10 @@ by everyone whose say a work holds.
 > a source in another person's work (ADR-0371 §2:4, §2:5): it is shown as their own text and carries
 > their say.
 
+> **Normative.** ADR-0371 §8:3 stands: a work acts on another person's words only where they were
+> said in a place whose audience then took in each of its senders (ADR-0372 §4:1), and any other
+> person's answer reaches the asker only as ADR-0371 §8:3 and ADR-0367 §11 rule.
+
 The owner's option 3 is ADR-0370 as merged with ADR-0372's start level; §3:4 is what they added
 to it. §3:3 is the owner's "bypass" of "too low": a read through an account is a call (ADR-0369
 §10:7) and takes it, and a read through the filter asks no one. So Sam's work beside Ana's earlier
@@ -204,11 +208,13 @@ Nothing obliges a work to reply: that is the home of the owner's parked point th
 > none, as ADR-0351 §6:5 has it, and the say recorded on the text is unchanged.
 
 > **Normative.** A block is also below a work's cut, a ground ADR-0372 §6:11 admits, where its say
-> names a person or a stranger the story's does not, or is none where the story's is not. A story's
-> say is its members' episodes' taken together; with no story linked, it is the work's own inputs'.
+> names a person or a stranger that neither the story's say nor the work's own inputs' names, or is
+> none where neither is. A story's say is its members' episodes' taken together, and with no story
+> linked only the inputs' counts. A work's own inputs are never below the cut.
 
 > **Normative.** Where a work re-ran, its say is counted from what its second pass and every later
-> stage are shown, as ADR-0372 §6:8 counts its mark.
+> stage are shown, as ADR-0372 §6:8 counts its mark, and its sight is made again from its inputs
+> and that say, not met with the sight its first pass held (ADR-0383 §6:6).
 
 §8:1 is the authority side alone: a model may still narrow an audience label (ADR-0372 §3:6), and
 §8:2 reconciles the owner's later "unless the model decides" with it.
@@ -276,11 +282,13 @@ It needs no vouching detail; which checks qualify and the bar of making it would
 | ADR-0369 §10:2 and §10:3, what a sender's or a task's work reads | In the addition alone: within its say (§3:4) |
 | ADR-0370 §3:3 and §3:4, a work with no sender; a fetch's ceiling | §3:3, for a task's or a rule's work: §7. §3:4's ceiling for a fetch: within this decision's §3:4. §14's reading of a task's ceiling goes with them |
 | ADR-0383 §6:4 and §6:5, a work's sight | In the addition alone: a person bound for each person in its say, and an anyone bound where it holds a stranger or is none, made again as §6:6 has it when its say falls (§3:4, §4:1) |
+| ADR-0383 §6:6, a sight never widens within a work | Save after a re-run: the sight is made again from the inputs and the second pass's say (§8:4) |
 
-Read through and standing: ADR-0366 §5's levels and the default bars; ADR-0371 §3, §4, §6, §7 and
-§9; ADR-0372 §3 to §7, with §8:3's ground under its §6:11; ADR-0368 §3:6, §6 and §9:8; ADR-0351
-§5:6, §6:3 and §6:5; ADR-0367 §5, §6:3, §11 and §12; and ADR-0382 §2:1, which keeps an approval's
-outcome message outside the check as its own rule.
+Read through and standing: ADR-0366 §5's levels and the default bars; ADR-0371 §3, §4, §6, §7,
+§8:3 (§3:8) and §9; ADR-0372 §3 to §7, with this decision's §8:3 ground under its §6:11; ADR-0368
+§3:6, §6 and §9:8; ADR-0351 §5:6, §6:3 and §6:5; ADR-0367 §5, §6:3, §11 and §12; and ADR-0382
+§2:1, which keeps an approval's outcome message outside the check as its own rule
+([#3796](https://github.com/leonapivato/ai-assistant/issues/3796) parks bringing it under §6).
 
 ### 12. What is built today, and what becomes of it
 
@@ -357,7 +365,7 @@ milestone-23 plan ("Yes, milestone 23, and dont worry about the cleanup", 2026-1
 coordinator's record, not checked here. **This decision's own, not ruled:** §1:4; the say as
 people, a stranger or none (§2:1), and what a producer's, an earlier, a finding's and a forward's
 text carries (§2:4 to §2:6, §5:2, §5:3); the bypass card's addressee (§3:3), the filter applying
-§3:4, §3:6's wording and §3:7; §4:2's account's person and §4:3; the reply line's shape, defaults
+§3:4, §3:6's wording, §3:7 and §3:8; §4:2's account's person and §4:3; the reply line's shape, defaults
 and changer, §6:4 and §6:5; §7's reading of ADR-0368 §6; §8:2, and the form of §8:3 and §8:4; the
 sight's addition and ADR-0382 §2:1 standing (§11).
 
