@@ -222,7 +222,7 @@ The owner's words are verbatim, from the local record of the review, by line: `r
 
 | Point | The owner's words | Where |
 | --- | --- | --- |
-| Two checks in order, and whose each card is (§2) | "I would frame it like this. The first check is can this tool even be called with the current authority. Thats the card to the person whose work is currently be run. Then there is can the tool even be run, which is the ask permission to x person. Right?"; then "Yes send it" | review log, lines 270 to 275; summary, line 11, from "The first" to "x person." |
+| Two checks in order, and whose each card is (§2) | "I would frame it like this. The first check is can this tool even be called with the current authority. Thats the card to the person whose work is currently be run. Then there is can the tool even be run, which is the ask permission to x person. Right?" | review log, lines 270 to 273; summary, line 11, from "The first" to "x person." |
 | Two kinds of authority on one call (§2) | "there are different permissions here. For the text sam case, there is my authority and whether it reaches the threshold to even do that. Like if it reads a webpage, than it doesnt do it without a card to me to confirm. And then if sam has it setup that it needs his approval to text him, then it does that one. So 2 types of authority. You know." | review log, lines 259 to 262 |
 | A card to oneself (§3) | "If my authority isnt enough to message Sam, then no card to myself is going to raise it above my authority." | review log, line 195; summary, line 11 |
 | The tool list and the two cards (§4, §5) | §5's quotation | review log, lines 278 to 287; summary, line 12, elided there |
