@@ -1,6 +1,6 @@
 # 391. Every text carries the say it was written under, a work may do and read only what everyone whose say it holds may, a signal is anyone's, and a reply is a send like any other
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-27
 - Scope: the amending decision on the authority side of ADR-0365 to ADR-0372, from the walk of
   2026-11-22 and 2026-11-23 and the review of 2026-11-26: the say a text carries (§2), a work's say
