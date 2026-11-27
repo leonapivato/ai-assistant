@@ -112,8 +112,8 @@ only by a person, keep live sharing for accounts alone, and read "anyone" as eve
 > the score.
 
 > **Normative.** No change to an account's sharing rule, to a place's start level or to any record
-> a stored record was written from changes that record's score, save the narrowing §5:5 makes in
-> the act that narrows a record it names.
+> a stored record was written from changes that record's score, save the narrowing §5:5 makes
+> when a record it names is narrowed.
 
 A score widened on a record written from another domain's record is that person passing it on
 (ADR-0369 §11:1), in the owner's words of 2026-11-21: "By trusting someone with infomration, im
@@ -141,7 +141,8 @@ subjecting myself to that risk."
 > **Normative.** A stored record's score lies inside the score of each stored record it names as a
 > member, link, pin, mark, lineage, reply or evidence does (ADR-0383 §8:3), each held by its own
 > writes and acts: the write that adds a name gives the naming record the meet of its score and
-> the named one's; an act that narrows a record narrows, in the same act, each record naming it;
+> the named one's; every write or act that narrows a record, a fold, a change under §3:2 and the
+> meet this clause takes included, narrows each record naming it in the same step;
 > and an act that widens a record widens it no further than the score of each record it names,
 > save as the same act widens those. A named record no longer held bounds nothing.
 
@@ -217,8 +218,8 @@ Superseded, each for a stored record:
 Read through and standing: ADR-0369 §1, §2, §3:2 to §3:8 and §8:2 for accounts, §7:1, §7:7, §9:1
 to §9:3, §10:2, §10:3, §10:5 to §10:8, §11 to §13; ADR-0372 §2, §3:1, §3:3, §3:4, §3:6, §3:7,
 §4:1 save for a stored record, §4:2, §4:4, §4:6, §5 to §7; ADR-0370 §2 to §6, its "reach" in §5:5
-and §6:4 read as the score; ADR-0307 §6:4, its "placed for the owner alone" read as scored for the home's people; ADR-0217
-§2:2 to §2:6, §3:3, §3:15 to §3:17.
+and §6:4 read as the score; ADR-0307 §6:4, its "placed for the owner alone" read as scored for
+the home's people; ADR-0217 §2:2 to §2:6, §3:3, §3:15 to §3:17.
 
 **The record's list, against the texts.** Each clause the record of the rulings names says what it
 takes it to say: §3's rules on the five stored kinds of §3:1's six, §5:4, §7:5, §7:6, §8:1 and
@@ -239,8 +240,8 @@ Named so milestone 23 is scoped; none is made here.
   precedence admitting a widened `DERIVED` (§4:3).
 - **Stores:** each writes the score with the record, set at each write site by §3; the bound
   stores' sight (ADR-0383 §6) sees by each bound's home or score, each store reading its own
-  records alone (§5:4); and, for §5:5, the engine's act finds the records that name a record, in
-  each store by that store's own reads, before it narrows or widens it.
+  records alone (§5:4); and, for §5:5, the engine or the run that narrows or widens a record finds
+  the records that name it, in each store by that store's own reads, in the same step.
 - **Engine members:** a person's acts to narrow and widen one record's score in their domain, at
   ADR-0369 §5:2's and §5:3's bars, `guard` and `unguard` becoming the owner's two on a memory;
   and, for the offer, a way to find the records written from an account or said in a place, read
