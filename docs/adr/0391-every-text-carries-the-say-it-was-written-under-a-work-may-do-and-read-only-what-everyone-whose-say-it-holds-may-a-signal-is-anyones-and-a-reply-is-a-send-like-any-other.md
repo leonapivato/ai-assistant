@@ -70,9 +70,9 @@ by everyone whose say a work holds.
 > **Normative.** What a work writes, each kind ADR-0371 §5:1 names, carries the say of its context
 > (§3:1) when written; a task's instruction carries the say of the work that set it.
 
-> **Normative.** A record a producer writes after a work has ended carries the say of every record
-> it was written from, taken together. One written before its say could be recorded carries the
-> owner's, as every such record lands in the owner's domain (ADR-0383).
+> **Normative.** A record a producer writes after a work has ended, or a run of upkeep writes
+> (ADR-0384), carries the say of every record it was written from, taken together. One written
+> before its say could be recorded carries its home's people's (ADR-0390 §3:5), never a stranger's.
 
 > **Normative.** Findings (ADR-0371 §4:1), a typed value (§3:2) and a value code sets (§5:2) add
 > no one to a say: each is a new block, at the level ADR-0371 gives it.
@@ -103,8 +103,8 @@ by everyone whose say a work holds.
 > and a yes makes it the tapper's (ADR-0367 §5:5).
 
 > **Normative.** A work reads no more than each person in its say may see and, where its say holds
-> a stranger or is none, no more than anyone may see (ADR-0369 §10:4). The filter applies this as
-> the say falls (ADR-0369 §10:5), and what it withholds is absent (ADR-0369 §10:6).
+> a stranger or is none, no more than anyone may see (ADR-0369 §10:4, ADR-0390 §5:3). The filter
+> applies this as the say falls (ADR-0369 §10:5), and what it withholds is absent (ADR-0369 §10:6).
 
 > **Normative.** A fall in a work's say takes nothing out of what it was shown, and its mark keeps
 > what it read (ADR-0370 §4:2); only later reads and calls are bounded by it.
@@ -319,10 +319,11 @@ Named so the build is scoped, and made by none of this decision. A new Protocol 
   decision amends ADR-0376 §3; `ConnectionKind` declaring each kind's reply bar or none (§6:3), and
   its most for a forward's writer (§5:2).
 - **Stores and formats:** a work's sight taking a bound per person in its say, remade as it falls
-  (§3:4); the conversation, memory, plan and episode stores recording the say beside each record, a
-  format step for each, with an upgrade reading earlier records under §2:4.
+  (§3:4), seeing beside ADR-0390 §5:4's score; every store ADR-0383 §3 gives a home recording the
+  say beside each record, as ADR-0390 §10 has the score, a format step for each, with an upgrade
+  reading earlier records under §2:4.
 - **Wire:** the activation and episode views, and the line members, carrying the say and the reply
-  line: a wire version step.
+  line: the `PROTOCOL_VERSION` step, with ADR-0390 §10's if they are built together.
 
 ### 14. What this decision leaves to others
 
@@ -332,7 +333,7 @@ Named so the build is scoped, and made by none of this decision. A new Protocol 
   starts asks (§4:3, §4:4); vouching's details (§2:7); the money guard; how long-lived text written
   under a low say is cleaned beyond §10
   ([#2798](https://github.com/leonapivato/ai-assistant/issues/2798)); every group ruling of the
-  review; how a mail channel establishes a sender (ADR-0368 §9:8); the audience side of the review.
+  review; how a mail channel establishes a sender (ADR-0368 §9:8). The audience side is ADR-0390's.
 
 > **Normative.** This decision may not be cited to settle any matter the list above leaves to
 > another.
@@ -364,10 +365,10 @@ Forwarded text (§5:2) is the review session's wording, accepted by "Good on all
 milestone-23 plan ("Yes, milestone 23, and dont worry about the cleanup", 2026-11-26) is the
 coordinator's record, not checked here. **This decision's own, not ruled:** §1:4; the say as
 people, a stranger or none (§2:1), and what a producer's, an earlier, a finding's and a forward's
-text carries (§2:4 to §2:6, §5:2, §5:3); the bypass card's addressee (§3:3), the filter applying
-§3:4, §3:6's wording, §3:7 and §3:8; §4:2's account's person and §4:3; the reply line's shape, defaults
-and changer, §6:4 and §6:5; §7's reading of ADR-0368 §6; §8:2, and the form of §8:3 and §8:4; the
-sight's addition and ADR-0382 §2:1 standing (§11).
+text carries, an upkeep run's included (§2:4 to §2:6, §5:2, §5:3); the bypass card's addressee
+(§3:3), the filter applying §3:4, §3:6's wording, §3:7 and §3:8; §4:2's account's person and
+§4:3; the reply line's shape, defaults and changer, §6:4 and §6:5; §7's reading of ADR-0368 §6;
+§8:2, and the form of §8:3 and §8:4; the sight's addition and ADR-0382 §2:1 standing (§11).
 
 ## Consequences
 
