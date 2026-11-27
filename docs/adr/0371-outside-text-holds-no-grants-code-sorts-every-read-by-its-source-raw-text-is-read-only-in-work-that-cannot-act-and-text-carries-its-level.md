@@ -1,6 +1,6 @@
 # 371. Outside text holds no grants, code sorts every read by its source, raw text is read only in work that cannot act, and text carries its level
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0391 (§2:1, §2:4 and §2:5, for a person's established writing, which carries its writer's say; §2:6 and §8:2, whole; §5:1 and §5:4, each in the addition alone: what is written also carries a say)
 - Date: 2026-11-22
 - Scope: lane 7, the last, of the seven decisions the people, authority, audience and outside
   content proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -52,6 +52,7 @@
   authorizing) and
   [ADR-0368](0368-every-work-records-whom-it-is-for-whose-authority-it-carries-and-how-sure-the-hub-is-and-an-instruction-given-in-advance-carries-its-authors.md)
   (§6:1, §6:3 and §7:1, each in the addition alone), as §12 records.
+- Partially superseded: 2026-11-27 by [ADR-0391](0391-every-text-carries-the-say-it-was-written-under-a-work-may-do-and-read-only-what-everyone-whose-say-it-holds-may-a-signal-is-anyones-and-a-reply-is-a-send-like-any-other.md) — §2:1, for a person's text, which carries its writer's say (ADR-0391 §2:2, §3:1); §2:4 and §2:5, once ADR-0391 §2 and §3 are built, for a person's established writing, which is their own text in every work (ADR-0391 §3:7, §1:4); §2:6, whole (ADR-0391 §5); §5:1 and §5:4, each in the addition alone: what is written also carries a say (ADR-0391 §2:3); §8:2, whole (ADR-0391 §6). §4 and §7 stand as merged (ADR-0391 §10:1). Every other clause stands. This replacement takes effect on ratification of ADR-0391. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
