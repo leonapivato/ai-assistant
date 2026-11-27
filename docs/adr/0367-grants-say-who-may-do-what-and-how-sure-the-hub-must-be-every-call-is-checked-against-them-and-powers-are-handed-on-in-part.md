@@ -1,6 +1,6 @@
 # 367. Grants say who may do what and how sure the hub must be, every call is checked against them, and powers are handed on in part
 
-- Status: Partially superseded by ADR-0382 (§4:7, in the addition alone: in an approval's work, a message into a place an input of the asking activation came from also stays outside the check) and ADR-0391 (§4:7, whole: a reply is a call the check runs, allowed by a reply line)
+- Status: Partially superseded by ADR-0382 (§4:7, in the addition alone: in an approval's work, a message into a place an input of the asking activation came from also stays outside the check) and ADR-0391 (§4:2, in the addition alone: a no or a limit for one in a work's say whose authority it does not carry asks the work's people; §4:7, whole: a reply is a call the check runs, allowed by a reply line)
 - Date: 2026-11-22
 - Scope: lane 3 of the seven decisions the people, authority, audience and outside content
   proposal ([#3628](https://github.com/leonapivato/ai-assistant/pull/3628)) is cut into
@@ -54,7 +54,7 @@
   (§2:6, §4:2, §4:6, §4:8, §4:9, §5:3 and §6:1, in the scopes §15 names) and
   [ADR-0364](0364-tools-describe-themselves-in-four-parts-every-result-opens-with-its-outcome-and-connections-replace-the-place-list.md)
   (§9:3, in the addition alone), as §15 records.
-- Partially superseded: 2026-11-27 by [ADR-0391](0391-every-text-carries-the-say-it-was-written-under-a-work-may-do-and-read-only-what-everyone-whose-say-it-holds-may-a-signal-is-anyones-and-a-reply-is-a-send-like-any-other.md) — §4:7, whole: no message is outside the check; a reply into a place one of the work's own inputs came from is allowed by a reply line, a default grant each kind of place declares (ADR-0391 §6). ADR-0391 §9 also records that §18's credit of §4:7 to the owner, and §11's "The owner's example", are the coordinator's words. Every other clause stands. This replacement takes effect on ratification of ADR-0391. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-11-27 by [ADR-0391](0391-every-text-carries-the-say-it-was-written-under-a-work-may-do-and-read-only-what-everyone-whose-say-it-holds-may-a-signal-is-anyones-and-a-reply-is-a-send-like-any-other.md) — §4:2, in the addition alone: where the check allows a call for each person whose authority a work carries, a no or a limit for anyone else in its say makes the call need their yes rather than refusing it (ADR-0391 §3:3). §4:7, whole: no message is outside the check; a reply into a place one of the work's own inputs came from is allowed by a reply line, a default grant each kind of place declares (ADR-0391 §6). ADR-0391 §9 also records that §18's credit of §4:7 to the owner, and §11's "The owner's example", are the coordinator's words. Every other clause stands. This replacement takes effect on ratification of ADR-0391. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 

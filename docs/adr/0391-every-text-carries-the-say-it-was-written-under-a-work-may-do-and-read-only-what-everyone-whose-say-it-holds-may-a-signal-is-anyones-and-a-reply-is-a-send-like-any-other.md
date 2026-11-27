@@ -15,7 +15,7 @@
   bounds the `core` types the build makes, so it takes the adversarial and the architecture review.
   Building it is a breaking change under golden rule 5, through the changes §13 names.
 - **Partially supersedes** ADR-0306 (§4:7), ADR-0351 (§4:2, §6:2), ADR-0356 (§7:7), ADR-0367
-  (§4:7), ADR-0368 (§3:2, §3:5, §7:1, §7:5), ADR-0369 (§10:2, §10:3), ADR-0370 (§3:3, §3:4, §5:7,
+  (§4:2, §4:7), ADR-0368 (§3:2, §3:5, §7:1, §7:5), ADR-0369 (§10:2, §10:3), ADR-0370 (§3:3, §3:4, §5:7,
   §5:8), ADR-0371 (§2:1, §2:4 to §2:6, §5:1, §5:4, §8:2) and ADR-0383 (§6:4 to §6:6), each in the
   scope §11 gives.
 
@@ -98,9 +98,11 @@ by everyone whose say a work holds.
 > call is done only where allowed for every one. A work whose say is none carries no authority
 > (ADR-0368 §7:5).
 
-> **Normative.** Where the check allows a call for each person whose authority the work carries but
-> not for another in its say, the call is not refused: it needs their yes, as ADR-0367 §5:3's card,
-> and a yes makes it the tapper's (ADR-0367 §5:5).
+> **Normative.** Where the check allows a call for each person whose authority the work carries,
+> and for anyone else in its say, a person or a stranger, its outcome is not done or needs a yes, the
+> call is not refused: it needs a yes from those whose authority the work carries, on ADR-0367 §5:3's
+> card, and the call under its ticket is checked for the tapper alone (ADR-0367 §5:5). A call the
+> check does not allow for each of those people stays as ADR-0367 §4 and §5 rule it.
 
 > **Normative.** A work reads no more than each person in its say may see and, where its say holds
 > a stranger or is none, no more than anyone may see (ADR-0369 §10:4, ADR-0390 §5:3). The filter
@@ -268,6 +270,7 @@ It needs no vouching detail; which checks qualify and the bar of making it would
 | Clause | Becomes |
 | --- | --- |
 | ADR-0367 §4:7, a message into its input's place outside the check | Whole: a reply passes the check (§6) |
+| ADR-0367 §4:2, no grant means no and asks no one | In the addition alone: a no or a limit for one in a work's say whose authority it does not carry asks, as §3:3 rules |
 | ADR-0306 §4:7 and ADR-0356 §7:7, checked by its place alone | In the addition alone: a reply also passes the check (§6:1) |
 | ADR-0370 §5:7, outside the grant check; §5:8, "every other send" | §5:7's first limb: a reply passes the grant check, its mark check standing. §5:8 reads every send |
 | ADR-0371 §8:2, a reply meets no level | Whole: §6 |
@@ -286,7 +289,8 @@ It needs no vouching detail; which checks qualify and the bar of making it would
 
 Read through and standing: ADR-0366 §5's levels and the default bars; ADR-0371 §3, §4, §6, §7,
 §8:3 (§3:8) and §9; ADR-0372 §3 to §7, with this decision's §8:3 ground under its §6:11; ADR-0368
-§3:6, §6 and §9:8; ADR-0351 §5:6, §6:3 and §6:5; ADR-0367 §5, §6:3, §11 and §12; and ADR-0382
+§3:6, §6 and §9:8; ADR-0351 §5:6, §6:3 and §6:5; ADR-0367 §5, §6:3, §11 and §12; ADR-0379 §3:3,
+which turns each outcome as ADR-0367 §4 and §5 and ADR-0368 §7 rule, as amended here; and ADR-0382
 §2:1, which keeps an approval's outcome message outside the check as its own rule
 ([#3796](https://github.com/leonapivato/ai-assistant/issues/3796) parks bringing it under §6).
 
