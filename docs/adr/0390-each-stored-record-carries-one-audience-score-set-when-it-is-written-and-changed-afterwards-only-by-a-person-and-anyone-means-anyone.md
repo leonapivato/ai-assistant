@@ -18,9 +18,11 @@
   change under golden rule 5, through what §10 names.
 - **Partially supersedes**, as §9 records: ADR-0369 (§2:5, §3:1, §4:1, §5:1 to §5:4, §6:1 to
   §6:3, §7:2 to §7:6, §7:8 to §7:10, §8:1, §9:4, §10:1, §10:4, §14:1 and §14:2, each for a stored
-  record); ADR-0372 (§3:5, §3:8, §4:3, §4:5 and §6:9); and
+  record); ADR-0372 (§3:5, §3:8, §4:3, §4:5 and §6:9);
   [ADR-0217](0217-a-record-carries-who-may-receive-it-and-a-model-may-only-narrow-it.md) (§1:2,
-  §2:1, §3:13 and §3:14, each for a stored record's score).
+  §2:1, §3:13 and §3:14, each for a stored record's score); and
+  [ADR-0383](0383-each-record-carries-its-home-and-every-read-a-work-a-producer-or-a-run-makes-is-of-a-store-bound-to-one-sight-which-answers-as-though-it-held-only-what-that-sight-sees.md)
+  (§6:1 and §6:2, in the addition alone; §8:3, in its ground).
 
 ## Context
 
@@ -32,8 +34,11 @@ ADR-0372 then gave every block and record an audience label, set when said or wr
 decisions on 2026-11-26, the owner expected one, set at write time, adopted one score per stored
 record with live sharing kept for accounts alone, and said that "anyone" means literally anyone.
 
-**Words.** A **stored record** is any record the hub writes into one of its stores, whatever its
-kind; an account's content, which a work reads through the account (ADR-0369 §10:7), is not one.
+**Words.** A **stored record** is a record of a store ADR-0383 §3 gives a home, whatever its
+kind: memories and episodes, stories with their notes and summaries, conversations and messages,
+plan effects and observations, scheduled tasks and approval requests, the person model, and held
+notifications. A record ADR-0383 §3 gives no home is not one, nor is an account's content, which a
+work reads through the account (ADR-0369 §10:7).
 A record's **home** is ADR-0383's; its **home's people** are those ADR-0369 §7:1 says `OWNER`
 denotes for it. A **mark**, **domain**, **sharing rule**, **line**, **reach** and **audience
 label** are ADR-0370's, ADR-0369's and ADR-0372's. A bare section reference, such as §4:1, is to
@@ -72,8 +77,10 @@ only by a person, keep live sharing for accounts alone, and read "anyone" as eve
 ### 3. Set when it is written
 
 > **Normative.** A stored record's score is set when it is written, as ADR-0372 §3:1 to §3:5 set
-> its audience label: for a record a work writes, the narrowest of what was in front of the work,
-> which its mark holds (ADR-0370 §4:1); for a producer's record, the meet ADR-0372 §3:4 takes.
+> its audience label: for a message a person says, the place's start level (§3:1); for a message
+> a work sends, its mark with that place's audience (§3:2); for every other record a work writes,
+> its mark, the narrowest of what was in front of the work (§3:3, ADR-0370 §4:1); and for a
+> producer's record, the meet §3:4 takes.
 
 > **Normative.** A write that changes or folds a stored record, other than an act under §4, gives
 > it the meet of the score it had and the score the write's own rule gives.
@@ -123,8 +130,18 @@ subjecting myself to that risk."
 > read it where its score takes in each of the group's members; and what anyone may see under
 > §10:4 is, of stored records, those scored anyone.
 
-> **Normative.** Code decides who may see a stored record from its home and its score as it
-> stands, and no model decides it or takes part (ADR-0369 §6:3, ADR-0372 §4:6).
+> **Normative.** A read through a bound store (ADR-0383 §6:1) gives back a stored record only where
+> each bound sees it, by its home as ADR-0383 §6:2 has it or by its score: a person bound where
+> they are inside the score; a no-one bound or an anyone bound where the score is anyone; a group
+> bound where the score takes in each of the group's members; and a domain bound by its home alone.
+
+> **Normative.** A stored record that names another stored record, as a member, link, pin, mark,
+> lineage, reply or evidence does (ADR-0383 §8:3), is given back only to a reader who sees every
+> record it names, so that no record a reader is shown names one withheld from them.
+
+> **Normative.** Code decides who may see a stored record from its home, its score as it stands
+> and the records it names, and no model decides it or takes part (ADR-0369 §6:3, ADR-0372
+> §4:6).
 
 ### 6. Accounts keep live sharing
 
@@ -151,7 +168,7 @@ subjecting myself to that risk."
 
 | Built | Decided by | Becomes |
 | --- | --- | --- |
-| `RecordHome` and the sight filter: a record seen where every bound sees its home | ADR-0383, ADR-0386 | Stays as built; the build adds the case where every bound is inside the record's score |
+| `RecordHome` and the sight filter: a record seen where every bound sees its home | ADR-0383, ADR-0386 | Stays as built; the build adds each bound's sight by the score, and withholds a record that names one withheld (§5:4, §5:5) |
 | `Placement`, `PlacementReach`, `PlacementSetter` on every memory and episode | ADR-0217 §1 | The score: `OWNER` the home's people, `ANYONE` anyone, widened to the sets a label names and put on every stored record |
 | `Placement.narrowest_of`, the observer's narrowest placement | ADR-0217 §3:3, ADR-0329 §12:6 | §3:1's meet of scores |
 | `guard` and `unguard` on `AssistantEngine` | ADR-0217 §7 | §4's acts on a memory's score, to the home's people and to anyone; `unguard` widens a `DERIVED` score too (§4:3) |
@@ -162,7 +179,7 @@ subjecting myself to that risk."
 ### 9. Relationship to earlier decisions
 
 > **Normative.** This numbered draft records its replacements on the status lines of ADR-0217,
-> ADR-0369 and ADR-0372 and in a dated header note on each, atomically with this ADR under
+> ADR-0369, ADR-0372 and ADR-0383 and in a dated header note on each, atomically with this ADR under
 > ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on this
 > ADR's ratification.
 
@@ -182,6 +199,8 @@ Superseded, each for a stored record:
 | ADR-0372 §4:5's first sentence, anyone as each person admitted | Anyone literally (§2:3); its second sentence stands, read with §5:3 |
 | ADR-0217 §1:2's reach and §2:1's placement, for who may receive a stored record | The score (§2:2) |
 | ADR-0217 §3:13 and §3:14's *narrows only*, on a `DERIVED` placement | A person widens a score whatever narrowed it, under ADR-0217 §3:17 (§4:3) |
+| ADR-0383 §6:1 and §6:2, a record seen where every bound sees its home | In the addition alone: or where each bound sees it by its score (§5:4) |
+| ADR-0383 §8:3's ground, that a sight sees every record of a home or none | A record naming one a reader does not see is withheld from them, so its conclusion holds (§5:5) |
 
 Read through and standing: ADR-0369 §1, §2, §3:2 to §3:8 and §8:2 for accounts, §7:1, §7:7, §9:1
 to §9:3, §10:2, §10:3, §10:5 to §10:8, §11 to §13; ADR-0372 §2, §3:1 to §3:4, §3:6, §3:7, §4:1,
@@ -195,7 +214,8 @@ takes it to say: §3's rules on the five stored kinds of §3:1's six, §5:4, §7
 which reads a record with no reach as `ANYONE` and with anyone meaning strangers would open every
 record written before scores to them; ADR-0372 §3:5 and §3:8, which let nothing but a standing
 change widen a label; ADR-0217 §3:13, under which no person's act could open a record made from a
-calendar later shared; and the reduced forms, which a rule on a stored kind alone could open.
+calendar later shared; and the reduced forms, which a rule on a stored kind alone could open. And
+ADR-0383 §6:1, §6:2 and §8:3, written for a sight that sees a home whole, had to admit a score.
 
 ### 10. What building it needs
 
@@ -206,7 +226,8 @@ Named so milestone 23 is scoped; none is made here.
   field replacing it; a record with none decoded as its home's people (§3:5); `PlacementSetter`'s
   precedence admitting a widened `DERIVED` (§4:3).
 - **Stores:** each writes the score with the record, set at each write site by §3; the bound
-  stores' sight (ADR-0383 §6) also sees a record whose score takes in every bound.
+  stores' sight (ADR-0383 §6) sees by each bound's home or score, and withholds a record that names
+  one it withholds (§5:4, §5:5).
 - **Engine members:** a person's acts to narrow and widen one record's score in their domain, at
   ADR-0369 §5:2's and §5:3's bars, `guard` and `unguard` becoming the owner's two on a memory;
   and, for the offer, a way to find the records written from an account or said in a place, read
@@ -235,7 +256,8 @@ different, but it gets treated as if its a stranger, no?" (§2:3).
 to §3:5, a change or fold, a run, a record brought in, and a record with no score; that §4:1's
 person is whoever holds the data rights, and that a model's narrowing under ADR-0372 §3:6 stands
 beside a person's act; §4:2's bars; §4:3, that a `DERIVED` narrowing widens; §4:4; §5, that no
-line, limit on a stored kind or reduced form is read for a stored record; that §6:2 keeps ADR-0369
+line, limit on a stored kind or reduced form is read for a stored record, how each bound sees by
+the score, and that a record naming a withheld one is withheld; that §6:2 keeps ADR-0369
 §3 and §8 whole for an account; which changes of sharing bring the offer (§7:1); §8's
 dispositions; and every row of §9 beyond the six clauses the record names.
 
@@ -272,6 +294,8 @@ dispositions; and every row of §9 beyond the six clauses the record names.
 - **Keep live sharing rules on stored kinds beside the score.** Set aside by the owner's ruling.
 - **Keep `DERIVED` unliftable for ADR-0204 §2's own ground.** Not taken: the ruling has a person
   change any score, and ADR-0217 §3:17 and ADR-0199 §3 keep the classes back whatever it is.
+- **Show a record and leave out what it names that a reader may not see.** Not taken: it
+  composes a value and then removes part of it, which ADR-0217 §2:4 bars.
 - **A second score for a reduced form.** Not taken: it is two scores on one record.
 - **A record with no score read as anyone,** as ADR-0369 §7:9 has it. Not taken: anyone now takes
   in strangers.
