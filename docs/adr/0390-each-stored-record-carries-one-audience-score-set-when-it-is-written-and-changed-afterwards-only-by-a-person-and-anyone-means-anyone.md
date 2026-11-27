@@ -1,6 +1,6 @@
 # 390. Each stored record carries one audience score, set when it is written and changed afterwards only by a person, and anyone means anyone
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-27
 - Scope: an amending decision on the audience side of
   [ADR-0369](0369-a-record-lands-in-the-domain-of-whom-its-work-is-for-sharing-rules-open-a-domain-and-default-to-private-every-read-is-filtered-to-who-may-see-and-each-person-sees-deletes-and-exports-their-own.md)
