@@ -200,8 +200,9 @@ showed (§2:4, §2:8). On Sam's yes it runs under its ticket (ADR-0361 §5, ADR-
 
 > **Normative.** An input holding such words, or marked relayed, carries the authority ADR-0368
 > §3:2 gives its author where its author is established as that person and sent it as an
-> instruction, its parties being that person and, for a forward or a quote, those words' writers:
-> the words add a stranger to the work's say and take no authority away. They carry none of their own (ADR-0351 §6:2).
+> instruction, its parties being that person, the writers of such words, or both, so a forward
+> sent on its own counts (ADR-0351 §3): the words add a stranger to the work's say and take no
+> authority away. They carry none of their own (ADR-0351 §6:2).
 
 > **Normative.** No work carries no authority for its say. ADR-0368 §7:5 holds for a work whose
 > facts give none, an approval's outcome's and upkeep's among them, and ADR-0391 §6:4 for those.
@@ -226,14 +227,18 @@ reach nothing.
 > **Normative.** A memory's score is still set when it is written as ADR-0390 §3 rules, changed by
 > a write as §3:2 rules, and changed by a person's act as §4 rules.
 
-> **Normative.** Until that decision, a reader sees a memory by its home alone (ADR-0383 §6:2), not
-> by its score (ADR-0390 §5:4), so no memory a reader is shown names a record the reader does not
+> **Normative.** Until that decision, a reader sees by its home alone (ADR-0383 §6:2), not by its
+> score (ADR-0390 §5:4), a memory, every stored record that names a memory, and every stored record
+> that names a record seen so, so no record a reader is shown names a record the reader does not
 > see (ADR-0383 §8:3).
 
 Between every two stored records neither of which is a memory, episodes among them, ADR-0390 §5:5
 holds as written. §7:3 is this decision's: ADR-0390 §9 rests ADR-0383 §8:3's conclusion on §5:5,
-and without §5:5 a memory seen by its score could name an episode its reader does not see. A
-memory's score still bounds whom it may be sent to (ADR-0390 §2:2).
+and without §5:5 a memory seen by its score could name an episode its reader does not see, and a
+pin seen by its score a memory. A name joins records of one home (ADR-0383 §4:7), so a reader who
+sees one record by its home sees every record it names, and a record seen by its score names none
+seen by its home alone. A record §7:3 reaches keeps its score, which still bounds whom it may be
+sent to (ADR-0390 §2:2).
 
 ### 8. Relationship to earlier decisions
 
@@ -250,9 +255,9 @@ memory's score still bounds whom it may be sent to (ADR-0390 §2:2).
 | ADR-0391 §3:3's last sentence, a call not allowed for those whose authority the work carries | In the addition alone: one short on both grounds takes one first card (§2:3) |
 | ADR-0391 §2:1's and §3:1's none; §2:6, unestablished words none; §5:2's *none otherwise*; §8:2's *to none* | A stranger's say (§6:1 to §6:3) |
 | ADR-0391 §3:2's *a work whose say is none carries no authority* | Reaches no work (§6:5) |
-| ADR-0351 §6:1, the parties condition; §6:5, a relayed input carries no authority | In the addition alone: a forwarded, quoted or relayed party, or a relay mark, adds a stranger to the say, and the input carries its author's authority (§6:4) |
-| ADR-0368 §3:2, its parties the person alone; §7:1's table, a forward or relayed input carrying none | In the addition alone: and those words' writers, as a stranger (§6:4) |
-| ADR-0390 §5:5, the score along names; §5:4, sight by score | Not for a memory, until a later decision (§7:1, §7:3) |
+| ADR-0351 §6:1, the parties condition; §6:5, a relayed input carries no authority | In the addition alone: a forwarded, quoted or relayed party, or a relay mark, adds a stranger to the say, and the input, its parties its author, such words' writers or both, carries its author's authority (§6:4) |
+| ADR-0368 §3:2, its parties the person alone; §7:1's table, a forward or relayed input carrying none | In the addition alone: or those words' writers, or both, the writers as a stranger (§6:4) |
+| ADR-0390 §5:5, the score along names; §5:4, sight by score | Until a later decision, §5:5 not for a memory (§7:1), and §5:4 not for a memory, a record naming one or a record naming a record so seen (§7:3) |
 
 Read through and standing: ADR-0367 §4:1, §4:2, §4:5, §5:1 to §5:6, §10:3, §12:1 and §16; ADR-0379
 §2 to §4; ADR-0381 §5 and §6; ADR-0370 §5:3, §5:5 and §5:9; ADR-0391 §2:4, §2:5, §3:4, §5:1, §5:3,
@@ -271,8 +276,11 @@ stranger's"; §6 takes it, and the review session records that the "nobody's" wo
 | `check_runs_for` in `orchestration/work_facts.py`: a work holding a relayed input, or whose input is not its sender's own words, runs for no one | ADR-0351 §6:1, §6:5; ADR-0368 §7:5 | Runs for its author and a member of anyone (§6:4) |
 
 The mark (ADR-0370) and scores (ADR-0390) are not built, so §2:7, §2:8 and §7 change no code; §7
-takes from milestone 23's build what ADR-0390 §10 named for memories: the score along names, and
-the sight by score. For one owner on their own chats, one thing changes once built: a forward, or
+takes from milestone 23's build, of what ADR-0390 §10 named, the score along names for memories
+and the sight by score for every record §7:3 reaches. Of what is stored today, a memory is named
+by a person's pins, style marks and pin suggestions (`person_model.db`), by an episode's recall
+runs and its calls' shown results (`memory.db`), and by an observation record's findings
+(`plans.db`). For one owner on their own chats, one thing changes once built: a forward, or
 words their model marks relayed, no longer leaves the work unable to make any call the check
 reaches; a call a stranger may make runs, and one only the owner may make comes to them on a card.
 Nothing else: every record names the owner (ADR-0381), so no second card names another person, and
@@ -292,8 +300,9 @@ Named so the build is scoped, and made by none of this decision.
   the ceiling once ADR-0371 §6 or ADR-0391 §3 makes the check's level or say differ from it (§4:1);
   `check_runs_for` and the facts it reads giving a forward's and a relayed input's work its author's
   authority and a stranger (§6:4).
-- **Stores:** of ADR-0390 §10's, the memory store's score along names and its sight by score wait
-  (§7); the memory store writes a memory's score as §3 has it.
+- **Stores:** of ADR-0390 §10's, the memory store's score along names waits, and each store's
+  sight by score waits for every record §7:3 reaches (§7); the memory store writes a memory's score
+  as §3 has it.
 
 ### 11. What this decision leaves to others
 
@@ -301,8 +310,9 @@ Named so the build is scoped, and made by none of this decision.
   work; whether one card covers any yes beyond the mark's and the first check's, and the two where
   whom the work is for is not the person whose authority it carries; every bar.
 - **A later decision:** how a memory is written, with the scout and commit calls, and ADR-0390 §5:5
-  and §5:4 for memories (§7); rows 1 and 4 to 6 of the round-three record and every group ruling;
-  ADR-0391 §10's two points; how a work that is no person's asks (ADR-0368 §7:4).
+  and §5:4 for memories and the records §7:3 reaches (§7); rows 1 and 4 to 6 of the round-three
+  record and every group ruling; ADR-0391 §10's two points; how a work that is no person's asks
+  (ADR-0368 §7:4).
 - **The next prompt review:** how each card's outcome is worded to a model (ADR-0367 §3:7).
 
 > **Normative.** This decision may not be cited to settle any matter the list above leaves to
@@ -344,7 +354,8 @@ is party to, and §7:3; and §8 to §11.
 - A work is shown what its person could do or ask for, so a falling score hides nothing.
 - A forward or relayed words bound a work to what a stranger may do and see, and a card gets back
   what its author may do; they never cost it everything.
-- Until memories are written by their own design, a memory is seen by its home alone.
+- Until memories are written by their own design, a memory, and every record that names one or
+  names a record so seen, is seen by its home alone.
 - **Revisit** once a second person's cards are built, or once the memory decision lands (§7).
 - **Set aside:** a card to the sender wherever only a default grant allows a message (it asks no one
   who can supply anything); hiding a tool whose permission only asks (the model could not ask); and

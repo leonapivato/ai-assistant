@@ -1,6 +1,6 @@
 # 390. Each stored record carries one audience score, set when it is written and changed afterwards only by a person, and anyone means anyone
 
-- Status: Partially superseded by ADR-0392 (§5:4 and §5:5, for a memory alone, until a later decision: the rule along names does not hold where a memory names or is named, and a memory is seen by its home alone)
+- Status: Partially superseded by ADR-0392 (§5:5, for a memory alone, and §5:4, for a memory and the records naming one, until a later decision: the rule along names does not hold where a memory names or is named, and a memory, every record naming one and every record naming a record so seen are seen by their home alone)
 - Date: 2026-11-27
 - Scope: an amending decision on the audience side of
   [ADR-0369](0369-a-record-lands-in-the-domain-of-whom-its-work-is-for-sharing-rules-open-a-domain-and-default-to-private-every-read-is-filtered-to-who-may-see-and-each-person-sees-deletes-and-exports-their-own.md)
@@ -24,7 +24,7 @@
   §2:1, §3:13 and §3:14, each for a stored record's score); and
   [ADR-0383](0383-each-record-carries-its-home-and-every-read-a-work-a-producer-or-a-run-makes-is-of-a-store-bound-to-one-sight-which-answers-as-though-it-held-only-what-that-sight-sees.md)
   (§6:1 and §6:2, in the addition alone; §8:3, in its ground).
-- Partially superseded: 2026-11-27 by [ADR-0392](0392-two-checks-on-a-call-and-one-card-for-the-first-and-the-mark-every-tool-within-the-authority-a-work-carries-unestablished-words-a-strangers-and-memories-outside-the-rule-along-names.md) — §5:5, for a memory alone, until a later decision on how a memory is written: it does not hold where the record naming or the record named is a memory; and §5:4, for a memory alone, until then: a reader sees a memory by its home, not by its score (ADR-0392 §7). A memory's score is still set and changed as §3 and §4 rule. Every other clause stands. This replacement takes effect on ratification of ADR-0392. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
+- Partially superseded: 2026-11-27 by [ADR-0392](0392-two-checks-on-a-call-and-one-card-for-the-first-and-the-mark-every-tool-within-the-authority-a-work-carries-unestablished-words-a-strangers-and-memories-outside-the-rule-along-names.md) — §5:5, for a memory alone, until a later decision on how a memory is written: it does not hold where the record naming or the record named is a memory; and §5:4, until then, for a memory, every stored record that names a memory and every stored record that names a record so seen: a reader sees each by its home, not by its score (ADR-0392 §7). Each such record's score is still set and changed as §3 and §4 rule. Every other clause stands. This replacement takes effect on ratification of ADR-0392. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
