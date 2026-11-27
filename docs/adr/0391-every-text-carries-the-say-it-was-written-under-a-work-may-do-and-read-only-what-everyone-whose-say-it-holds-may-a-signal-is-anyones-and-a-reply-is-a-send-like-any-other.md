@@ -1,6 +1,6 @@
 # 391. Every text carries the say it was written under, a work may do and read only what everyone whose say it holds may, a signal is anyone's, and a reply is a send like any other
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0392 (§3:3, in the addition alone: a call short on both its level and its say takes one first card)
 - Date: 2026-11-27
 - Scope: the amending decision on the authority side of ADR-0365 to ADR-0372, from the walk of
   2026-11-22 and 2026-11-23 and the review of 2026-11-26: the say a text carries (§2), a work's say
@@ -18,6 +18,7 @@
   (§4:2, §4:7), ADR-0368 (§3:2, §3:5, §7:1, §7:5), ADR-0369 (§10:2, §10:3), ADR-0370 (§3:3, §3:4, §5:7,
   §5:8), ADR-0371 (§2:1, §2:4 to §2:6, §5:1, §5:4, §8:2) and ADR-0383 (§6:4 to §6:6), each in the
   scope §11 gives.
+- Partially superseded: 2026-11-27 by [ADR-0392](0392-a-call-passes-two-checks-in-order-whether-the-work-may-call-the-tool-and-whether-the-tool-may-run-and-a-work-is-shown-every-tool-within-the-authority-it-carries.md) — §3:3, in the addition alone: a call that falls short both of a covering grant's bar for those whose authority the work carries and for another in its say takes one card, ADR-0367 §5:3's at the bar ADR-0379 §2:5 gives, and its ticket's call is checked for the tapper alone (ADR-0392 §2:3). Every other clause stands. This replacement takes effect on ratification of ADR-0392. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
