@@ -89,8 +89,9 @@ as merged. This decision adds nothing to either.
 ### 3. A card to the person whose work it is
 
 > **Normative.** A call that no grant covers for the person whose authority the work carries, or
-> that a limit covers for them, is not done and asks no one (ADR-0367 §4:2): no card to that person
-> stands in for a grant they lack.
+> that a limit covers for them, is not done and asks no one (ADR-0367 §4:2), save the card ADR-0367
+> §6:3 sends to the person whose own account it would act through: no card to the person whose
+> authority the work carries stands in for a grant they lack.
 
 > **Normative.** No card to the person whose authority a work carries makes a call allowed beyond
 > what the lines allow that person at the tap's level (ADR-0367 §5:5, §10:3), and none stands in
@@ -102,9 +103,9 @@ as merged. This decision adds nothing to either.
 
 The first card is no card to oneself in the owner's sense: it brings the work back up to its
 person's own authority, which a fall in its level (ADR-0371 §6:1) or its say (ADR-0391 §3:1) took
-it below, and never above it. ADR-0367 §5:3's card and ADR-0391 §3:3's stand, the latter as §2:3 adds to it. A second card that
-names the work's own person, for a call with no thing or a thing of theirs, is the second check:
-their own grant asks, and the yes lifts nothing.
+it below, and never above it. ADR-0367 §5:3's card and ADR-0391 §3:3's stand, the latter as §2:3
+adds to it. A second card that names the work's own person, for a call with no thing or a thing of
+theirs, is the second check: their own grant asks, and the yes lifts nothing.
 
 No policy rules a `text` call in the merged texts (ADR-0356 §7:7, as ADR-0367 §4:7 and ADR-0391 §6:1
 amend it), and the built authorizer hands none to the policy, so ADR-0021 §5's floor never reached
@@ -130,9 +131,10 @@ its person's yes (ADR-0379 §3).
 > **Normative.** A tool a grant lets the ceiling's person only ask for is shown, and its call takes
 > the second card.
 
-> **Normative.** A tool on which no call could be allowed for the ceiling by the check or either
-> card is not shown: no grant covers it, a limit covers it, or the yes it needs is no one's
-> (ADR-0381 §5:2, §6:3) or cannot be asked in that work (ADR-0368 §7:4).
+> **Normative.** A tool on which no call could be allowed in any of §4:2's ways is not shown: one
+> no grant covers for the ceiling, or a limit covers, or whose yes is no one's (ADR-0381 §5:2,
+> §6:3) or cannot be asked in that work (ADR-0368 §7:4), where the work holds no ticket that could
+> run a call of it and the check reaches it.
 
 ADR-0368 §8:2 and §8:3 read *could use* as §4:2 has it, and ADR-0368 §8:4 to §8:6 stand. Its "at
 its level" was the sureness ADR-0368 §2:3 records, which §4:1 keeps.
