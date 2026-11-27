@@ -1,6 +1,6 @@
 # 392. Two checks on a call and one card for the first and the mark, every tool within the authority a work carries, unestablished words a stranger's, and memories outside the rule along names
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-27
 - Scope: the amending decision from the owner's rulings of 2026-11-27: rows 2 and 3 of the third
   round of their review of ADR-0365 to ADR-0372, and their reading of ADR-0390, ADR-0391 and this
